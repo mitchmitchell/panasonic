@@ -32,8 +32,8 @@ pub use route_table::{
 pub use scope::{scopes_for_role, Scope, ScopeSet};
 pub use token_id::TokenId;
 pub use types::{
-    ApplyJob, ApplyPlanAccepted, ApplyPlanApprovalRequired, BackupInfo, BackupList, DaemonStatus,
-    FieldValue, JobId, JobState, PlanChangeRequest, PlanSummary, ReadFieldsRequest,
-    ReadFieldsResponse, RequestedBy, SubmitApprovalRequest,
+    ApplyApprovalRequiredResult, ApplyJob, ApplyPlanAwaitingStatus, BackupInfo, BackupList,
+    DaemonStatus, FieldValue, JobId, JobRef, JobState, PlanChangeRequest, PlanSummary,
+    ReadFieldsRequest, ReadFieldsResponse, RequestedBy, SubmitApprovalParams,
 };
 pub use write_gates::prod_profile_write_gates_active;

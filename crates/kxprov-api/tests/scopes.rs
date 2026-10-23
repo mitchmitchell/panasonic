@@ -1,6 +1,7 @@
 use kxprov_api::{
-    ApiError, CallerIdentity, DaemonBackend, DiffHash, McpTokenIdentity, MockDaemon, Mode,
-    PlanChangeRequest, Profile, Scope, ScopeSet, TokenId,
+    ApiError, ApplyApprovalRequiredResult, ApplyPlanAwaitingStatus, CallerIdentity, DaemonBackend,
+    DiffHash, McpTokenIdentity, MockDaemon, Mode, PlanChangeRequest, Profile, Scope, ScopeSet,
+    TokenId,
 };
 
 fn tester() -> CallerIdentity {
@@ -96,10 +97,10 @@ async fn prod_profile_apply_without_approval_returns_status_only() {
         .expect_err("needs approval");
     assert!(matches!(
         err,
-        ApiError::ApprovalRequired {
-            status: "approval_required",
+        ApiError::ApprovalRequired(ApplyApprovalRequiredResult {
+            status: ApplyPlanAwaitingStatus::ApprovalRequired,
             ..
-        }
+        })
     ));
 }
 
@@ -122,9 +123,9 @@ async fn submit_approval_then_apply_succeeds_on_prod_profile() {
     let plan = sample_plan(&daemon).await;
     assert!(matches!(
         daemon
-            .apply_plan(&comms(), plan.plan_id, plan.diff_hash.clone())
+            .apply_plan(&comms(), plan.plan_id.clone(), plan.diff_hash.clone())
             .await,
-        Err(ApiError::ApprovalRequired { .. })
+        Err(ApiError::ApprovalRequired(_))
     ));
     submit_for_plan(&daemon, &plan, &Profile::prod()).await;
     let job = daemon
@@ -140,7 +141,7 @@ async fn submit_approval_accepts_eight_hex_prefix() {
     enable_prod_live_writes(&daemon).await;
     let plan = sample_plan(&daemon).await;
     let _ = daemon
-        .apply_plan(&comms(), plan.plan_id, plan.diff_hash.clone())
+        .apply_plan(&comms(), plan.plan_id.clone(), plan.diff_hash.clone())
         .await;
     let prefix = &plan.plan_id.to_hex()[..8];
     daemon
@@ -163,7 +164,7 @@ async fn submit_rejects_diff_hash_mismatch() {
             .submit_approval(
                 &approver(),
                 &plan.plan_id.to_hex(),
-                DiffHash([0u8; 32]),
+                DiffHash("0000000000000000000000000000000000000000000000000000000000000000".into()),
                 &Profile::prod(),
             )
             .await,
@@ -215,7 +216,7 @@ async fn approver_cannot_approve_own_plan() {
         .await
         .expect("plan");
     let _ = daemon
-        .apply_plan(&solo, plan.plan_id, plan.diff_hash.clone())
+        .apply_plan(&solo, plan.plan_id.clone(), plan.diff_hash.clone())
         .await;
     let approver_same = CallerIdentity::Mcp(McpTokenIdentity {
         token_id: TokenId("solo-token".into()),
@@ -258,18 +259,18 @@ async fn approval_is_single_use_on_prod_profile() {
     enable_prod_live_writes(&daemon).await;
     let plan = sample_plan(&daemon).await;
     let _ = daemon
-        .apply_plan(&comms(), plan.plan_id, plan.diff_hash.clone())
+        .apply_plan(&comms(), plan.plan_id.clone(), plan.diff_hash.clone())
         .await;
     submit_for_plan(&daemon, &plan, &Profile::prod()).await;
     daemon
-        .apply_plan(&comms(), plan.plan_id, plan.diff_hash.clone())
+        .apply_plan(&comms(), plan.plan_id.clone(), plan.diff_hash.clone())
         .await
         .expect("first apply");
     assert!(matches!(
         daemon
             .apply_plan(&comms(), plan.plan_id, plan.diff_hash)
             .await,
-        Err(ApiError::ApprovalRequired { .. })
+        Err(ApiError::ApprovalRequired(_))
     ));
 }
 
@@ -293,7 +294,7 @@ async fn submit_approval_rate_limit() {
             .await
             .expect("plan");
         let _ = daemon
-            .apply_plan(&comms(), plan.plan_id, plan.diff_hash.clone())
+            .apply_plan(&comms(), plan.plan_id.clone(), plan.diff_hash.clone())
             .await;
         daemon
             .submit_approval(

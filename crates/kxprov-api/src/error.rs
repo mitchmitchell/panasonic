@@ -1,4 +1,4 @@
-use crate::plan::{DiffHash, PlanId};
+use crate::types::ApplyApprovalRequiredResult;
 
 use thiserror::Error;
 
@@ -11,11 +11,7 @@ pub enum ApiError {
     #[error("unauthorized")]
     Unauthorized,
     #[error("approval required")]
-    ApprovalRequired {
-        plan_id: PlanId,
-        diff_hash: DiffHash,
-        status: &'static str,
-    },
+    ApprovalRequired(ApplyApprovalRequiredResult),
     #[error("rollback approval required")]
     RollbackApprovalRequired { job_id: String },
     #[error("approval invalid or expired")]

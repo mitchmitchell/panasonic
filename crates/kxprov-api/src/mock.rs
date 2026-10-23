@@ -145,7 +145,7 @@ impl MockDaemon {
 
     fn validate_plan_approval(
         stored: &StoredApproval,
-        plan_id: PlanId,
+        plan_id: &PlanId,
         diff_hash: &DiffHash,
         profile: &Profile,
     ) -> Result<(), ApiError> {
@@ -155,7 +155,7 @@ impl MockDaemon {
         if stored.approval.expires_at < OffsetDateTime::now_utc() {
             return Err(ApiError::InvalidApproval);
         }
-        if stored.approval.plan_id != plan_id
+        if &stored.approval.plan_id != plan_id
             || stored.approval.diff_hash != *diff_hash
             || stored.approval.profile != *profile
         {
@@ -210,7 +210,7 @@ fn plan_summary_from(
         .format(&time::format_description::well_known::Rfc3339)
         .unwrap_or_else(|_| "unknown".into());
     PlanSummary {
-        plan_id: *plan_id,
+        plan_id: plan_id.clone(),
         diff_hash: diff_hash.clone(),
         summary: summary_text.to_string(),
         expires_at,
@@ -224,7 +224,10 @@ impl DaemonBackend for MockDaemon {
         Self::require_scope(caller, Scope::Read)?;
         let inner = self.inner.read().await;
         Ok(DaemonStatus {
-            profile: inner.profile.0.clone(),
+            profile: serde_json::to_string(&inner.profile)
+                .unwrap_or_else(|_| "\"test\"".into())
+                .trim_matches('"')
+                .to_string(),
             simulator: true,
             mode: inner.mode,
             locked: false,
@@ -276,7 +279,7 @@ impl DaemonBackend for MockDaemon {
     ) -> Result<PlanSummary, ApiError> {
         Self::require_scope(caller, Scope::Plan)?;
         let inner = self.inner.read().await;
-        let profile = inner.profile.clone();
+        let profile = inner.profile;
         drop(inner);
         let creator = caller.token_id().cloned();
         let plan = ImmutablePlan::from_request(profile, req, creator)?;
@@ -288,7 +291,7 @@ impl DaemonBackend for MockDaemon {
             },
             token_id: id.clone(),
         });
-        let plan_id = plan.id;
+        let plan_id = plan.id.clone();
         let diff_hash = plan.diff_hash.clone();
         let summary = plan_summary_from(&plan_id, &diff_hash, &summary_text, &requested_by, &plan);
         let mut inner = self.inner.write().await;
@@ -337,7 +340,7 @@ impl DaemonBackend for MockDaemon {
                 day_count: 0,
             });
         Self::check_submit_rate(rate)?;
-        let approval = Approval::new(plan_id, diff_hash, inner.profile.clone(), approver.clone());
+        let approval = Approval::new(plan_id, diff_hash, inner.profile, approver.clone());
         inner.plan_approvals.insert(
             approval.id.0.clone(),
             StoredApproval {
@@ -356,7 +359,7 @@ impl DaemonBackend for MockDaemon {
     ) -> Result<ApplyJob, ApiError> {
         Self::require_scope(caller, Scope::Write)?;
         let mut inner = self.inner.write().await;
-        let active_profile = inner.profile.clone();
+        let active_profile = inner.profile;
         if prod_profile_write_gates_active(&active_profile) && !inner.live_writes_approved {
             return Err(ApiError::LiveWritesBlocked);
         }
@@ -373,15 +376,17 @@ impl DaemonBackend for MockDaemon {
 
         if prod_profile_write_gates_active(&profile) {
             let key = inner.plan_approvals.iter().find_map(|(id, stored)| {
-                Self::validate_plan_approval(stored, plan_id, &diff_hash, &profile).ok()?;
+                Self::validate_plan_approval(stored, &plan_id, &diff_hash, &profile).ok()?;
                 Some(id.clone())
             });
             let Some(approval_key) = key else {
-                return Err(ApiError::ApprovalRequired {
-                    plan_id,
-                    diff_hash,
-                    status: "approval_required",
-                });
+                return Err(ApiError::ApprovalRequired(
+                    crate::types::ApplyApprovalRequiredResult {
+                        plan_id,
+                        diff_hash,
+                        status: crate::types::ApplyPlanAwaitingStatus::ApprovalRequired,
+                    },
+                ));
             };
             let stored = inner
                 .plan_approvals

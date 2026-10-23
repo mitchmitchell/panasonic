@@ -89,23 +89,30 @@ pub struct ApplyJob {
     pub message: String,
 }
 
-/// MCP / API success body for `apply_plan` (v2.11).
+/// MCP / API success body for `apply_plan` (v2.11, matches A3 `JobRef`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ApplyPlanAccepted {
-    pub job_id: JobId,
+pub struct JobRef {
+    pub job_id: String,
 }
 
-/// MCP / API body when prod-profile approval is missing (v2.11).
+/// Returned when apply is blocked pending approval (v2.11).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ApplyPlanApprovalRequired {
+pub struct ApplyApprovalRequiredResult {
     pub plan_id: PlanId,
     pub diff_hash: DiffHash,
-    pub status: String,
+    pub status: ApplyPlanAwaitingStatus,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApplyPlanAwaitingStatus {
+    ApprovalRequired,
 }
 
 /// MCP `submit_approval` request (v2.11).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SubmitApprovalRequest {
+pub struct SubmitApprovalParams {
+    /// Full 32-hex plan id or exactly 8-hex prefix (v2.11).
     pub plan_id: String,
     pub diff_hash: DiffHash,
     pub profile: Profile,

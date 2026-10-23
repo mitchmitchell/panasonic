@@ -1,15 +1,17 @@
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::fmt;
 use time::OffsetDateTime;
 
 use crate::error::ApiError;
 use crate::profile::Profile;
 use crate::types::PlanChangeRequest;
 
-/// 128-bit random plan identifier (F1).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct PlanId(pub u128);
+/// 128-bit random plan identifier (hex).
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct PlanId(pub String);
 
 impl Default for PlanId {
     fn default() -> Self {
@@ -21,44 +23,62 @@ impl PlanId {
     pub fn new() -> Self {
         let mut bytes = [0u8; 16];
         rand::thread_rng().fill_bytes(&mut bytes);
-        Self(u128::from_be_bytes(bytes))
+        Self(hex::encode(bytes))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
     }
 
     pub fn to_hex(&self) -> String {
-        format!("{:032x}", self.0)
+        self.0.clone()
     }
 
     pub fn from_hex(hex_str: &str) -> Result<Self, ApiError> {
-        let id = u128::from_str_radix(hex_str.trim(), 16)
-            .map_err(|_| ApiError::BadRequest("plan_id"))?;
-        Ok(Self(id))
+        let trimmed = hex_str.trim();
+        if trimmed.len() != 32 || !trimmed.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(ApiError::BadRequest("plan_id"));
+        }
+        Ok(Self(trimmed.to_ascii_lowercase()))
     }
 }
 
-/// SHA-256 over canonical plan bytes (profile, table, blocks, base/new bytes).
+impl fmt::Display for PlanId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// SHA-256 over canonical plan bytes (hex).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct DiffHash(pub [u8; 32]);
+#[serde(transparent)]
+pub struct DiffHash(pub String);
 
 impl DiffHash {
     pub fn from_canonical_bytes(bytes: &[u8]) -> Self {
-        let digest = Sha256::digest(bytes);
-        let mut out = [0u8; 32];
-        out.copy_from_slice(&digest);
-        Self(out)
+        Self(hex::encode(Sha256::digest(bytes)))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
     }
 
     pub fn to_hex(&self) -> String {
-        hex::encode(self.0)
+        self.0.clone()
     }
 
     pub fn from_hex(hex_str: &str) -> Result<Self, ApiError> {
-        let bytes = hex::decode(hex_str.trim()).map_err(|_| ApiError::BadRequest("diff_hash"))?;
-        if bytes.len() != 32 {
-            return Err(ApiError::BadRequest("diff_hash length"));
+        let trimmed = hex_str.trim();
+        if trimmed.len() != 64 || !trimmed.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(ApiError::BadRequest("diff_hash"));
         }
-        let mut out = [0u8; 32];
-        out.copy_from_slice(&bytes);
-        Ok(DiffHash(out))
+        Ok(Self(trimmed.to_ascii_lowercase()))
+    }
+}
+
+impl fmt::Display for DiffHash {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
     }
 }
 
@@ -69,7 +89,7 @@ pub fn canonical_plan_bytes(
 ) -> Result<Vec<u8>, ApiError> {
     #[derive(Serialize)]
     struct Canonical<'a> {
-        profile: &'a str,
+        profile: Profile,
         table: u8,
         record: u16,
         field: &'a str,
@@ -78,7 +98,7 @@ pub fn canonical_plan_bytes(
         new_bytes: &'a [u8],
     }
     let body = Canonical {
-        profile: &profile.0,
+        profile: *profile,
         table: request.table,
         record: request.record,
         field: &request.field,

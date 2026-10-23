@@ -1,15 +1,26 @@
 use serde::{Deserialize, Serialize};
 
-/// Active daemon profile (`test` or `prod` in production configs).
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct Profile(pub String);
+/// Profile banner (SIM / TEST / PROD) — wire shape matches A3 `kxprov-api` ids.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Profile {
+    Sim,
+    Test,
+    Prod,
+}
 
 impl Profile {
     pub fn test() -> Self {
-        Self("test".into())
+        Self::Test
     }
 
     pub fn prod() -> Self {
-        Self("prod".into())
+        Self::Prod
+    }
+
+    pub fn parse_wire(s: &str) -> Result<Self, crate::error::ApiError> {
+        let trimmed = s.trim();
+        serde_json::from_value(serde_json::Value::String(trimmed.into()))
+            .map_err(|_| crate::error::ApiError::BadRequest("profile"))
     }
 }

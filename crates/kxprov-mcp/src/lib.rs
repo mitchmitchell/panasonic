@@ -2,8 +2,8 @@ use std::borrow::Cow;
 use std::sync::Arc;
 
 use kxprov_api::{
-    ApiError, ApplyPlanAccepted, CallerIdentity, DaemonBackend, DiffHash, JobId, PlanChangeRequest,
-    PlanId, Profile, ReadFieldsRequest,
+    ApiError, ApplyApprovalRequiredResult, CallerIdentity, DaemonBackend, DiffHash, JobId, JobRef,
+    PlanChangeRequest, PlanId, Profile, ReadFieldsRequest,
 };
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
@@ -164,19 +164,14 @@ impl KxMcpServer {
         let plan_id = PlanId::from_hex(&params.plan_id).map_err(api_err)?;
         let diff_hash = DiffHash::from_hex(&params.diff_hash).map_err(api_err)?;
         match self.backend.apply_plan(&caller, plan_id, diff_hash).await {
-            Ok(job) => Ok(text_json(ApplyPlanAccepted { job_id: job.job_id })),
-            Err(ApiError::ApprovalRequired {
-                plan_id,
-                diff_hash,
-                status,
-            }) => Ok(CallToolResult::success(vec![ContentBlock::text(
-                serde_json::json!({
-                    "plan_id": plan_id.to_hex(),
-                    "diff_hash": diff_hash.to_hex(),
-                    "status": status,
-                })
-                .to_string(),
-            )])),
+            Ok(job) => Ok(text_json(JobRef {
+                job_id: job.job_id.0,
+            })),
+            Err(ApiError::ApprovalRequired(body)) => Ok(text_json(ApplyApprovalRequiredResult {
+                plan_id: body.plan_id,
+                diff_hash: body.diff_hash,
+                status: body.status,
+            })),
             Err(e) => Err(api_err(e)),
         }
     }
@@ -190,7 +185,7 @@ impl KxMcpServer {
     ) -> Result<CallToolResult, ErrorData> {
         let caller = Self::caller()?;
         let diff_hash = DiffHash::from_hex(&params.diff_hash).map_err(api_err)?;
-        let profile = Profile(params.profile);
+        let profile = Profile::parse_wire(&params.profile).map_err(api_err)?;
         let approval = self
             .backend
             .submit_approval(&caller, &params.plan_id, diff_hash, &profile)
