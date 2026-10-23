@@ -8,7 +8,7 @@
 use kxtd1232::fields::{encode_cid_name, encode_cid_number, encode_ext_name};
 use kxtd1232::frame::{checksum, Cmd, BUSY_FRAME};
 use kxtd1232::tables;
-use kxtd1232::{SignOn, Transport, TransportError};
+use kxtd1232::{LinkDownError, SignOn, Transport, TransportError};
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -508,9 +508,16 @@ impl Transport for SimTransport {
                     self.sim.lock().expect("sim pbx lock").feed(data);
                 }
                 self.link_down = true;
-                return Err(TransportError::LinkDown(
-                    "sim: link dropped mid-send".into(),
-                ));
+                return if n == 0 {
+                    Err(TransportError::NothingWritten(
+                        "sim: link dropped mid-send".into(),
+                    ))
+                } else {
+                    Err(TransportError::LinkDown(LinkDownError {
+                        detail: "sim: link dropped mid-send".into(),
+                        bytes_sent: n,
+                    }))
+                };
             }
         }
         self.sent.extend_from_slice(data);
@@ -531,7 +538,10 @@ impl Transport for SimTransport {
 
     fn recv(&mut self, timeout_ms: u64) -> Result<Vec<u8>, TransportError> {
         if self.link_down {
-            return Err(TransportError::LinkDown("sim: link dropped".into()));
+            return Err(TransportError::LinkDown(LinkDownError {
+                detail: "sim: link dropped".into(),
+                bytes_sent: 0,
+            }));
         }
         match self.queue.front() {
             Some(&(at, _)) if at <= self.now + timeout_ms => {

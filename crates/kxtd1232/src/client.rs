@@ -8,16 +8,33 @@ use crate::session::{Login, LoginState};
 use crate::signon::SignOn;
 use crate::tables;
 
+/// Link loss while sending: how many bytes reached the line before the failure.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinkDownError {
+    pub detail: String,
+    /// `0` only when the transport can prove nothing was transmitted.
+    pub bytes_sent: usize,
+}
+
+impl LinkDownError {
+    pub fn nothing_written(detail: impl Into<String>) -> Self {
+        Self {
+            detail: detail.into(),
+            bytes_sent: 0,
+        }
+    }
+}
+
 /// Transport errors.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TransportError {
     /// Nothing arrived within the timeout.
     Timeout,
-    /// The link is gone. From `send`: some, all or an unknown part of the data may have
-    /// been written, so a write frame counts as possibly applied.
-    LinkDown(String),
-    /// From `send` only: the link failed and provably no byte of the data was written
-    /// (for example the port was already closed). Only this counts as "not sent".
+    /// From `send`: some or all of the data may have reached the line (see
+    /// [`LinkDownError::bytes_sent`]). Surfaces to callers as [`Error::LinkDown`].
+    LinkDown(LinkDownError),
+    /// From `send` only: provably zero bytes were written. The client maps this to
+    /// [`Error::PreSend`] wrapping [`Error::LinkDown`], not to a top-level `LinkDown`.
     NothingWritten(String),
 }
 
@@ -264,9 +281,8 @@ impl<T: Transport> Client<T> {
             Ok(b) if b.is_empty() => Err(Error::LinkDown("transport returned no bytes".into())),
             Ok(b) => Ok(b),
             Err(TransportError::Timeout) => Err(Error::Timeout),
-            Err(TransportError::LinkDown(s) | TransportError::NothingWritten(s)) => {
-                Err(Error::LinkDown(s))
-            }
+            Err(TransportError::LinkDown(e)) => Err(Error::LinkDown(e.detail)),
+            Err(TransportError::NothingWritten(s)) => Err(Error::LinkDown(s)),
         }
     }
 
@@ -274,7 +290,8 @@ impl<T: Transport> Client<T> {
     fn send(&mut self, data: &[u8]) -> Result<(), Error> {
         self.t.send(data).map_err(|e| match e {
             TransportError::Timeout => Error::Timeout,
-            TransportError::LinkDown(s) | TransportError::NothingWritten(s) => Error::LinkDown(s),
+            TransportError::LinkDown(e) => Error::LinkDown(e.detail),
+            TransportError::NothingWritten(s) => Error::LinkDown(s),
         })
     }
 
@@ -283,7 +300,7 @@ impl<T: Transport> Client<T> {
     fn send_frame(&mut self, data: &[u8]) -> Result<(), Error> {
         self.t.send(data).map_err(|e| match e {
             TransportError::Timeout => Error::Timeout,
-            TransportError::LinkDown(s) => Error::LinkDown(s),
+            TransportError::LinkDown(e) => Error::LinkDown(e.detail),
             TransportError::NothingWritten(s) => Error::PreSend(Box::new(Error::LinkDown(s))),
         })
     }

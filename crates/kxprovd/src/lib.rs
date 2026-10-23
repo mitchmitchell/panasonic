@@ -70,15 +70,16 @@ impl Daemon {
         let _ = sim_mark::SimMarkStore::new(&config.data_dir).clear_if_stale();
         let profile = Arc::new(RwLock::new(mode.load_profile()));
 
+        let (job_tx, job_rx) = mpsc::channel(32);
+        let queue = Arc::new(queue::JobQueue::new(job_tx));
+
         let tokens = TokenStore::load(config.tokens_path.clone()).map_err(|e| {
             Box::new(std::io::Error::new(
                 std::io::ErrorKind::PermissionDenied,
                 e.to_string(),
             )) as Box<dyn std::error::Error + Send + Sync>
         })?;
-
-        let (job_tx, job_rx) = mpsc::channel(32);
-        let queue = Arc::new(queue::JobQueue::new(job_tx));
+        tokens.attach_job_queue(Arc::downgrade(&queue));
         let gates = Arc::new(RwLock::new(GateState {
             config: config.gates,
         }));
@@ -142,8 +143,9 @@ impl Daemon {
                         std::fs::Permissions::from_mode(0o660),
                     );
                 }
+                let tokens_worker = api_state.tokens.clone();
                 let ((), serve_res) = tokio::join!(
-                    worker::run_worker(job_rx, worker_ctx, q),
+                    worker::run_worker(job_rx, worker_ctx, q, tokens_worker),
                     api::serve(listener, api_state),
                 );
                 let _ = serve_res;
@@ -203,10 +205,11 @@ impl Daemon {
         let _ = sim_mark::SimMarkStore::new(&config.data_dir).clear_if_stale();
         let profile = Arc::new(RwLock::new(mode.load_profile()));
 
-        let tokens = TokenStore::load_insecure(config.tokens_path.clone())?;
-
         let (job_tx, job_rx) = mpsc::channel(32);
         let queue = Arc::new(queue::JobQueue::new(job_tx));
+
+        let tokens = TokenStore::load_insecure(config.tokens_path.clone())?;
+        tokens.attach_job_queue(Arc::downgrade(&queue));
         let gates = Arc::new(RwLock::new(GateState {
             config: config.gates,
         }));
@@ -270,8 +273,9 @@ impl Daemon {
                         std::fs::Permissions::from_mode(0o660),
                     );
                 }
+                let tokens_worker = api_state.tokens.clone();
                 let ((), serve_res) = tokio::join!(
-                    worker::run_worker(job_rx, worker_ctx, q),
+                    worker::run_worker(job_rx, worker_ctx, q, tokens_worker),
                     api::serve(listener, api_state),
                 );
                 let _ = serve_res;

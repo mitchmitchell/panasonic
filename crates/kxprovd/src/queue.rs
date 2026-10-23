@@ -2,8 +2,9 @@ use kxprov_api::{
     DiffHash, FieldKindWire, PlanChangeParams, PlanId, ReadFieldsParams, TokenId,
     TOKEN_JOBS_PER_MINUTE, TOKEN_QUEUE_DEPTH_MAX,
 };
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex as StdMutex;
 use tokio::sync::{mpsc, oneshot, Mutex};
 
 static JOB_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -71,6 +72,8 @@ pub struct JobQueue {
     tx: mpsc::Sender<JobRequest>,
     pub jobs: Mutex<HashMap<String, JobState>>,
     token_rates: Mutex<HashMap<String, TokenRateState>>,
+    /// Tokens revoked on disk; queued jobs for these ids fail without running.
+    revoked_tokens: StdMutex<HashSet<String>>,
 }
 
 impl JobQueue {
@@ -79,7 +82,22 @@ impl JobQueue {
             tx,
             jobs: Mutex::new(HashMap::new()),
             token_rates: Mutex::new(HashMap::new()),
+            revoked_tokens: StdMutex::new(HashSet::new()),
         }
+    }
+
+    pub fn mark_token_revoked(&self, token_id: &TokenId) {
+        self.revoked_tokens
+            .lock()
+            .expect("revoked tokens lock")
+            .insert(token_id.as_str().to_string());
+    }
+
+    pub fn is_token_revoked(&self, token_id: &TokenId) -> bool {
+        self.revoked_tokens
+            .lock()
+            .expect("revoked tokens lock")
+            .contains(token_id.as_str())
     }
 
     pub async fn enqueue(

@@ -17,7 +17,7 @@ impl Transport for TokioSerialTransport {
     }
 
     fn recv(&mut self, _timeout_ms: u64) -> Result<Vec<u8>, TransportError> {
-        Err(TransportError::LinkDown("no serial".into()))
+        Err(TransportError::NothingWritten("no serial".into()))
     }
 
     fn now_ms(&mut self) -> u64 {

@@ -6,6 +6,7 @@ use crate::locked::LockedStore;
 use crate::plan_store::{PlanSnapshot, PlanStore};
 use crate::queue::{field_kind_wire, JobKind, JobOutcome, JobRequest, JobState};
 use crate::time::now_ms;
+use crate::tokens::TokenStore;
 use crate::transport::{open, AnyTransport};
 use kxprov_api::{BackupInfo, FieldRow, OperationalMode, PlanChangeResult, Profile, TokenId};
 use kxtd1232::frame::Access;
@@ -27,8 +28,22 @@ pub async fn run_worker(
     mut rx: tokio::sync::mpsc::Receiver<JobRequest>,
     ctx: Arc<WorkerCtx>,
     queue_jobs: Arc<crate::queue::JobQueue>,
+    tokens: TokenStore,
 ) {
     while let Some(job) = rx.recv().await {
+        if let Some(ref tid) = job.token_id {
+            let revoked =
+                queue_jobs.is_token_revoked(tid) || tokens.is_revoked(tid).unwrap_or(true);
+            if revoked {
+                queue_jobs.set_state(&job.id, JobState::Failed).await;
+                queue_jobs.release_token(job.token_id.as_ref()).await;
+                let _ = job.reply.send(JobOutcome::Err {
+                    code: "token_revoked".into(),
+                    message: "bearer token was revoked".into(),
+                });
+                continue;
+            }
+        }
         queue_jobs.set_state(&job.id, JobState::Running).await;
         let outcome = execute_job(&ctx, &job.id, job.kind).await;
         let failed = matches!(&outcome, JobOutcome::Err { .. });

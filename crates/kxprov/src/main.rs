@@ -383,6 +383,34 @@ fn sim_mark(cli: &Cli) -> Result<(), CliError> {
     }
 }
 
+fn atomic_write_tokens(path: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
+    use std::fs::{File, OpenOptions};
+    use std::io::Write;
+    let dir = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+    std::fs::create_dir_all(dir)?;
+    let tmp = dir.join(format!(
+        ".{}.tmp.{}",
+        path.file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("tokens"),
+        std::process::id()
+    ));
+    {
+        let mut f = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&tmp)?;
+        f.write_all(data)?;
+        f.sync_all()?;
+    }
+    std::fs::rename(&tmp, path)?;
+    if let Ok(dirf) = File::open(dir) {
+        let _ = dirf.sync_all();
+    }
+    Ok(())
+}
+
 fn token_admin(cli: &Cli) -> Result<(), CliError> {
     let Command::Token { cmd } = &cli.cmd else {
         return Err(CliError::Usage("token".into()));
@@ -405,13 +433,9 @@ fn token_admin(cli: &Cli) -> Result<(), CliError> {
             let bearer = hex::encode(secret_bytes);
             entry.secret_hash = kxprov_api::hash_bearer_secret(&bearer);
             entry.revoked = false;
-            let tmp = tokens_path.with_extension("json.tmp");
-            std::fs::write(
-                &tmp,
-                serde_json::to_vec_pretty(&file).map_err(|e| CliError::Usage(e.to_string()))?,
-            )
-            .map_err(|e| CliError::Usage(e.to_string()))?;
-            std::fs::rename(&tmp, tokens_path).map_err(|e| CliError::Usage(e.to_string()))?;
+            let data =
+                serde_json::to_vec_pretty(&file).map_err(|e| CliError::Usage(e.to_string()))?;
+            atomic_write_tokens(tokens_path, &data).map_err(|e| CliError::Usage(e.to_string()))?;
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;

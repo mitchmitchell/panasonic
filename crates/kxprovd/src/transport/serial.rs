@@ -1,10 +1,12 @@
 //! Linux serial transport via `tokio-serial` (blocking read in the worker task).
 
-use kxtd1232::{Transport, TransportError};
+use kxtd1232::{LinkDownError, Transport, TransportError};
 use std::io::{Read, Write};
 use std::path::Path;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio_serial::{DataBits, FlowControl, Parity, SerialPortBuilderExt, StopBits};
+
+const SEND_BOUND_MS: u64 = 5_000;
 
 pub struct TokioSerialTransport {
     port: tokio_serial::SerialStream,
@@ -33,29 +35,39 @@ fn send_all_port<W: Write>(port: &mut W, data: &[u8]) -> Result<(), TransportErr
     if data.is_empty() {
         return Ok(());
     }
+    let deadline = Instant::now() + Duration::from_millis(SEND_BOUND_MS);
     let mut written = 0;
     while written < data.len() {
+        if Instant::now() >= deadline {
+            return if written == 0 {
+                Err(TransportError::NothingWritten(
+                    "serial: send timed out with no bytes written".into(),
+                ))
+            } else {
+                Err(TransportError::LinkDown(LinkDownError {
+                    detail: format!(
+                        "serial: send timed out after {written}/{} bytes",
+                        data.len()
+                    ),
+                    bytes_sent: written,
+                }))
+            };
+        }
         match port.write(&data[written..]) {
             Ok(0) => {
-                return if written == 0 {
-                    Err(TransportError::NothingWritten(
-                        "serial: write returned 0".into(),
-                    ))
-                } else {
-                    Err(TransportError::LinkDown(format!(
-                        "serial: partial send {written}/{}",
-                        data.len()
-                    )))
-                };
+                std::thread::sleep(Duration::from_millis(5));
             }
             Ok(n) => written += n,
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(5));
+            }
             Err(e) if written == 0 => return Err(TransportError::NothingWritten(e.to_string())),
             Err(e) => {
-                return Err(TransportError::LinkDown(format!(
-                    "serial: partial send {written}/{}: {e}",
-                    data.len()
-                )));
+                return Err(TransportError::LinkDown(LinkDownError {
+                    detail: format!("serial: partial send {written}/{}: {e}", data.len()),
+                    bytes_sent: written,
+                }));
             }
         }
     }
@@ -80,7 +92,10 @@ impl Transport for TokioSerialTransport {
 }
 
 /// Shared recv loop: `WouldBlock` means no data yet (wait, do not drop the link).
-pub(crate) fn recv_with_poll<R: Read>(port: &mut R, timeout_ms: u64) -> Result<Vec<u8>, TransportError> {
+pub(crate) fn recv_with_poll<R: Read>(
+    port: &mut R,
+    timeout_ms: u64,
+) -> Result<Vec<u8>, TransportError> {
     let deadline = Instant::now() + Duration::from_millis(timeout_ms);
     let mut buf = [0u8; 256];
     loop {
@@ -101,7 +116,12 @@ pub(crate) fn recv_with_poll<R: Read>(port: &mut R, timeout_ms: u64) -> Result<V
                 return Err(TransportError::Timeout);
             }
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-            Err(e) => return Err(TransportError::LinkDown(e.to_string())),
+            Err(e) => {
+                return Err(TransportError::LinkDown(LinkDownError {
+                    detail: e.to_string(),
+                    bytes_sent: 0,
+                }))
+            }
         }
     }
 }
@@ -132,6 +152,23 @@ mod tests {
         }
     }
 
+    struct BlockThenWrite {
+        blocks: u32,
+    }
+
+    impl Write for BlockThenWrite {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            if self.blocks > 0 {
+                self.blocks -= 1;
+                return Err(ErrorKind::WouldBlock.into());
+            }
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
     #[test]
     fn would_block_then_byte_is_not_link_down() {
         let read_plan = Arc::new(Mutex::new(vec![Err(ErrorKind::WouldBlock.into()), Ok(1)]));
@@ -140,6 +177,12 @@ mod tests {
         };
         let out = recv_with_poll(&mut port, 100).expect("recv succeeds after WouldBlock");
         assert_eq!(out, b"X");
+    }
+
+    #[test]
+    fn would_block_on_send_retries_until_complete() {
+        let mut port = BlockThenWrite { blocks: 2 };
+        send_all_port(&mut port, &[1, 2, 3]).expect("send completes after WouldBlock retries");
     }
 
     #[test]
