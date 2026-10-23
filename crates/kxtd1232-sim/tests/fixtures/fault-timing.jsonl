@@ -1,4 +1,4 @@
-{"fault": "busy_run", "cadence_ms": 128, "default_frames": 55, "note": "behavior spec + design §9b: busy cadence and default bound"}
+{"fault": "busy_lockup", "busy_lockup_frames": 50, "busy_lockup_interval_ms": 100, "note": "synthetic SimConfig placeholders; not capture-derived"}
 {"fault": "busy_past_bound", "busy_limit_ms": 12000, "frames_over": 200, "note": "design §9b default BUSY bound"}
 {"fault": "unacked_write", "ack_timeout_ms": 2000, "spec_ack_upper_ms": 589, "note": "design §9b ack wait default; never resend blind (G2/H5)"}
 {"fault": "late_ack", "delay_ms": 2300, "note": "after ack timeout, inside drain quiet window (mandatory test)"}

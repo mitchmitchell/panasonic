@@ -39,10 +39,25 @@ pub fn reply_frame(cmd: u8, body: &[u8]) -> Vec<u8> {
     out.push(checksum(&out));
     out
 }
-/// Busy-frame cadence (behavior spec / design §9b default until H5).
-pub const BUSY_CADENCE_MS: u64 = 128;
-/// Default busy train length after a malformed binary frame (matches §9b bound smoke tests).
-pub const BUSY_LOCKUP_FRAMES: u32 = 55;
+
+/// Tunable simulator timing and counts. Defaults are round **placeholders** for tests and
+/// fault hooks; they are **not** measured on a real PBX.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SimConfig {
+    /// Placeholder count for the malformed-frame busy train; not a measured value.
+    pub busy_lockup_frames: u32,
+    /// Placeholder spacing between those busy frames (milliseconds); not a measured value.
+    pub busy_lockup_interval_ms: u64,
+}
+
+impl Default for SimConfig {
+    fn default() -> Self {
+        Self {
+            busy_lockup_frames: 50,
+            busy_lockup_interval_ms: 100,
+        }
+    }
+}
 
 /// Injected faults, consumed in order. Requires the `faults` feature.
 #[cfg(feature = "faults")]
@@ -52,7 +67,7 @@ pub enum Fault {
     Nak,
     /// Next write is acked but not stored.
     SilentWrite,
-    /// Next request's reply is preceded by `frames` busy frames at 128 ms cadence.
+    /// Next request's reply is preceded by `frames` busy frames at [`SimConfig::busy_lockup_interval_ms`].
     Busy { frames: u32 },
     /// Next write is stored, no ack is sent.
     NoAckApplied,
@@ -149,6 +164,7 @@ pub fn synthetic_db() -> HashMap<u8, Vec<u8>> {
 pub type WriteRecord = (u8, u16, u16, Vec<u8>);
 
 pub struct SimPbx {
+    pub config: SimConfig,
     pub db: HashMap<u8, Vec<u8>>,
     password: Vec<u8>,
     rom_id: [u8; 16],
@@ -183,11 +199,16 @@ pub type Emits = Vec<(u64, Vec<u8>)>;
 
 impl SimPbx {
     pub fn new(db: HashMap<u8, Vec<u8>>, password: &str) -> Self {
+        Self::with_config(db, password, SimConfig::default())
+    }
+
+    pub fn with_config(db: HashMap<u8, Vec<u8>>, password: &str, config: SimConfig) -> Self {
         let mut rom_id = [b' '; 16];
         for (d, s) in rom_id.iter_mut().zip(PLACEHOLDER_ROM_ID.bytes()) {
             *d = s;
         }
         Self {
+            config,
             db,
             password: password.as_bytes().to_vec(),
             rom_id,
@@ -350,7 +371,7 @@ impl SimPbx {
 
     /// PBX enters a busy lockup after a malformed frame; the first busy lands after latency.
     fn malformed_frame(&mut self) -> Emits {
-        self.lockup_busy_left = BUSY_LOCKUP_FRAMES.saturating_sub(1);
+        self.lockup_busy_left = self.config.busy_lockup_frames.saturating_sub(1);
         vec![(self.latency_ms, BUSY_FRAME.to_vec())]
     }
 
@@ -380,7 +401,7 @@ impl SimPbx {
                 Some(Fault::Busy { frames }) => {
                     for _ in 0..frames {
                         out.push((t, BUSY_FRAME.to_vec()));
-                        t += BUSY_CADENCE_MS;
+                        t += self.config.busy_lockup_interval_ms;
                     }
                 }
                 Some(Fault::NoAckApplied) => {
@@ -591,13 +612,13 @@ impl SimTransport {
         self.queue.insert(pos, (at, bytes));
     }
 
-    fn schedule_busy_cadence(&mut self, start_ms: u64, frames: u32) {
+    fn schedule_busy_cadence(&mut self, start_ms: u64, frames: u32, interval_ms: u64) {
         if frames == 0 {
             return;
         }
         let tline = kxtd1232::Timing::default();
         for i in 0..frames {
-            let at = start_ms + u64::from(i) * BUSY_CADENCE_MS + tline.tx_ms(BUSY_FRAME.len());
+            let at = start_ms + u64::from(i) * interval_ms + tline.tx_ms(BUSY_FRAME.len());
             self.schedule(at, BUSY_FRAME.to_vec());
         }
     }
@@ -650,14 +671,15 @@ impl Transport for SimTransport {
             let at = rx_done + delay + tline.tx_ms(bytes.len());
             self.schedule(at, bytes);
         }
+        let busy_iv = self.sim.config.busy_lockup_interval_ms;
         #[cfg(feature = "faults")]
         if let Some(frames) = self.sim.post_write_busy.take() {
-            self.schedule_busy_cadence(rx_done + self.sim.latency_ms, frames);
+            self.schedule_busy_cadence(rx_done + self.sim.latency_ms, frames, busy_iv);
         }
         if self.sim.lockup_busy_left > 0 {
             let frames = self.sim.lockup_busy_left;
             self.sim.lockup_busy_left = 0;
-            self.schedule_busy_cadence(rx_done + self.sim.latency_ms, frames);
+            self.schedule_busy_cadence(rx_done + self.sim.latency_ms, frames, busy_iv);
         }
         Ok(())
     }

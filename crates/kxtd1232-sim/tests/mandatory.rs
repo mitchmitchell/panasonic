@@ -7,7 +7,13 @@
 
 use kxtd1232::frame::Access;
 use kxtd1232::{Client, Error, SessionState, Timing, VerifyOutcome};
-use kxtd1232_sim::{Fault, SimPbx, SimTransport, PLACEHOLDER_PASSWORD};
+use kxtd1232_sim::{Fault, SimConfig, SimPbx, SimTransport, PLACEHOLDER_PASSWORD};
+
+fn frames_over_busy_limit() -> u32 {
+    let limit = Timing::default().busy_limit_ms;
+    let iv = SimConfig::default().busy_lockup_interval_ms;
+    u32::try_from(limit / iv + 2).unwrap_or(u32::MAX)
+}
 
 const ACK: [u8; 4] = [0x03, 0x00, 0x00, 0x03];
 
@@ -60,8 +66,11 @@ fn test_late_ack_drained_before_verify_reread() {
 fn test_drain_waits_out_busy_then_rereads() {
     let mut c = client();
     let (base, new) = block(&mut c);
-    // Busy past the 12 s ack bound; the tail of the run (~1 s) plus the ack is drained.
-    c.transport_mut().sim.inject(Fault::Busy { frames: 102 });
+    c.transport_mut()
+        .sim
+        .inject(Fault::Busy {
+            frames: frames_over_busy_limit(),
+        });
     assert!(matches!(c.write(0x24, 0, 0, &new), Err(Error::Unacked(_))));
     assert_eq!(
         c.verify_block(0x24, 0, 0, &new, &base),
@@ -94,7 +103,11 @@ fn test_end_binary_held_after_unacked_write() {
 fn test_end_binary_held_after_busy_timeout_until_rollback() {
     let mut c = client();
     let (base, new) = block(&mut c);
-    c.transport_mut().sim.inject(Fault::Busy { frames: 100 });
+    c.transport_mut()
+        .sim
+        .inject(Fault::Busy {
+            frames: frames_over_busy_limit(),
+        });
     assert!(matches!(c.write(0x24, 0, 0, &new), Err(Error::Unacked(_))));
     assert_eq!(c.end_binary(), Err(Error::EndBinaryHeld));
     // Something else changed the block meanwhile: verify says neither.

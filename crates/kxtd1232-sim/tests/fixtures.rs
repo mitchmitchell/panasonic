@@ -4,7 +4,7 @@
 #![allow(clippy::unwrap_used)]
 
 use kxtd1232::Timing;
-use kxtd1232_sim::{BUSY_CADENCE_MS, PLACEHOLDER_PASSWORD, PLACEHOLDER_ROM_ID};
+use kxtd1232_sim::{SimConfig, PLACEHOLDER_PASSWORD, PLACEHOLDER_ROM_ID};
 use serde_json::Value;
 use std::path::PathBuf;
 
@@ -33,8 +33,17 @@ fn lines(path: PathBuf) -> Vec<Value> {
 fn test_fault_timing_fixture_matches_sim_defaults() {
     let rows = lines(sim_fixture("fault-timing.jsonl"));
     assert_eq!(rows.len(), 5);
-    let busy = &rows[0];
-    assert_eq!(busy["cadence_ms"].as_u64(), Some(BUSY_CADENCE_MS));
+    let cfg = SimConfig::default();
+    let lockup = &rows[0];
+    assert_eq!(lockup["fault"].as_str(), Some("busy_lockup"));
+    assert_eq!(
+        lockup["busy_lockup_frames"].as_u64(),
+        Some(u64::from(cfg.busy_lockup_frames))
+    );
+    assert_eq!(
+        lockup["busy_lockup_interval_ms"].as_u64(),
+        Some(cfg.busy_lockup_interval_ms)
+    );
     let past = &rows[1];
     assert_eq!(past["frames_over"].as_u64(), Some(200));
     let unacked = &rows[2];
