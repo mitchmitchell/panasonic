@@ -414,8 +414,9 @@ token_sha256_hex = "020202020202020202020202020202020202020202020202020202020202
 "#,
         );
         std::env::set_var("KXPROV_SKIP_SECRET_FILE_CHECKS", "1");
-        let result = McpTokenStore::from_file(&path);
-        let err = result.err().expect("load should fail");
-        assert!(err.to_string().contains("expired"));
+        let store = McpTokenStore::from_file(&path).expect("load skips expired entries");
+        let guard = store.cache.lock().expect("cache");
+        assert_eq!(guard.by_hash.len(), 1);
+        assert_eq!(guard.by_hash.values().next().unwrap().token_id, "comms");
     }
 }
