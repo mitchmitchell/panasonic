@@ -11,10 +11,7 @@ async fn main() -> anyhow::Result<()> {
         .with_env_filter(EnvFilter::from_default_env())
         .init();
 
-    let mut config = GatewayConfig::default();
-    if let Ok(path) = std::env::var("KXPROV_MCP_TOKENS") {
-        config.mcp_tokens_path = path.into();
-    }
+    let config = GatewayConfig::from_env_and_args();
     let backend = Arc::new(MockDaemon::new());
     let handles = serve(config, Some(backend)).await?;
     tracing::info!(

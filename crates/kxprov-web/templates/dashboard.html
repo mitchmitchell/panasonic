@@ -6,37 +6,67 @@
 </head>
 <body>
   {% include "_header.html" %}
+  {% if show_mode_banner %}
+  <div class="mode-banner mode-banner--{{ mode_banner_class }}" role="status">
+    {{ mode_banner }}
+  </div>
+  {% endif %}
   <main>
-    {% if show_mode_banner %}
-    <p role="status"><strong>Mode: {{ mode_banner }}</strong></p>
+    <h1>kx-provision
+      {% if show_profile_badge %}
+      <span class="profile-badge profile-badge--{{ profile_badge_class }}">{{ profile_badge }}</span>
+      {% endif %}
+    </h1>
+    {% if show_status %}
+    <p class="status-line">Locked: {{ locked }} · Queue depth: {{ queue_depth }}</p>
     {% endif %}
-    <h1>kx-provision <small>(SIM)</small></h1>
-    {% if show_status %}<p>Profile: {{ profile }} · Locked: {{ locked }} · Queue: {{ queue_depth }}</p>{% endif %}
     <form method="post" action="/logout">
       <input type="hidden" name="_csrf" value="{{ csrf_token }}">
       <button type="submit">Sign out</button>
     </form>
     <h2>Dry-run plan</h2>
-    <form method="post" action="/plan">
+    <p class="help">Build a change plan here; applying changes and approvals happen through the daemon and your chat tools, not this page.</p>
+    <form method="post" action="/plan" class="plan-form">
       <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-      <label>Table (hex) <input name="table" value="24"></label>
-      <label>Record <input name="record" value="1"></label>
-      <label>Field <input name="field" value="name"></label>
-      <label>New value <input name="new_value" value="test"></label>
+      <label>
+        Phone table
+        <span class="field-help">Which database table to change (decimal or 0x hex, e.g. 36 or 0x24).</span>
+        <input name="table" value="{{ table_value }}">
+      </label>
+      <label>
+        Record number
+        <span class="field-help">Row index in that table (1–9999).</span>
+        <input name="record" value="{{ record_value }}">
+      </label>
+      <label>
+        Field name
+        <span class="field-help">Column to update, such as <code>name</code> or <code>number</code>.</span>
+        <input name="field" value="{{ field_value }}">
+      </label>
+      <label>
+        New value
+        <span class="field-help">What the field should contain after the change.</span>
+        <input name="new_value" value="{{ new_value_value }}">
+      </label>
+      {% if show_plan_form_error %}
+      <p class="inline-error" role="alert">{{ plan_form_error }}</p>
+      {% endif %}
       <button type="submit">Plan change</button>
     </form>
     {% if show_plan %}
-    <h3>Plan {{ plan_id_hex }}</h3>
-    <p>Diff hash: <code>{{ diff_hash_hex }}</code></p>
-    <p>{{ plan_summary }}</p>
-    <form method="post" action="/apply">
-      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-      <input type="hidden" name="plan_id" value="{{ plan_id_hex }}">
-      <input type="hidden" name="diff_hash" value="{{ diff_hash_hex }}">
-      <button type="submit">Apply (admin)</button>
-    </form>
+    <section class="plan-result">
+      <h3>Planned change</h3>
+      <p>Plan ID: <code>{{ plan_id_hex }}</code></p>
+      <p>Full diff hash: <code>{{ diff_hash_hex }}</code></p>
+      <p>{{ plan_summary }}</p>
+      {% if show_production_plan_hint %}
+      <p class="production-hint">
+        <strong>Production:</strong> use diff hash prefix <code>{{ diff_hash_prefix }}</code> when submitting approval in chat.
+        Approval window expires at <time>{{ plan_expires_at }}</time>.
+      </p>
+      {% endif %}
+    </section>
     {% endif %}
-    {% if show_message %}<p><em>{{ message }}</em></p>{% endif %}
   </main>
 </body>
 </html>

@@ -32,10 +32,6 @@ pub const WEB_ROUTES: &[HttpRoute] = &[
         method: "POST",
         path: "/plan",
     },
-    HttpRoute {
-        method: "POST",
-        path: "/apply",
-    },
 ];
 
 /// MCP tools exposed by `KxMcpServer`. Keep in sync with `kxprov-mcp` tool definitions.

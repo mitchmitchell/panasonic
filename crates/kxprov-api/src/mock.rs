@@ -58,7 +58,7 @@ impl MockDaemon {
     }
 
     pub fn with_admin_password(password: &str) -> Self {
-        Self::with_mode_and_password(Mode::DryRun, password)
+        Self::with_mode_and_password(Mode::Testing, password)
     }
 
     pub fn with_mode(mode: Mode) -> Self {

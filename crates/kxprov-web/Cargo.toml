@@ -16,6 +16,8 @@ serde.workspace = true
 time.workspace = true
 
 [dev-dependencies]
+axum = { workspace = true }
+http-body-util = { workspace = true }
 kxprov-api = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 tower = { workspace = true, features = ["util"] }
