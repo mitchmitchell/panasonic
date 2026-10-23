@@ -567,7 +567,7 @@ mod tests {
         let ok = verified.load(Ordering::SeqCst);
         let deny = rejected.load(Ordering::SeqCst);
         assert!(
-            ok >= 1 && ok <= 2,
+            (1..=2).contains(&ok),
             "expected 1-2 verifies, got {ok} (rejected {deny})"
         );
         assert!(deny >= 8, "expected most attempts rejected, got {deny}");

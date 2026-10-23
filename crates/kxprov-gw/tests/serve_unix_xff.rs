@@ -3,9 +3,61 @@
 use kxprov_gw::serve_peer::{ServeTrustConfig, SERVE_LOOPBACK_PEER};
 use kxprov_web::login_rate_ip_key;
 use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
+
+static UNIX_SOCKET_TEST_LOCK: Mutex<()> = Mutex::new(());
+use std::time::{Duration, Instant};
 use tokio::net::{TcpListener, TcpStream, UnixListener, UnixStream};
 
+fn unique_socket_path(dir: &Path, label: &str) -> PathBuf {
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let n = SEQ.fetch_add(1, Ordering::Relaxed);
+    dir.join(format!("{label}-{n}.sock"))
+}
+
+fn remove_stale_socket(path: &Path) {
+    if path.exists() {
+        std::fs::remove_file(path).ok();
+    }
+}
+
+async fn wait_for_unix_connect(path: &Path) -> UnixStream {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match UnixStream::connect(path).await {
+            Ok(stream) => return stream,
+            Err(_) if Instant::now() < deadline => {
+                tokio::task::yield_now().await;
+            }
+            Err(e) => panic!("connect to {}: {e}", path.display()),
+        }
+    }
+}
+
+async fn accept_unix_pair(path: &Path) -> (UnixStream, UnixStream) {
+    let _lock = UNIX_SOCKET_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    remove_stale_socket(path);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+    let listener = UnixListener::bind(path).expect("bind unix socket");
+    let accept_task = tokio::spawn(async move { listener.accept().await.unwrap() });
+    let client = wait_for_unix_connect(path).await;
+    let (server, _addr) = accept_task.await.expect("accept task");
+    (server, client)
+}
+
 fn prep_runtime_dir(dir: &std::path::Path) {
+    let _lock = UNIX_SOCKET_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if dir.exists() {
+        std::fs::remove_dir_all(dir).ok();
+    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -18,17 +70,10 @@ fn prep_runtime_dir(dir: &std::path::Path) {
     }
 }
 
-async fn accept_unix_pair(path: &std::path::Path) -> (UnixStream, UnixStream) {
-    let listener = UnixListener::bind(path).unwrap();
-    let client = UnixStream::connect(path).await.unwrap();
-    let (server, _) = listener.accept().await.unwrap();
-    (server, client)
-}
-
 #[tokio::test]
 async fn unix_peercred_matching_uid_trusts_xff_on_real_connection() {
     let dir = tempfile::tempdir().unwrap();
-    let sock = dir.path().join("web.sock");
+    let sock = unique_socket_path(dir.path(), "peercred-match");
     let uid = nix::unistd::getuid().as_raw();
     let trust = ServeTrustConfig {
         trust_x_forwarded_for: true,
@@ -48,7 +93,7 @@ async fn unix_peercred_matching_uid_trusts_xff_on_real_connection() {
 #[tokio::test]
 async fn unix_peercred_non_matching_uid_ignores_xff() {
     let dir = tempfile::tempdir().unwrap();
-    let sock = dir.path().join("web.sock");
+    let sock = unique_socket_path(dir.path(), "peercred-mismatch");
     let uid = nix::unistd::getuid().as_raw();
     let trust = ServeTrustConfig {
         trust_x_forwarded_for: true,
@@ -88,7 +133,7 @@ async fn web_serve_bind_sets_runtime_dir_0750_and_socket_mode_0660() {
     let dir = tempfile::tempdir().unwrap();
     let runtime = dir.path().join("run");
     prep_runtime_dir(&runtime);
-    let path = runtime.join("web-serve.sock");
+    let path = unique_socket_path(&runtime, "web-serve");
     let _listener = kxprov_gw::serve_peer::bind_web_serve_listener(&path, None)
         .await
         .unwrap();
@@ -111,7 +156,7 @@ async fn bind_fails_when_serve_socket_group_missing() {
     let dir = tempfile::tempdir().unwrap();
     let runtime = dir.path().join("run");
     prep_runtime_dir(&runtime);
-    let path = runtime.join("web-serve.sock");
+    let path = unique_socket_path(&runtime, "web-serve");
     let err = kxprov_gw::serve_peer::bind_web_serve_listener(
         &path,
         Some("nonexistent-kxprov-group-name"),
@@ -123,10 +168,13 @@ async fn bind_fails_when_serve_socket_group_missing() {
 
 #[tokio::test]
 async fn bind_rejects_symlink_runtime_directory() {
+    let _lock = UNIX_SOCKET_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     let dir = tempfile::tempdir().unwrap();
-    let runtime = dir.path().join("run");
+    let runtime = dir.path().join("run-link");
     std::os::unix::fs::symlink(dir.path(), &runtime).unwrap();
-    let path = runtime.join("web-serve.sock");
+    let path = unique_socket_path(&runtime, "web-serve");
     let err = kxprov_gw::serve_peer::bind_web_serve_listener(&path, None)
         .await
         .unwrap_err();
@@ -137,9 +185,9 @@ async fn bind_rejects_symlink_runtime_directory() {
 async fn bind_rejects_symlink_at_socket_path() {
     let dir = tempfile::tempdir().unwrap();
     let runtime = dir.path().join("run");
-    prep_runtime_dir(&runtime);
-    let real = runtime.join("real.sock");
-    let link = runtime.join("web-serve.sock");
+    prep_runtime_dir(&runtime); // takes UNIX_SOCKET_TEST_LOCK
+    let real = unique_socket_path(&runtime, "real");
+    let link = unique_socket_path(&runtime, "web-serve");
     std::os::unix::fs::symlink(&real, &link).unwrap();
     let err = kxprov_gw::serve_peer::bind_web_serve_listener(&link, None)
         .await

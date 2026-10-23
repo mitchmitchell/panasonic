@@ -17,6 +17,7 @@ fn write_owned_secret(path: &std::path::Path, body: &str) {
 
 #[tokio::test]
 async fn gateway_bearer_loads_with_euid_owned_secret_against_real_daemon() {
+    let prev_skip = std::env::var("KXPROV_SKIP_SECRET_FILE_CHECKS").ok();
     std::env::remove_var("KXPROV_SKIP_SECRET_FILE_CHECKS");
     let tmp = TempDir::new().unwrap();
     let gateway_uid = nix::unistd::getuid().as_raw();
@@ -37,4 +38,8 @@ async fn gateway_bearer_loads_with_euid_owned_secret_against_real_daemon() {
         .await
         .expect("non-root owned bearer should pass secret checks and whoami");
     assert_eq!(loaded.bearer(), GATEWAY_SECRET);
+    match prev_skip {
+        Some(v) => std::env::set_var("KXPROV_SKIP_SECRET_FILE_CHECKS", v),
+        None => std::env::remove_var("KXPROV_SKIP_SECRET_FILE_CHECKS"),
+    }
 }

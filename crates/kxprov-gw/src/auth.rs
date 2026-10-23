@@ -329,10 +329,15 @@ mod tests {
 
     #[test]
     fn skip_secret_file_checks_only_honors_env_in_test_builds() {
+        let prev = std::env::var("KXPROV_SKIP_SECRET_FILE_CHECKS").ok();
         std::env::remove_var("KXPROV_SKIP_SECRET_FILE_CHECKS");
         assert!(!skip_secret_file_checks());
         std::env::set_var("KXPROV_SKIP_SECRET_FILE_CHECKS", "1");
         assert!(skip_secret_file_checks());
+        match prev {
+            Some(v) => std::env::set_var("KXPROV_SKIP_SECRET_FILE_CHECKS", v),
+            None => std::env::remove_var("KXPROV_SKIP_SECRET_FILE_CHECKS"),
+        }
     }
 
     fn write_tokens(path: &std::path::Path, body: &str) {
