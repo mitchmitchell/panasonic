@@ -327,6 +327,25 @@ mod tests {
     }
 
     #[test]
+    fn corrupt_epoch_file_surfaces_mode_error_epoch_not_counter_corrupt() {
+        use crate::config::profile_epoch_counter_path;
+        let root = tempfile::tempdir().unwrap();
+        let sim_dir = root.path().join("sim");
+        std::fs::create_dir_all(&sim_dir).unwrap();
+        let counter = profile_epoch_counter_path(root.path(), Profile::Test);
+        std::fs::create_dir_all(counter.parent().unwrap()).unwrap();
+        std::fs::write(counter, "not-a-number\n").unwrap();
+        let store = ModeStore::new_with_epoch_root(&sim_dir, root.path(), Profile::Sim);
+        let err = store
+            .set_operational(OperationalMode::Testing, Profile::Test, true)
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            ModeError::Epoch(epoch_store::EpochError::Corrupt)
+        ));
+    }
+
+    #[test]
     fn rolled_back_mode_json_fail_closed_to_production() {
         let root = tempfile::tempdir().unwrap();
         let sim_dir = root.path().join("sim");
