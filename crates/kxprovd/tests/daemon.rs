@@ -62,6 +62,7 @@ async fn apply_requires_approval_on_prod() {
         tmp.path().join("mode.json"),
         serde_json::to_vec_pretty(&ModeFileBody {
             mode: OperationalMode::Production,
+            counter: 0,
         })
         .unwrap(),
     )
@@ -70,6 +71,7 @@ async fn apply_requires_approval_on_prod() {
         tmp.path().join("profile.json"),
         serde_json::to_vec_pretty(&ProfileFileBody {
             profile: Profile::Prod,
+            counter: 0,
         })
         .unwrap(),
     )
@@ -173,6 +175,7 @@ async fn prod_apply_single_use_approval() {
         tmp.path().join("mode.json"),
         serde_json::to_vec_pretty(&ModeFileBody {
             mode: OperationalMode::Production,
+            counter: 0,
         })
         .unwrap(),
     )
@@ -181,6 +184,7 @@ async fn prod_apply_single_use_approval() {
         tmp.path().join("profile.json"),
         serde_json::to_vec_pretty(&ProfileFileBody {
             profile: Profile::Prod,
+            counter: 0,
         })
         .unwrap(),
     )

@@ -8,9 +8,7 @@ use axum::extract::ConnectInfo;
 use axum::http::{header, Method, Request, StatusCode};
 use kxprov_gw::{production_web_router, HostOriginConfig, RateLimiter};
 use kxprov_mcp::KxMcpServer;
-use kxprov_mock::{
-    MCP_APPROVAL_TOOLS, MCP_TOOLS, WEB_APPROVAL_APPLY_HTTP_PATHS, WEB_ROUTES,
-};
+use kxprov_mock::{MCP_APPROVAL_TOOLS, MCP_TOOLS, WEB_APPROVAL_APPLY_HTTP_PATHS, WEB_ROUTES};
 use kxprov_web::LoginRateLimiter;
 use std::net::SocketAddr;
 use support::{test_web_state, TestVerifier};

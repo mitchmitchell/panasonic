@@ -24,11 +24,16 @@ pub enum ModeError {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModeFileBody {
     pub mode: OperationalMode,
+    /// Monotonic revision; must match `mode.counter` and `profile.json` (v2.12 rollback guard).
+    #[serde(default)]
+    pub counter: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProfileFileBody {
     pub profile: Profile,
+    #[serde(default)]
+    pub counter: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -64,12 +69,32 @@ impl ModeStore {
     }
 
     pub fn load_profile(&self) -> Profile {
+        let last = self.last_counter().unwrap_or(0);
         match std::fs::read_to_string(&self.profile_path) {
-            Ok(raw) => serde_json::from_str::<ProfileFileBody>(&raw)
-                .map(|b| b.profile)
-                .unwrap_or(self.boot_profile),
-            Err(_) => self.boot_profile,
+            Ok(raw) => match serde_json::from_str::<ProfileFileBody>(&raw) {
+                Ok(body) if body.counter < last => {
+                    self.fail_closed_profile_rollback(body.counter, last);
+                    Profile::Prod
+                }
+                Ok(body) => body.profile,
+                Err(e) => {
+                    self.fail_closed(AuditKind::ModeCorrupt, format!("profile.json: {e}"));
+                    Profile::Prod
+                }
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => self.boot_profile,
+            Err(e) => {
+                self.fail_closed(AuditKind::ModeCorrupt, e.to_string());
+                Profile::Prod
+            }
         }
+    }
+
+    fn fail_closed_profile_rollback(&self, file_counter: u64, last: u64) {
+        self.fail_closed(
+            AuditKind::ModeCounterRollback,
+            format!("profile.json counter {file_counter} < epoch {last}"),
+        );
     }
 
     fn last_counter(&self) -> Result<u64, ModeError> {
@@ -114,6 +139,32 @@ impl ModeStore {
                 return self.fail_closed(AuditKind::ModeCorrupt, e.to_string());
             }
         };
+        let last = self.last_counter().unwrap_or(0);
+        if body.counter < last {
+            return self.fail_closed(
+                AuditKind::ModeCounterRollback,
+                format!("mode.json counter {} < epoch {last}", body.counter),
+            );
+        }
+        if let Ok(prof_raw) = std::fs::read_to_string(&self.profile_path) {
+            if let Ok(prof_body) = serde_json::from_str::<ProfileFileBody>(&prof_raw) {
+                if prof_body.counter < last {
+                    return self.fail_closed(
+                        AuditKind::ModeCounterRollback,
+                        format!("profile.json counter {} < epoch {last}", prof_body.counter),
+                    );
+                }
+                if prof_body.counter != body.counter && last > 0 {
+                    return self.fail_closed(
+                        AuditKind::ModeCounterRollback,
+                        format!(
+                            "mode/profile counter mismatch ({} vs {})",
+                            body.counter, prof_body.counter
+                        ),
+                    );
+                }
+            }
+        }
         if body.mode == OperationalMode::Testing && profile != Profile::Test {
             return self.fail_closed(
                 AuditKind::ModeTestingInvalidProfile,
@@ -143,11 +194,11 @@ impl ModeStore {
         if counter <= last {
             return Err(ModeError::CounterRollback);
         }
-        let body = ModeFileBody { mode };
+        let body = ModeFileBody { mode, counter };
         std::fs::write(&self.mode_path, serde_json::to_vec_pretty(&body)?)?;
         std::fs::write(
             &self.profile_path,
-            serde_json::to_vec_pretty(&ProfileFileBody { profile })?,
+            serde_json::to_vec_pretty(&ProfileFileBody { profile, counter })?,
         )?;
         self.save_counter(counter)?;
         let _ = self.audit.append(&AuditEntry {

@@ -15,7 +15,11 @@ mod support;
 use support::{cookie_header_from_set_cookies, form_urlencoded, test_web_state, TestVerifier};
 use tower::ServiceExt;
 
-async fn fetch_login_csrf(app: &Router, peer: std::net::SocketAddr, login_uri: &str) -> (String, String) {
+async fn fetch_login_csrf(
+    app: &Router,
+    peer: std::net::SocketAddr,
+    login_uri: &str,
+) -> (String, String) {
     let get = app
         .clone()
         .oneshot({

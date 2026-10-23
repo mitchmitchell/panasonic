@@ -45,8 +45,24 @@ pub fn reply_frame(cmd: u8, body: &[u8]) -> Vec<u8> {
 /// Busy-frame cadence observed on the real unit.
 pub const BUSY_CADENCE_MS: u64 = 128;
 
-/// Injected faults, consumed in order.
+/// Tunable simulator timing and counts (placeholders for fault tests).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SimConfig {
+    pub busy_lockup_frames: u32,
+    pub busy_lockup_interval_ms: u64,
+}
+
+impl Default for SimConfig {
+    fn default() -> Self {
+        Self {
+            busy_lockup_frames: 50,
+            busy_lockup_interval_ms: 100,
+        }
+    }
+}
+
+/// Injected faults, consumed in order.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Fault {
     /// Next request gets a bad-checksum NAK (`01 02`).
     Nak,
@@ -69,13 +85,34 @@ pub enum Fault {
     DuplicateReply,
     /// Next request's reply is followed 10 ms later by one busy frame.
     BusyAfterReply,
+    /// Next write is stored, no ack; busy frames follow before verify.
+    NoAckThenBusy { busy_frames: u32 },
+    /// Next write ack is cut off after `partial_len` bytes, then link drops.
+    LinkDropMidChunk { partial_len: usize },
+    /// Drop link after `after_bytes` of the next outgoing write (not stored).
+    LinkDropMidSend { after_bytes: usize },
+    /// Next read gets end-of-table refusal even in range.
+    ReadRefused,
+    /// Next failed password attempt gets the default re-prompt.
+    WrongPassword,
+    /// Next password attempt gets an "another terminal" style line.
+    AnotherTerminal(String),
+    /// Next password attempt gets a custom login line.
+    LoginReply(String),
 }
 
 impl Fault {
-    const fn write_only(self) -> bool {
+    fn write_only(&self) -> bool {
         !matches!(
             self,
-            Self::Nak | Self::Busy { .. } | Self::DuplicateReply | Self::BusyAfterReply
+            Self::Nak
+                | Self::Busy { .. }
+                | Self::DuplicateReply
+                | Self::BusyAfterReply
+                | Self::ReadRefused
+                | Self::WrongPassword
+                | Self::AnotherTerminal(_)
+                | Self::LoginReply(_)
         )
     }
 }
@@ -134,8 +171,19 @@ pub struct SimPbx {
     pub commands: Vec<u8>,
     /// Response latency for every reply.
     pub latency_ms: u64,
+    pub config: SimConfig,
     /// When set, BYE gets no answer (logout not confirmed).
     pub silent_bye: bool,
+    #[allow(dead_code)]
+    pub(crate) lockup_busy_left: u32,
+    #[allow(dead_code)]
+    pub(crate) lockup_discard: bool,
+    #[allow(dead_code)]
+    pub(crate) lockup_end_ms: u64,
+    #[cfg(feature = "faults")]
+    pub(crate) post_write_busy: Option<u32>,
+    #[cfg(feature = "faults")]
+    pub(crate) link_drop_partial: Option<usize>,
 }
 
 impl Default for SimPbx {
@@ -170,7 +218,15 @@ impl SimPbx {
             writes: Vec::new(),
             commands: Vec::new(),
             latency_ms: 30,
+            config: SimConfig::default(),
             silent_bye: false,
+            lockup_busy_left: 0,
+            lockup_discard: false,
+            lockup_end_ms: 0,
+            #[cfg(feature = "faults")]
+            post_write_busy: None,
+            #[cfg(feature = "faults")]
+            link_drop_partial: None,
         }
     }
 
@@ -185,6 +241,21 @@ impl SimPbx {
 
     pub fn pending_faults(&self) -> usize {
         self.faults.len()
+    }
+
+    #[cfg(feature = "faults")]
+    pub(crate) fn take_mid_send_fault(&mut self, data: &[u8]) -> Option<usize> {
+        if data.get(1) != Some(&Cmd::Write.byte()) {
+            return None;
+        }
+        match self.faults.front()? {
+            Fault::LinkDropMidSend { after_bytes } => {
+                let n = *after_bytes;
+                self.faults.pop_front();
+                Some(n)
+            }
+            _ => None,
+        }
     }
 
     pub fn dtr_up(&mut self) -> Vec<u8> {
@@ -240,12 +311,27 @@ impl SimPbx {
                 self.mode = Mode::AwaitPassword;
                 banner()
             }
-            Mode::AwaitPassword if line == self.password.as_slice() => {
-                self.mode = Mode::AwaitEcs;
-                text_line(&SignOn::default().mode_start)
+            Mode::AwaitPassword => {
+                if let Some(Fault::WrongPassword) = self.faults.front() {
+                    self.faults.pop_front();
+                    return text_line(&SignOn::default().password_prompt);
+                }
+                if let Some(Fault::AnotherTerminal(msg)) = self.faults.front() {
+                    let msg = msg.clone();
+                    self.faults.pop_front();
+                    return text_line(&msg);
+                }
+                if let Some(Fault::LoginReply(msg)) = self.faults.front() {
+                    let msg = msg.clone();
+                    self.faults.pop_front();
+                    return text_line(&msg);
+                }
+                if line == self.password.as_slice() {
+                    self.mode = Mode::AwaitEcs;
+                    return text_line(&SignOn::default().mode_start);
+                }
+                text_line(&SignOn::default().password_prompt)
             }
-            // Wrong-password reply is a guess, like the RE simulator (gate G5).
-            Mode::AwaitPassword => text_line(&SignOn::default().password_prompt),
             Mode::AwaitEcs if line == b"ECS OF" => {
                 self.mode = Mode::AwaitPrg;
                 b"ECS OF\r\nOK\r\n".to_vec()
@@ -267,6 +353,28 @@ impl SimPbx {
 
     fn reply(cmd: u8, body: &[u8]) -> Vec<u8> {
         reply_frame(cmd, body)
+    }
+
+    #[allow(dead_code)]
+    fn clear_busy_lockup(&mut self) {
+        self.lockup_busy_left = 0;
+        self.lockup_discard = false;
+        self.lockup_end_ms = 0;
+    }
+
+    #[allow(dead_code)]
+    fn start_busy_lockup(&mut self) {
+        self.buf.clear();
+        self.lockup_discard = true;
+        self.lockup_busy_left = self.config.busy_lockup_frames.saturating_sub(1);
+    }
+
+    /// Hypothesis (design §6 / RE busy-lockup fixture): malformed LEN or trailing junk after
+    /// a bad frame triggers a busy train; counts in [`SimConfig`] are placeholders, not measured.
+    #[allow(dead_code)]
+    fn malformed_frame(&mut self) -> Emits {
+        self.start_busy_lockup();
+        vec![(self.latency_ms, BUSY_FRAME.to_vec())]
     }
 
     fn frame(&mut self, raw: &[u8]) -> Emits {
@@ -327,7 +435,35 @@ impl SimPbx {
                 out.push((t, stale));
                 t += 20;
             }
-            _ => {}
+            Some(Fault::NoAckThenBusy { busy_frames }) => {
+                self.store(body, true);
+                #[cfg(feature = "faults")]
+                {
+                    self.post_write_busy = Some(busy_frames);
+                }
+                #[cfg(not(feature = "faults"))]
+                let _ = busy_frames;
+                return out;
+            }
+            Some(Fault::ReadRefused) => {
+                return vec![(lat, Self::reply(Cmd::Read.byte(), &[0x01, 0x03]))];
+            }
+            Some(Fault::LinkDropMidChunk { partial_len }) => {
+                let r = self.store(body, true);
+                #[cfg(feature = "faults")]
+                {
+                    self.link_drop_partial = Some(partial_len);
+                }
+                #[cfg(not(feature = "faults"))]
+                let _ = partial_len;
+                return vec![(lat, r)];
+            }
+            Some(Fault::SilentWrite) | Some(Fault::BusyAfterReply) => {}
+            Some(Fault::LinkDropMidSend { .. })
+            | Some(Fault::WrongPassword)
+            | Some(Fault::AnotherTerminal(_))
+            | Some(Fault::LoginReply(_)) => {}
+            None => {}
         }
         let r = match Cmd::from_byte(cmd) {
             Some(Cmd::Probe) if body == [0x00] => {
@@ -408,7 +544,11 @@ pub struct SimTransport {
     /// Next write send fails with `LinkDown` after this many bytes left the host (a
     /// partial frame, or the whole frame when >= its length, which the PBX then stores).
     pub fail_write_send_after: Option<usize>,
+    pub fail_send_after: Option<usize>,
+    pub send_timeout_next: bool,
     link_down: bool,
+    #[cfg(feature = "faults")]
+    link_drop_pending: bool,
 }
 
 impl SimTransport {
@@ -433,7 +573,11 @@ impl SimTransport {
             sent: Vec::new(),
             drop_link_after_write: false,
             fail_write_send_after: None,
+            fail_send_after: None,
+            send_timeout_next: false,
             link_down: false,
+            #[cfg(feature = "faults")]
+            link_drop_pending: false,
         }
     }
 
@@ -454,6 +598,8 @@ impl SimTransport {
         self.link_down = false;
         self.drop_link_after_write = false;
         self.fail_write_send_after = None;
+        self.fail_send_after = None;
+        self.send_timeout_next = false;
         self.queue.clear();
         let first = {
             let mut pbx = self.sim.lock().expect("sim pbx lock");
@@ -500,6 +646,28 @@ impl Transport for SimTransport {
         if self.link_down {
             return Err(TransportError::NothingWritten("sim: link dropped".into()));
         }
+        if self.send_timeout_next {
+            self.send_timeout_next = false;
+            return Err(TransportError::Timeout);
+        }
+        if let Some(n) = self.fail_send_after.take() {
+            let n = n.min(data.len());
+            self.sent.extend_from_slice(&data[..n]);
+            if n == data.len() {
+                self.sim.lock().expect("sim pbx lock").feed(data);
+            }
+            self.link_down = true;
+            return if n == 0 {
+                Err(TransportError::NothingWritten(
+                    "sim: link dropped mid-send".into(),
+                ))
+            } else {
+                Err(TransportError::LinkDown(LinkDownError {
+                    detail: "sim: link dropped mid-send".into(),
+                    bytes_sent: Some(n),
+                }))
+            };
+        }
         if data.get(1) == Some(&Cmd::Write.byte()) {
             if let Some(n) = self.fail_write_send_after.take() {
                 let n = n.min(data.len());
@@ -515,10 +683,33 @@ impl Transport for SimTransport {
                 } else {
                     Err(TransportError::LinkDown(LinkDownError {
                         detail: "sim: link dropped mid-send".into(),
-                        bytes_sent: n,
+                        bytes_sent: Some(n),
                     }))
                 };
             }
+        }
+        #[cfg(feature = "faults")]
+        if let Some(n) = self
+            .sim
+            .lock()
+            .expect("sim pbx lock")
+            .take_mid_send_fault(data)
+        {
+            let n = n.min(data.len());
+            if n > 0 {
+                self.sent.extend_from_slice(&data[..n]);
+            }
+            self.link_down = true;
+            return if n == 0 {
+                Err(TransportError::NothingWritten(
+                    "simulated serial link down mid-send".into(),
+                ))
+            } else {
+                Err(TransportError::LinkDown(LinkDownError {
+                    detail: "simulated serial link down mid-send".into(),
+                    bytes_sent: Some(n),
+                }))
+            };
         }
         self.sent.extend_from_slice(data);
         if self.drop_link_after_write && data.get(1) == Some(&Cmd::Write.byte()) {
@@ -528,10 +719,32 @@ impl Transport for SimTransport {
         }
         let t = kxtd1232::Timing::default();
         let rx_done = self.now + t.tx_ms(data.len());
-        let emits = self.sim.lock().expect("sim pbx lock").feed(data);
+        let mut pbx = self.sim.lock().expect("sim pbx lock");
+        let emits = pbx.feed(data);
         for (delay, bytes) in emits {
+            let bytes = {
+                #[cfg(feature = "faults")]
+                {
+                    let mut bytes = bytes;
+                    if let Some(n) = pbx.link_drop_partial.take() {
+                        let orig = bytes.len();
+                        let n = n.min(orig);
+                        bytes.truncate(n);
+                        if n < orig {
+                            self.link_drop_pending = true;
+                        }
+                    }
+                    bytes
+                }
+                #[cfg(not(feature = "faults"))]
+                {
+                    bytes
+                }
+            };
             let at = rx_done + delay + t.tx_ms(bytes.len());
+            drop(pbx);
             self.schedule(at, bytes);
+            pbx = self.sim.lock().expect("sim pbx lock");
         }
         Ok(())
     }
@@ -540,7 +753,7 @@ impl Transport for SimTransport {
         if self.link_down {
             return Err(TransportError::LinkDown(LinkDownError {
                 detail: "sim: link dropped".into(),
-                bytes_sent: 0,
+                bytes_sent: None,
             }));
         }
         match self.queue.front() {
@@ -554,6 +767,11 @@ impl Transport for SimTransport {
                     if let Some((_, b)) = self.queue.pop_front() {
                         out.extend(b);
                     }
+                }
+                #[cfg(feature = "faults")]
+                if self.link_drop_pending {
+                    self.link_drop_pending = false;
+                    self.link_down = true;
                 }
                 Ok(out)
             }

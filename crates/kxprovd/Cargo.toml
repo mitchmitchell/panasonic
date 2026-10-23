@@ -16,8 +16,11 @@ path = "src/main.rs"
 workspace = true
 
 [features]
+default = ["inprocess-sim"]
+inprocess-sim = []
 sim-fault-triggers = ["kxprov-api/sim-fault-triggers"]
 test-util = [
+    "inprocess-sim",
     "kxtd1232/test-transport-access",
     "sim-fault-triggers",
 ]
@@ -75,3 +78,11 @@ required-features = ["test-util"]
 [[test]]
 name = "a4_smoke"
 required-features = ["test-util"]
+
+[[test]]
+name = "v2_12"
+required-features = ["test-util"]
+
+[[test]]
+name = "release_no_transport_mut"
+required-features = []

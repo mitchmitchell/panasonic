@@ -19,6 +19,7 @@ pub mod peer;
 pub mod plan_live;
 pub mod plan_store;
 pub mod queue;
+pub mod rate_limit;
 pub mod sim_mark;
 #[cfg(feature = "test-util")]
 pub mod test_util;

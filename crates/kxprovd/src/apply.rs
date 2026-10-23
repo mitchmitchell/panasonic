@@ -81,6 +81,10 @@ fn apply_one_write(client: &mut Client<AnyTransport>, w: &ChunkWrite) -> Result<
     Ok(())
 }
 
-pub fn lock_on_apply_failure(locked: &LockedStore, reason: &str, job_id: &str) {
-    let _ = locked.set_locked(reason, Some(job_id), now_ms());
+pub fn lock_on_apply_failure(
+    locked: &LockedStore,
+    reason: &str,
+    job_id: &str,
+) -> Result<(), crate::locked::LockedError> {
+    locked.set_locked(reason, Some(job_id), now_ms())
 }

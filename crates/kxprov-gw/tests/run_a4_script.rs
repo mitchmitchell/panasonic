@@ -25,7 +25,10 @@ fn run_a4_script_smoke_exits_zero() {
             String::from_utf8_lossy(&output.stderr)
         );
     }
-    assert!(output.status.success(), "run-a4.sh smoke failed (first run)");
+    assert!(
+        output.status.success(),
+        "run-a4.sh smoke failed (first run)"
+    );
 
     let output2 = Command::new("bash")
         .arg(root.join("scripts/run-a4.sh"))

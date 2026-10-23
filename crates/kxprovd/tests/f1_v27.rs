@@ -13,7 +13,7 @@ use std::time::Duration;
 fn write_mode(dir: &std::path::Path, mode: OperationalMode) {
     std::fs::write(
         dir.join("mode.json"),
-        serde_json::to_vec_pretty(&ModeFileBody { mode }).unwrap(),
+        serde_json::to_vec_pretty(&ModeFileBody { mode, counter: 0 }).unwrap(),
     )
     .unwrap();
 }
@@ -21,7 +21,11 @@ fn write_mode(dir: &std::path::Path, mode: OperationalMode) {
 fn write_profile(dir: &std::path::Path, profile: Profile) {
     std::fs::write(
         dir.join("profile.json"),
-        serde_json::to_vec_pretty(&ProfileFileBody { profile }).unwrap(),
+        serde_json::to_vec_pretty(&ProfileFileBody {
+            profile,
+            counter: 0,
+        })
+        .unwrap(),
     )
     .unwrap();
 }
@@ -68,7 +72,7 @@ async fn mode_set_via_root_socket_increments_counter() {
     assert_eq!(r.profile, Profile::Test);
     assert!(tmp.path().join("mode.counter").exists());
     let raw = std::fs::read_to_string(tmp.path().join("mode.json")).unwrap();
-    assert!(!raw.contains("counter"));
+    assert!(raw.contains("counter"));
 }
 
 #[test]

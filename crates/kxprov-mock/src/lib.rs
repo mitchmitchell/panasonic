@@ -17,8 +17,8 @@ pub use mock::{MockDaemon, APPROVAL_SUBMIT_LIMIT_PER_DAY, APPROVAL_SUBMIT_LIMIT_
 pub use plan::{canonical_diff_hash, diff_hash_from_hex, plan_id_from_hex};
 pub use route_table::{
     http_route_mutates_mode_or_profile, mcp_tool_mutates_mode_or_profile, HttpRoute,
-    FORBIDDEN_MODE_PROFILE_PATHS, MCP_APPROVAL_TOOLS, MCP_TOOLS,
-    WEB_APPROVAL_APPLY_HTTP_PATHS, WEB_ROUTES,
+    FORBIDDEN_MODE_PROFILE_PATHS, MCP_APPROVAL_TOOLS, MCP_TOOLS, WEB_APPROVAL_APPLY_HTTP_PATHS,
+    WEB_ROUTES,
 };
 pub use scope::{scopes_for_role, ScopeSet};
 pub use types::{

@@ -8,21 +8,13 @@ use crate::session::{Login, LoginState};
 use crate::signon::SignOn;
 use crate::tables;
 
-/// Link loss while sending: how many bytes reached the line before the failure.
+/// Link loss on the transport (send or receive).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LinkDownError {
     pub detail: String,
-    /// `0` only when the transport can prove nothing was transmitted.
-    pub bytes_sent: usize,
-}
-
-impl LinkDownError {
-    pub fn nothing_written(detail: impl Into<String>) -> Self {
-        Self {
-            detail: detail.into(),
-            bytes_sent: 0,
-        }
-    }
+    /// Bytes transmitted before a **`send`** failure (`None` = not applicable, e.g. receive).
+    /// Provably zero bytes on send use [`TransportError::NothingWritten`], not `Some(0)`.
+    pub bytes_sent: Option<usize>,
 }
 
 /// Transport errors.
@@ -31,8 +23,9 @@ impl LinkDownError {
 pub enum TransportError {
     /// Nothing arrived within the timeout.
     Timeout,
-    /// From `send`: some or all of the data may have reached the line (see
-    /// [`LinkDownError::bytes_sent`]). Surfaces to callers as [`Error::LinkDown`].
+    /// From `send`: some or all of the data may have reached the line when
+    /// [`LinkDownError::bytes_sent`] is `Some(n > 0)`. From `recv`: `bytes_sent` is `None`.
+    /// Surfaces to callers as [`Error::LinkDown`].
     LinkDown(LinkDownError),
     /// From `send` only: provably zero bytes were written. The client maps this to
     /// [`Error::PreSend`] wrapping [`Error::LinkDown`], not to a top-level `LinkDown`.
@@ -41,9 +34,9 @@ pub enum TransportError {
 
 /// Byte transport plus clock. Implemented by the simulator and (A3) the daemon's port.
 pub trait Transport {
-    /// Write all of `data`. On failure, return [`TransportError::NothingWritten`] only
-    /// when no byte left the host; any partial or uncertain write is
-    /// [`TransportError::LinkDown`].
+    /// Write all of `data`. Return [`TransportError::NothingWritten`] only when no byte
+    /// could have left the host; any partial or complete on-wire data is
+    /// [`TransportError::LinkDown`] (possibly applied for writes).
     fn send(&mut self, data: &[u8]) -> Result<(), TransportError>;
     /// Return whatever bytes arrive within `timeout_ms` (at least one byte), or `Timeout`.
     fn recv(&mut self, timeout_ms: u64) -> Result<Vec<u8>, TransportError>;
@@ -63,7 +56,7 @@ pub struct Timing {
     pub reply_timeout_ms: u64,
     /// Ack wait per write (every real ack so far: <= 589 ms).
     pub ack_timeout_ms: u64,
-    /// Longest busy run tolerated (observed ~7 s at ~128 ms cadence, plus margin).
+    /// Longest busy run tolerated before giving up (design §9b default until H5).
     pub busy_limit_ms: u64,
     /// Quiet window: ends drain-until-quiet, and is the window after every reply in which
     /// any further non-busy frame makes that reply suspect (possibly stale).
@@ -82,6 +75,8 @@ pub struct Timing {
     /// unacked and is verified by read-back, never resent). 20 ms is a placeholder until
     /// hardware test H5 measures it; the prototype had no margin here.
     pub reply_guard_ms: u64,
+    /// Upper bound for a single serial [`Transport::send`] (daemon maps to line I/O).
+    pub send_bound_ms: u64,
 }
 
 /// Shortest reply frame (an ack), for the post-send cutoff.
@@ -145,6 +140,7 @@ impl Default for Timing {
             login_timeout_ms: 30_000,
             link_baud: 9600,
             reply_guard_ms: MIN_REPLY_GUARD_MS,
+            send_bound_ms: 5_000,
         }
     }
 }
@@ -296,8 +292,8 @@ impl<T: Transport> Client<T> {
         })
     }
 
-    /// Frame send: a provable zero-byte failure is [`Error::PreSend`] (nothing sent);
-    /// anything else that fails is [`Error::LinkDown`] (the frame may have arrived).
+    /// Binary frame send: [`TransportError::NothingWritten`] becomes [`Error::PreSend`]
+    /// (nothing reached the line); [`TransportError::LinkDown`] becomes [`Error::LinkDown`].
     fn send_frame(&mut self, data: &[u8]) -> Result<(), Error> {
         self.t.send(data).map_err(|e| match e {
             TransportError::Timeout => Error::Timeout,
@@ -371,19 +367,31 @@ impl<T: Transport> Client<T> {
         }
         if let Err(e) = self.flush_pending() {
             if matches!(&e, Error::PreSend(inner) if matches!(**inner, Error::LinkDown(_))) {
-                self.note_link_down(None);
+                // A verify/rollback is already pending: let that path record disconnect.
+                if !self.needs_drain {
+                    self.note_link_down(None);
+                }
             }
             return Err(e);
         }
         let sent_at = self.t.now_ms();
         match self.send_frame(raw) {
             Ok(()) => {}
-            // LinkDown: write() records the frame as possibly applied. PreSend: provably
-            // nothing left the host. Timeout (a transport that breaks the no-timeout send
-            // contract) is treated as maybe-sent: it is returned, never ignored, so a
-            // write goes to Unacked/verify. Any other or future variant also returns here.
+            // Every send failure propagates. Writes: `write()` maps LinkDown vs PreSend and
+            // saves resume. Reads/other: record disconnect unless a pending drain owns it.
             Err(e) => {
-                self.note_link_down(None);
+                if cmd != Cmd::Write {
+                    match &e {
+                        Error::LinkDown(_) if !self.needs_drain => self.note_link_down(None),
+                        Error::PreSend(inner)
+                            if matches!(inner.as_ref(), Error::LinkDown(_))
+                                && !self.needs_drain =>
+                        {
+                            self.note_link_down(None);
+                        }
+                        _ => {}
+                    }
+                }
                 return Err(e);
             }
         }
@@ -643,6 +651,12 @@ impl<T: Transport> Client<T> {
                 self.note_link_down(Some(u));
                 return Err(Error::LinkDown(s));
             }
+            Err(Error::PreSend(inner)) if matches!(inner.as_ref(), Error::LinkDown(_)) => {
+                if !self.needs_drain {
+                    self.note_link_down(None);
+                }
+                return Err(Error::PreSend(inner));
+            }
             Err(e) => return Err(e),
         };
         let u = UnackedWrite {
@@ -773,10 +787,25 @@ impl<T: Transport> Client<T> {
         match self.write(table, record, word, base) {
             Ok(()) | Err(Error::Unacked(_)) => {}
             // Disconnected; resumes in AwaitingVerify for this rollback after login.
-            Err(e @ Error::LinkDown(_)) => return Err(e),
+            Err(e @ Error::LinkDown(_)) => {
+                // If the write already recorded disconnect + resume, keep that snapshot.
+                if !matches!(self.state, SessionState::Disconnected) {
+                    self.state = prior;
+                    self.note_link_down(None);
+                }
+                return Err(e);
+            }
             // Nothing was sent: the prior state stands. If the pre-send drain lost the
             // link, the prior state is what resumes after login.
             Err(e @ Error::PreSend(_)) => {
+                if matches!(&e, Error::PreSend(inner) if matches!(inner.as_ref(), Error::LinkDown(_)))
+                {
+                    self.state = prior;
+                    if !matches!(self.state, SessionState::Disconnected) {
+                        self.note_link_down(None);
+                    }
+                    return Err(e);
+                }
                 let lost = matches!(self.state, SessionState::Disconnected);
                 self.state = prior;
                 if lost {
@@ -924,6 +953,53 @@ mod tests {
         c.rx = stale.clone();
         assert_eq!(c.drain_until_quiet(), Ok(()));
         assert!(c.rx.is_empty(), "buffered bytes survived the drain");
+        assert_eq!(c.drained().first().map(|d| d.bytes.clone()), Some(stale));
+    }
+
+    /// Replies only after a send; the send takes long enough that the post-send guard
+    /// window has already passed, so the guard never clears `rx` itself.
+    struct ReplyOnSend {
+        now: u64,
+        reply: Vec<u8>,
+        inbound: VecDeque<Vec<u8>>,
+    }
+
+    impl Transport for ReplyOnSend {
+        fn send(&mut self, _: &[u8]) -> Result<(), TransportError> {
+            self.now += 1_000;
+            self.inbound.push_back(self.reply.clone());
+            Ok(())
+        }
+        fn recv(&mut self, timeout_ms: u64) -> Result<Vec<u8>, TransportError> {
+            self.inbound.pop_front().ok_or_else(|| {
+                self.now += timeout_ms;
+                TransportError::Timeout
+            })
+        }
+        fn now_ms(&mut self) -> u64 {
+            self.now
+        }
+    }
+
+    /// Architect 5632467751: a stale frame already buffered in `rx` before a send is
+    /// discarded by the pre-send rx flush in `flush_pending`, so the real ack is the
+    /// reply. Without that flush the stale read reply is parsed first and the request
+    /// fails (mismatched command), so this test fails.
+    #[test]
+    fn presend_flush_discards_buffered_rx_before_reply() {
+        let ack = vec![0x03, 0x00, 0x00, 0x03];
+        let stale = vec![0x03, 0x01, 0x00, 0x04];
+        let mut c = Client::new(ReplyOnSend {
+            now: 0,
+            reply: ack.clone(),
+            inbound: VecDeque::new(),
+        });
+        c.state = SessionState::Binary;
+        c.rx = stale.clone();
+        let r = c.request(&[0x02, 0x08, 0x0a], Cmd::Write, 500);
+        let want = frame::classify(&ack).ok();
+        assert!(want.is_some());
+        assert_eq!(r.ok(), want);
         assert_eq!(c.drained().first().map(|d| d.bytes.clone()), Some(stale));
     }
 }

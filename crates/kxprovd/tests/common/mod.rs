@@ -31,7 +31,7 @@ pub fn write_testing_mode_backup_meta(backups_dir: &Path, digest: &str) {
         sha256: "aa".repeat(32),
         path: backups_dir.join(format!("{id}.dbh")),
         caller_id_digest: Some(digest.into()),
-        operational_mode: OperationalMode::Testing,
+        operational_mode: Some(OperationalMode::Testing),
     };
     std::fs::write(
         backups_dir.join(format!("{id}.meta")),
@@ -51,7 +51,7 @@ pub fn write_prod_mode_backup_meta(backups_dir: &Path, digest: &str) {
         sha256: "bb".repeat(32),
         path: backups_dir.join(format!("{id}.dbh")),
         caller_id_digest: Some(digest.into()),
-        operational_mode: OperationalMode::Production,
+        operational_mode: Some(OperationalMode::Production),
     };
     std::fs::write(
         backups_dir.join(format!("{id}.meta")),

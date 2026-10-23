@@ -2,7 +2,7 @@ use kxtd1232::{Transport, TransportError};
 use kxtd1232_sim::SimTransport;
 use std::sync::Arc;
 
-/// Virtual-time bridge for the in-process simulator (Phase A default).
+/// Virtual-time bridge for the in-process simulator (`inprocess-sim` feature).
 pub struct SimTransportBridge {
     inner: SimTransport,
 }

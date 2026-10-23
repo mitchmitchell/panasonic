@@ -31,3 +31,6 @@ pub use fields::FieldKind;
 pub use frame::{Cmd, Encoder, Reply, ReplyKind};
 pub use plan::{build_plan, field_patch, ChunkWrite, Granularity, Patch, WritePlan};
 pub use signon::SignOn;
+
+/// `true` when this crate was built with the `test-transport-access` feature (release graphs should keep this `false`).
+pub const TEST_TRANSPORT_ACCESS: bool = cfg!(feature = "test-transport-access");

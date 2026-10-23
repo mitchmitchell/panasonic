@@ -5,12 +5,12 @@
 Provisioning tool for a Panasonic KX-TD1232 PBX. The production app is Rust; see `docs/prototype.md`
 for the Python A0 prototype.
 
-## Workspace (Phase A1)
+## Workspace (Phase A1–A2)
 
 | crate | what |
 |---|---|
 | `crates/kxtd1232` | sync sans-I/O protocol core: frames, login/session, typed fields, WritePlan, guarded client |
-| `crates/kxtd1232-sim` | simulated PBX with fault injection (virtual time) |
+| `crates/kxtd1232-sim` | simulated PBX, §6 fault hooks, scrubbed fixtures (A2) |
 | `crates/kxprov` | thin CLI: `version`, `read`, `plan` (sim transport only in A1) |
 | `crates/kxprovd`, `kxprov-api`, `kxprov-web`, `kxprov-mcp`, `kxprov-gw` | layout stubs for later phases |
 
