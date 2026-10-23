@@ -411,8 +411,13 @@ impl SimPbx {
             return self.malformed_frame();
         }
         if checksum(&raw[..raw.len() - 1]) != raw[raw.len() - 1] {
+            let mut out = vec![(lat, Self::reply(cmd, &[0x01, 0x02]))];
+            if self.buf.is_empty() {
+                return out;
+            }
             self.start_busy_lockup();
-            return vec![(lat, Self::reply(cmd, &[0x01, 0x02]))];
+            out.push((self.latency_ms, BUSY_FRAME.to_vec()));
+            return out;
         }
         self.clear_busy_lockup();
         self.commands.push(cmd);
@@ -574,9 +579,12 @@ pub struct SimTransport {
     pub sent: Vec<u8>,
     /// When set, the link drops right after the next write frame reaches the simulator.
     pub drop_link_after_write: bool,
-    /// Next write send fails with `LinkDown` after this many bytes left the host (a
-    /// partial frame, or the whole frame when >= its length, which the PBX then stores).
-    pub fail_write_send_after: Option<usize>,
+    /// Next send fails after this many bytes left the host (`LinkDown` if `n > 0`,
+    /// [`TransportError::NothingWritten`] if `n == 0`). A full write frame may be stored
+    /// when `n` equals the frame length.
+    pub fail_send_after: Option<usize>,
+    /// Next [`Transport::send`] returns [`TransportError::Timeout`] (once).
+    pub send_timeout_next: bool,
     link_down: bool,
     #[cfg(feature = "faults")]
     link_drop_pending: bool,
@@ -594,7 +602,8 @@ impl SimTransport {
             queue: q,
             sent: Vec::new(),
             drop_link_after_write: false,
-            fail_write_send_after: None,
+            fail_send_after: None,
+            send_timeout_next: false,
             link_down: false,
             #[cfg(feature = "faults")]
             link_drop_pending: false,
@@ -605,7 +614,8 @@ impl SimTransport {
     pub fn reconnect(&mut self) {
         self.link_down = false;
         self.drop_link_after_write = false;
-        self.fail_write_send_after = None;
+        self.fail_send_after = None;
+        self.send_timeout_next = false;
         #[cfg(feature = "faults")]
         {
             self.link_drop_pending = false;
@@ -683,29 +693,31 @@ impl Transport for SimTransport {
         if self.link_down {
             return Err(TransportError::NothingWritten("sim: link dropped".into()));
         }
+        if self.send_timeout_next {
+            self.send_timeout_next = false;
+            return Err(TransportError::Timeout);
+        }
         let tline = kxtd1232::Timing::default();
-        if data.get(1) == Some(&Cmd::Write.byte()) {
-            if let Some(n) = self.fail_write_send_after.take() {
-                let n = n.min(data.len());
-                if n > 0 {
-                    self.sent.extend_from_slice(&data[..n]);
-                    let rx_done = self.now + tline.tx_ms(n);
-                    for (delay, bytes) in self.sim.feed(&data[..n], self.now) {
-                        let at = rx_done + delay + tline.tx_ms(bytes.len());
-                        self.schedule(at, bytes);
-                    }
+        if let Some(n) = self.fail_send_after.take() {
+            let n = n.min(data.len());
+            if n > 0 {
+                self.sent.extend_from_slice(&data[..n]);
+                let rx_done = self.now + tline.tx_ms(n);
+                for (delay, bytes) in self.sim.feed(&data[..n], self.now) {
+                    let at = rx_done + delay + tline.tx_ms(bytes.len());
+                    self.schedule(at, bytes);
                 }
-                self.link_down = true;
-                if n == 0 {
-                    return Err(TransportError::NothingWritten(
-                        "sim: link dropped mid-send".into(),
-                    ));
-                }
-                return Err(TransportError::LinkDown(LinkDownError {
-                    detail: "sim: link dropped mid-send".into(),
-                    bytes_sent: n,
-                }));
             }
+            self.link_down = true;
+            if n == 0 {
+                return Err(TransportError::NothingWritten(
+                    "sim: link dropped mid-send".into(),
+                ));
+            }
+            return Err(TransportError::LinkDown(LinkDownError {
+                detail: "sim: link dropped mid-send".into(),
+                bytes_sent: n,
+            }));
         }
         #[cfg(feature = "faults")]
         if let Some(n) = self.sim.take_mid_send_fault(data) {

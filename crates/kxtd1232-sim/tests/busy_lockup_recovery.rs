@@ -90,6 +90,19 @@ fn test_bad_checksum_read_nak_then_lockup_on_trailing_junk() {
 }
 
 #[test]
+fn test_lone_bad_checksum_read_nak_only_no_lockup() {
+    let mut c = client_read();
+    Transport::send(c.transport_mut(), &bad_read_header()).unwrap();
+    let first = c.transport_mut().recv(5_000).unwrap();
+    assert_eq!(
+        first.as_slice(),
+        READ_BAD_CHECKSUM_NAK,
+        "lone bad-checksum read must get only the NAK fixture"
+    );
+    assert!(c.read(0x24, 0, 0, 3).is_ok(), "link stays up after NAK");
+}
+
+#[test]
 fn test_bad_checksum_write_nak_link_stays_up() {
     let mut c = client_write();
     let base = c.read(0x25, 0, 0, 80).unwrap();
@@ -101,11 +114,11 @@ fn test_bad_checksum_write_nak_link_stays_up() {
     corrupt_checksum(&mut bad);
     Transport::send(c.transport_mut(), &bad).unwrap();
     let first = c.transport_mut().recv(5_000).unwrap();
-    assert!(
-        first.starts_with(&WRITE_BAD_CHECKSUM_NAK),
-        "expected write bad-checksum NAK before busy, got {first:?}"
+    assert_eq!(
+        first.as_slice(),
+        WRITE_BAD_CHECKSUM_NAK,
+        "lone bad-checksum write must get only the NAK fixture"
     );
-    assert!(c.drain_until_quiet().is_ok());
     assert!(c.write(0x25, 0, 0, &new).is_ok());
 }
 

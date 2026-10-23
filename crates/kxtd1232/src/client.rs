@@ -342,7 +342,20 @@ impl<T: Transport> Client<T> {
             return Err(e);
         }
         let sent_at = self.t.now_ms();
-        self.send_frame(raw)?;
+        if let Err(e) = self.send_frame(raw) {
+            if cmd != Cmd::Write {
+                match &e {
+                    Error::LinkDown(_) if !self.needs_drain => self.note_link_down(None),
+                    Error::PreSend(inner)
+                        if matches!(inner.as_ref(), Error::LinkDown(_)) && !self.needs_drain =>
+                    {
+                        self.note_link_down(None);
+                    }
+                    _ => {}
+                }
+            }
+            return Err(e);
+        }
         let r = match self
             .drop_before_cutoff(sent_at + self.timing.reply_cutoff_ms(raw.len()))
             .and_then(|()| self.await_reply(cmd, timeout_ms))
@@ -746,6 +759,14 @@ impl<T: Transport> Client<T> {
             // Nothing was sent: the prior state stands. If the pre-send drain lost the
             // link, the prior state is what resumes after login.
             Err(e @ Error::PreSend(_)) => {
+                if matches!(&e, Error::PreSend(inner) if matches!(inner.as_ref(), Error::LinkDown(_)))
+                {
+                    self.state = prior;
+                    if !matches!(self.state, SessionState::Disconnected) {
+                        self.note_link_down(None);
+                    }
+                    return Err(e);
+                }
                 let lost = matches!(self.state, SessionState::Disconnected);
                 self.state = prior;
                 if lost {
