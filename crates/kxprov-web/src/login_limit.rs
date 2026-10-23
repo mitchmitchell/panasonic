@@ -34,6 +34,8 @@ pub struct LoginRateLimiter {
     by_key: Arc<Mutex<HashMap<String, Entry>>>,
     account_verify: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
     account_waiters: Arc<Mutex<HashMap<String, u32>>>,
+    /// In-process only (never written to disk): last successful login IP per account.
+    last_success_ip: Arc<Mutex<HashMap<String, String>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -55,6 +57,7 @@ impl LoginRateLimiter {
             by_key: Arc::new(Mutex::new(HashMap::new())),
             account_verify: Arc::new(Mutex::new(HashMap::new())),
             account_waiters: Arc::new(Mutex::new(HashMap::new())),
+            last_success_ip: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -150,11 +153,15 @@ impl LoginRateLimiter {
 
     async fn is_privileged_login_ip(
         &self,
-        _account_key: &str,
+        account_key: &str,
         ip_key: &str,
         session_prior_ip_key: Option<&str>,
     ) -> bool {
-        session_prior_ip_key == Some(ip_key)
+        if session_prior_ip_key == Some(ip_key) {
+            return true;
+        }
+        let map = self.last_success_ip.lock().await;
+        map.get(account_key).is_some_and(|last| last == ip_key)
     }
 
     async fn account_verify_lock(&self, account_key: &str) -> Arc<Mutex<()>> {
@@ -213,6 +220,9 @@ impl LoginRateLimiter {
         let mut map = self.by_key.lock().await;
         map.remove(account_key);
         map.remove(ip_key);
+        drop(map);
+        let mut last = self.last_success_ip.lock().await;
+        last.insert(account_key.to_string(), ip_key.to_string());
     }
 
     async fn bump(&self, key: &str, cap: Duration) {
@@ -388,6 +398,7 @@ mod tests {
             Duration::from_secs(30),
             Duration::from_secs(300),
         ));
+        limiter.on_success("acct:admin", "ip:admin-clean").await;
         for i in 0..20 {
             limiter
                 .record_failure("acct:admin", &format!("ip:attacker-{i}"))
@@ -413,19 +424,62 @@ mod tests {
         let started = Instant::now();
         barrier.wait().await;
         limiter
-            .enter_account_login(
-                "acct:admin",
-                "ip:admin-clean",
-                Some("ip:admin-clean"),
-                || async { "ok" },
-            )
+            .enter_account_login("acct:admin", "ip:admin-clean", None, || async { "ok" })
             .await
-            .expect("admin login succeeds");
+            .expect("admin login succeeds via in-memory last-success IP");
         assert!(
             started.elapsed() < Duration::from_secs(3),
             "admin waited {:?}",
             started.elapsed()
         );
+    }
+
+    #[tokio::test]
+    async fn session_prior_ip_skips_queue_without_last_success_entry() {
+        let limiter = LoginRateLimiter::new(
+            Duration::from_millis(150),
+            Duration::from_secs(30),
+            Duration::from_secs(300),
+        );
+        for i in 0..10 {
+            limiter
+                .record_failure("acct:admin", &format!("ip:attacker-{i}"))
+                .await;
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        let started = Instant::now();
+        limiter
+            .enter_account_login(
+                "acct:admin",
+                "ip:session-home",
+                Some("ip:session-home"),
+                || async { "ok" },
+            )
+            .await
+            .expect("session-stored IP skips pacing");
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[tokio::test]
+    async fn last_success_ip_skips_queue_without_session() {
+        let limiter = LoginRateLimiter::new(
+            Duration::from_millis(150),
+            Duration::from_secs(30),
+            Duration::from_secs(300),
+        );
+        limiter.on_success("acct:admin", "ip:known-good").await;
+        for i in 0..10 {
+            limiter
+                .record_failure("acct:admin", &format!("ip:attacker-{i}"))
+                .await;
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        let started = Instant::now();
+        limiter
+            .enter_account_login("acct:admin", "ip:known-good", None, || async { "ok" })
+            .await
+            .expect("last-success IP skips queue without session cookie");
+        assert!(started.elapsed() < Duration::from_secs(1));
     }
 
     #[tokio::test]
@@ -435,6 +489,7 @@ mod tests {
             Duration::from_secs(30),
             Duration::from_secs(300),
         ));
+        limiter.on_success("acct:admin", "ip:admin-home").await;
         for i in 0..30 {
             limiter
                 .record_failure("acct:admin", &format!("ip:seed-{i}"))
@@ -459,14 +514,9 @@ mod tests {
         let started = Instant::now();
         barrier.wait().await;
         limiter
-            .enter_account_login(
-                "acct:admin",
-                "ip:admin-home",
-                Some("ip:admin-home"),
-                || async { "ok" },
-            )
+            .enter_account_login("acct:admin", "ip:admin-home", None, || async { "ok" })
             .await
-            .expect("privileged admin ip");
+            .expect("privileged admin ip via last-success");
         assert!(started.elapsed() < Duration::from_secs(3));
     }
 
