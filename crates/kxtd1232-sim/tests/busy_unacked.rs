@@ -159,21 +159,18 @@ fn test_reply_must_match_request_cmd() {
 
 #[test]
 fn test_stray_write_ack_is_not_a_read_reply() {
-    // A late write ack landing where a read reply is expected is a mismatch, never data.
+    // A late write ack is consumed by the resync after the unacked write (or by the
+    // pre-send flush), never returned as read data.
     let mut c = client();
     let (_base, new) = block(&mut c);
     c.transport_mut()
         .sim
         .inject(Fault::LateAck { delay_ms: 2_300 });
     assert!(matches!(c.write(0x25, 10, 0, &new), Err(Error::Unacked(_))));
-    // Skip the drain on purpose (a raw read) while the ack is in flight.
+    assert!(c
+        .drained()
+        .iter()
+        .any(|d| d.bytes == [0x03, 0x00, 0x00, 0x03]));
     c.transport_mut().sim.latency_ms = 500;
-    let r = c.read(0x25, 10, 0, 80);
-    assert_eq!(
-        r,
-        Err(Error::MismatchedReply {
-            expected: 0x01,
-            got: 0x00
-        })
-    );
+    assert_eq!(c.read(0x25, 10, 0, 80), Ok(new));
 }

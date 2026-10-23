@@ -2,20 +2,45 @@
 //! [`SimTransport`]. All data is synthetic; nothing here comes from a real unit.
 //!
 //! Fault injection (design §6 / milestone A2) is behind the **`faults`** cargo feature
-//! (dev/tests only; production binaries must not enable it).
+//! (dev/tests only; production binaries must not enable it). Virtual time models 9600-baud
+//! line delay for replies (see [`SimTransport::send`]).
 
 use kxtd1232::fields::{encode_cid_name, encode_cid_number, encode_ext_name};
-use kxtd1232::frame::{checksum, encode_raw, Cmd};
+use kxtd1232::frame::{checksum, Cmd};
 #[cfg(feature = "faults")]
 use kxtd1232::frame::BUSY_FRAME;
 use kxtd1232::tables;
-use kxtd1232::{Transport, TransportError};
+use kxtd1232::{SignOn, Transport, TransportError};
 use std::collections::{HashMap, VecDeque};
 
 pub const PLACEHOLDER_PASSWORD: &str = "0000";
 pub const PLACEHOLDER_ROM_ID: &str = "-----PXXXXXXXXXX";
-/// Sign-on line is a neutral placeholder; only the `Enter Password` prompt is behavior-spec text.
-pub const BANNER: &[u8] = b"<SIGNON_BANNER>\r\nEnter Password\r\n";
+/// Sign-on text the simulator plays: the placeholders from [`SignOn::default`].
+fn text_line(s: &str) -> Vec<u8> {
+    format!("{s}\r\n").into_bytes()
+}
+
+/// Banner then password prompt, as sent after CR LF and after BYE.
+pub fn banner() -> Vec<u8> {
+    let s = SignOn::default();
+    let mut v = text_line(&s.banner);
+    v.extend(text_line(&s.password_prompt));
+    v
+}
+
+/// Frame `[LEN][CMD][body][SUM]` as the PBX would send it. The simulator plays the PBX, so
+/// it frames its own replies; the protocol core exposes no raw-byte encoder. Tests use it
+/// to inject stale or garbled frames.
+pub fn reply_frame(cmd: u8, body: &[u8]) -> Vec<u8> {
+    let len = 2 + body.len();
+    assert!(len <= 0xFF, "reply body too long");
+    let mut out = Vec::with_capacity(len + 1);
+    out.push(len as u8);
+    out.push(cmd);
+    out.extend_from_slice(body);
+    out.push(checksum(&out));
+    out
+}
 /// Busy-frame cadence (behavior spec / design §9b default until H5).
 pub const BUSY_CADENCE_MS: u64 = 128;
 
@@ -41,6 +66,11 @@ pub enum Fault {
     GarbledAck,
     /// Next write is stored and answered with an ack for another command (0x01).
     StaleReply,
+    /// Next request's real reply is preceded by a same-command stale one (a read reply
+    /// full of 0xEE, or a write ack) arriving 20 ms earlier.
+    DuplicateReply,
+    /// Next request's reply is followed 10 ms later by one busy frame.
+    BusyAfterReply,
     /// Next write is stored; the ack is cut off after `partial_len` bytes, then the link drops.
     LinkDropMidChunk { partial_len: usize },
     /// Drop the link after `after_bytes` of the next outgoing write frame (not stored).
@@ -62,6 +92,8 @@ impl Fault {
             self,
             Self::Nak
                 | Self::Busy { .. }
+                | Self::DuplicateReply
+                | Self::BusyAfterReply
                 | Self::ReadRefused
                 | Self::WrongPassword
                 | Self::AnotherTerminal(_)
@@ -130,6 +162,8 @@ pub struct SimPbx {
     pub commands: Vec<u8>,
     /// Response latency for every reply.
     pub latency_ms: u64,
+    /// When set, BYE gets no answer (logout not confirmed).
+    pub silent_bye: bool,
     #[cfg(feature = "faults")]
     pub(crate) link_drop_partial: Option<usize>,
     #[cfg(feature = "faults")]
@@ -162,6 +196,7 @@ impl SimPbx {
             writes: Vec::new(),
             commands: Vec::new(),
             latency_ms: 30,
+            silent_bye: false,
             #[cfg(feature = "faults")]
             link_drop_partial: None,
             #[cfg(feature = "faults")]
@@ -249,7 +284,7 @@ impl SimPbx {
         match self.mode {
             Mode::AwaitCrlf => {
                 self.mode = Mode::AwaitPassword;
-                BANNER.to_vec()
+                banner()
             }
             Mode::AwaitPassword if line == self.password.as_slice() => {
                 #[cfg(feature = "faults")]
@@ -258,12 +293,13 @@ impl SimPbx {
                         Fault::AnotherTerminal(s) | Fault::LoginReply(s) => {
                             format!("{s}\r\n").into_bytes()
                         }
-                        _ => b"EIA Mode Start\r\n".to_vec(),
+                        _ => text_line(&SignOn::default().mode_start),
                     };
                 }
                 self.mode = Mode::AwaitEcs;
-                b"EIA Mode Start\r\n".to_vec()
+                text_line(&SignOn::default().mode_start)
             }
+            // Wrong-password reply is a guess, like the RE simulator (gate G5).
             Mode::AwaitPassword => {
                 #[cfg(feature = "faults")]
                 if let Some(f) = self.take_login_fault(true) {
@@ -271,11 +307,11 @@ impl SimPbx {
                         Fault::AnotherTerminal(s) | Fault::LoginReply(s) => {
                             format!("{s}\r\n").into_bytes()
                         }
-                        Fault::WrongPassword => b"Enter Password\r\n".to_vec(),
-                        _ => b"Enter Password\r\n".to_vec(),
+                        Fault::WrongPassword => text_line(&SignOn::default().password_prompt),
+                        _ => text_line(&SignOn::default().password_prompt),
                     };
                 }
-                b"Enter Password\r\n".to_vec()
+                text_line(&SignOn::default().password_prompt)
             }
             Mode::AwaitEcs if line == b"ECS OF" => {
                 self.mode = Mode::AwaitPrg;
@@ -285,10 +321,11 @@ impl SimPbx {
                 self.mode = Mode::Binary;
                 b"OK\r\n".to_vec()
             }
+            Mode::AwaitBye if line == b"BYE" && self.silent_bye => Vec::new(),
             Mode::AwaitBye if line == b"BYE" => {
                 self.mode = Mode::AwaitPassword;
                 let mut v = b"OK\r\n".to_vec();
-                v.extend_from_slice(BANNER);
+                v.extend(banner());
                 v
             }
             _ => b"NG\r\n".to_vec(),
@@ -296,7 +333,7 @@ impl SimPbx {
     }
 
     fn reply(cmd: u8, body: &[u8]) -> Vec<u8> {
-        encode_raw(cmd, body).unwrap_or_default()
+        reply_frame(cmd, body)
     }
 
     fn frame(&mut self, raw: &[u8]) -> Emits {
@@ -310,65 +347,92 @@ impl SimPbx {
         let mut out: Emits = Vec::new();
         #[cfg(feature = "faults")]
         {
-        let is_write = cmd == Cmd::Write.byte();
-        let fault = match self.faults.front() {
-            Some(f) if is_write || !f.write_only() => self.faults.pop_front(),
-            _ => None,
-        };
-        let mut t = lat;
-        match fault {
-            Some(Fault::Nak) => return vec![(lat, Self::reply(cmd, &[0x01, 0x02]))],
-            Some(Fault::Busy { frames }) => {
-                for _ in 0..frames {
-                    out.push((t, BUSY_FRAME.to_vec()));
-                    t += BUSY_CADENCE_MS;
+            let is_write = cmd == Cmd::Write.byte();
+            let fault = match self.faults.front() {
+                Some(f) if is_write || !f.write_only() => self.faults.pop_front(),
+                _ => None,
+            };
+            let mut t = lat;
+            match fault {
+                Some(Fault::Nak) => return vec![(lat, Self::reply(cmd, &[0x01, 0x02]))],
+                Some(Fault::Busy { frames }) => {
+                    for _ in 0..frames {
+                        out.push((t, BUSY_FRAME.to_vec()));
+                        t += BUSY_CADENCE_MS;
+                    }
                 }
-            }
-            Some(Fault::NoAckApplied) => {
-                self.store(body, true);
-                return out;
-            }
-            Some(Fault::NoAckThenBusy { busy_frames }) => {
-                self.store(body, true);
-                self.post_write_busy = Some(busy_frames);
-                return out;
-            }
-            Some(Fault::NoAckDropped) => {
-                self.store(body, false);
-                return out;
-            }
-            Some(Fault::LateAck { delay_ms }) => {
-                let r = self.store(body, true);
-                return vec![(delay_ms, r)];
-            }
-            Some(Fault::GarbledAck) => {
-                let mut r = self.store(body, true);
-                if let Some(last) = r.last_mut() {
-                    *last = last.wrapping_add(1);
+                Some(Fault::NoAckApplied) => {
+                    self.store(body, true);
+                    return out;
                 }
-                return vec![(lat, r)];
+                Some(Fault::NoAckThenBusy { busy_frames }) => {
+                    self.store(body, true);
+                    self.post_write_busy = Some(busy_frames);
+                    return out;
+                }
+                Some(Fault::NoAckDropped) => {
+                    self.store(body, false);
+                    return out;
+                }
+                Some(Fault::LateAck { delay_ms }) => {
+                    let r = self.store(body, true);
+                    return vec![(delay_ms, r)];
+                }
+                Some(Fault::GarbledAck) => {
+                    let mut r = self.store(body, true);
+                    if let Some(last) = r.last_mut() {
+                        *last = last.wrapping_add(1);
+                    }
+                    return vec![(lat, r)];
+                }
+                Some(Fault::StaleReply) => {
+                    self.store(body, true);
+                    return vec![(lat, Self::reply(Cmd::Read.byte(), &[0x00]))];
+                }
+                Some(Fault::LinkDropMidChunk { partial_len }) => {
+                    let r = self.store(body, true);
+                    self.link_drop_partial = Some(partial_len);
+                    return vec![(lat, r)];
+                }
+                Some(Fault::ReadRefused) => {
+                    return vec![(lat, Self::reply(Cmd::Read.byte(), &[0x01, 0x03]))];
+                }
+                Some(Fault::DuplicateReply) => {
+                    let stale = match Cmd::from_byte(cmd) {
+                        Some(Cmd::Read) if body.len() == 6 => {
+                            let mut b = vec![0x00];
+                            b.resize(1 + 2 * body[5] as usize, 0xEE);
+                            Self::reply(cmd, &b)
+                        }
+                        _ => Self::reply(cmd, &[0x00]),
+                    };
+                    out.push((t, stale));
+                    t += 20;
+                }
+                Some(Fault::SilentWrite) | Some(Fault::BusyAfterReply) => {}
+                Some(Fault::LinkDropMidSend { .. })
+                | Some(Fault::WrongPassword)
+                | Some(Fault::AnotherTerminal(_))
+                | Some(Fault::LoginReply(_)) => {}
+                None => {}
             }
-            Some(Fault::StaleReply) => {
-                self.store(body, true);
-                return vec![(lat, Self::reply(Cmd::Read.byte(), &[0x00]))];
+            let silent = fault == Some(Fault::SilentWrite);
+            let r = self.frame_reply(cmd, body, silent);
+            out.push((t, r));
+            if fault == Some(Fault::BusyAfterReply) {
+                out.push((t + 10, BUSY_FRAME.to_vec()));
             }
-            Some(Fault::LinkDropMidChunk { partial_len }) => {
-                let r = self.store(body, true);
-                self.link_drop_partial = Some(partial_len);
-                return vec![(lat, r)];
-            }
-            Some(Fault::ReadRefused) => {
-                return vec![(lat, Self::reply(Cmd::Read.byte(), &[0x01, 0x03]))];
-            }
-            Some(Fault::SilentWrite) => {}
-            Some(Fault::LinkDropMidSend { .. })
-            | Some(Fault::WrongPassword)
-            | Some(Fault::AnotherTerminal(_))
-            | Some(Fault::LoginReply(_)) => {}
-            None => {}
+            return out;
         }
-        let silent = fault == Some(Fault::SilentWrite);
-        let r = match Cmd::from_byte(cmd) {
+        #[cfg(not(feature = "faults"))]
+        {
+            out.push((lat, self.frame_reply(cmd, body, false)));
+            out
+        }
+    }
+
+    fn frame_reply(&mut self, cmd: u8, body: &[u8], silent: bool) -> Vec<u8> {
+        match Cmd::from_byte(cmd) {
             Some(Cmd::Probe) if body == [0x00] => {
                 let mut b = vec![0x00];
                 b.extend_from_slice(&self.rom_id);
@@ -383,33 +447,7 @@ impl SimPbx {
                 Self::reply(cmd, &[0x00])
             }
             _ => Self::reply(cmd, &[0x00]),
-        };
-        out.push((t, r));
-        return out;
         }
-        #[cfg(not(feature = "faults"))]
-        let r = match Cmd::from_byte(cmd) {
-            Some(Cmd::Probe) if body == [0x00] => {
-                let mut b = vec![0x00];
-                b.extend_from_slice(&self.rom_id);
-                Self::reply(cmd, &b)
-            }
-            Some(Cmd::Probe) if body == [0x01] => Self::reply(cmd, &[0x01, 0x03]),
-            Some(Cmd::Read) if body.len() == 6 => self.read(body),
-            Some(Cmd::Write) if body.len() > 6 => self.store(body, true),
-            Some(Cmd::Clock) => Self::reply(cmd, &[0x00, 0x1A, 1, 2, 0, 3, 4, 5, 0]),
-            Some(Cmd::EndBinary) => {
-                self.mode = Mode::AwaitBye;
-                Self::reply(cmd, &[0x00])
-            }
-            _ => Self::reply(cmd, &[0x00]),
-        };
-        #[cfg(not(feature = "faults"))]
-        {
-            out.push((lat, r));
-        }
-        #[allow(unreachable_code)]
-        out
     }
 
     fn span(&self, body: &[u8], len: usize) -> Option<(u8, usize)> {
@@ -440,7 +478,7 @@ impl SimPbx {
     fn store(&mut self, body: &[u8], apply: bool) -> Vec<u8> {
         let payload = &body[6..];
         let Some((table, start)) = self.span(body, payload.len()) else {
-            return Self::reply(Cmd::Write.byte(), &[0x01, 0x03]);
+            return Self::reply(Cmd::Write.byte(), &[0x01, 0x03]); // guess (G4)
         };
         let rec = u16::from_be_bytes([body[1], body[2]]);
         let word = u16::from_be_bytes([body[3], body[4]]);
@@ -461,12 +499,15 @@ pub struct SimTransport {
     queue: VecDeque<(u64, Vec<u8>)>,
     /// Every byte the client sent.
     pub sent: Vec<u8>,
+    /// When set, the link drops right after the next write frame reaches the simulator.
+    pub drop_link_after_write: bool,
     link_down: bool,
+    #[cfg(feature = "faults")]
     link_drop_pending: bool,
 }
 
 impl SimTransport {
-    /// Opening the port raises DTR; the simulator emits flow-control bytes then the banner.
+    /// Opening the port raises DTR; the simulator answers XOFF/XON.
     pub fn new(mut sim: SimPbx) -> Self {
         let first = sim.dtr_up();
         let mut q = VecDeque::new();
@@ -476,32 +517,47 @@ impl SimTransport {
             now: 0,
             queue: q,
             sent: Vec::new(),
+            drop_link_after_write: false,
             link_down: false,
+            #[cfg(feature = "faults")]
             link_drop_pending: false,
         }
     }
 
+    /// Bring a dropped link back: DTR cycles and the PBX greets again, ready for login.
+    pub fn reconnect(&mut self) {
+        self.link_down = false;
+        self.drop_link_after_write = false;
+        #[cfg(feature = "faults")]
+        {
+            self.link_drop_pending = false;
+        }
+        self.queue.clear();
+        self.sim.dtr_down();
+        let first = self.sim.dtr_up();
+        let now = self.now;
+        self.schedule(now, first);
+    }
+
+    /// Drop the link now: every later send/recv fails until [`Self::reconnect`].
+    pub fn drop_link_now(&mut self) {
+        self.link_down = true;
+    }
+
+    /// Queue bytes as if they were already waiting in the receive buffer (a stale frame
+    /// from an earlier exchange).
+    pub fn inject_inbound(&mut self, bytes: Vec<u8>) {
+        self.inject_inbound_after(0, bytes);
+    }
+
+    /// Queue bytes to arrive `delay_ms` from now, independent of any request.
+    pub fn inject_inbound_after(&mut self, delay_ms: u64, bytes: Vec<u8>) {
+        let at = self.now + delay_ms;
+        self.schedule(at, bytes);
+    }
+
     pub fn now(&self) -> u64 {
         self.now
-    }
-
-    /// Cable re-seat: PBX returns to the text login state; queues are cleared.
-    pub fn reconnect(&mut self) {
-        self.sim.dtr_down();
-        self.clear_link_down();
-        self.queue.clear();
-        let first = self.sim.dtr_up();
-        self.queue.push_back((self.now, first));
-    }
-
-    /// Transport may send again; the client still needs [`Client::login`] after link loss.
-    pub fn clear_link_down(&mut self) {
-        self.link_down = false;
-        self.link_drop_pending = false;
-    }
-
-    pub fn is_link_down(&self) -> bool {
-        self.link_down
     }
 
     fn schedule(&mut self, at: u64, bytes: Vec<u8>) {
@@ -517,17 +573,17 @@ impl SimTransport {
 impl Transport for SimTransport {
     fn send(&mut self, data: &[u8]) -> Result<(), TransportError> {
         if self.link_down {
-            return Err(TransportError::LinkDown(
-                "simulated serial link down".into(),
-            ));
+            return Err(TransportError::LinkDown("sim: link dropped".into()));
         }
+        let tline = kxtd1232::Timing::default();
         #[cfg(feature = "faults")]
         if let Some(n) = self.sim.take_mid_send_fault(data) {
             let n = n.min(data.len());
             if n > 0 {
                 self.sent.extend_from_slice(&data[..n]);
+                let rx_done = self.now + tline.tx_ms(n);
                 for (delay, bytes) in self.sim.feed(&data[..n]) {
-                    let at = self.now + delay;
+                    let at = rx_done + delay + tline.tx_ms(bytes.len());
                     self.schedule(at, bytes);
                 }
             }
@@ -537,6 +593,14 @@ impl Transport for SimTransport {
             ));
         }
         self.sent.extend_from_slice(data);
+        if self.drop_link_after_write && data.get(1) == Some(&Cmd::Write.byte()) {
+            self.sim.feed(data);
+            self.link_down = true;
+            return Ok(());
+        }
+        // Model the 9600-baud line: the PBX acts once the request has been received, and
+        // each reply lands once it has been transmitted.
+        let rx_done = self.now + tline.tx_ms(data.len());
         for (delay, bytes) in self.sim.feed(data) {
             #[cfg(feature = "faults")]
             let bytes = {
@@ -550,13 +614,16 @@ impl Transport for SimTransport {
                 }
                 bytes
             };
-            let at = self.now + delay;
+            let at = rx_done + delay + tline.tx_ms(bytes.len());
             self.schedule(at, bytes);
         }
         #[cfg(feature = "faults")]
         if let Some(frames) = self.sim.post_write_busy.take() {
             for i in 0..frames {
-                let at = self.now + self.sim.latency_ms + u64::from(i) * BUSY_CADENCE_MS;
+                let at = rx_done
+                    + self.sim.latency_ms
+                    + u64::from(i) * BUSY_CADENCE_MS
+                    + tline.tx_ms(BUSY_FRAME.len());
                 self.schedule(at, BUSY_FRAME.to_vec());
             }
         }
@@ -565,9 +632,7 @@ impl Transport for SimTransport {
 
     fn recv(&mut self, timeout_ms: u64) -> Result<Vec<u8>, TransportError> {
         if self.link_down {
-            return Err(TransportError::LinkDown(
-                "simulated serial link down".into(),
-            ));
+            return Err(TransportError::LinkDown("sim: link dropped".into()));
         }
         match self.queue.front() {
             Some(&(at, _)) if at <= self.now + timeout_ms => {
@@ -581,6 +646,7 @@ impl Transport for SimTransport {
                         out.extend(b);
                     }
                 }
+                #[cfg(feature = "faults")]
                 if self.link_drop_pending {
                     self.link_drop_pending = false;
                     self.link_down = true;

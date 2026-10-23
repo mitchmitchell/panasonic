@@ -50,11 +50,10 @@ fn test_link_drop_mid_chunk_disconnects_then_relogin_verify() {
     ));
     assert_eq!(c.state(), &SessionState::Disconnected);
     assert_eq!(write_cmds(&c), 1, "never resent");
-    c.transport_mut().clear_link_down();
     assert_eq!(
         c.verify_block(0x25, 10, 0, &new, &base),
         Err(Error::SessionLost),
-        "clear_link_down alone must not restore binary I/O"
+        "transport reconnect alone must not restore binary I/O"
     );
     relogin(&mut c);
     assert!(matches!(c.state(), SessionState::AwaitingVerify(_)));
@@ -93,7 +92,6 @@ fn test_link_drop_blocks_until_relogin() {
         c.write(0x25, 10, 0, &new),
         Err(Error::LinkDown(_))
     ));
-    c.transport_mut().clear_link_down();
     assert!(matches!(c.read(0x24, 0, 0, 3), Err(Error::SessionLost)));
     relogin(&mut c);
     assert!(c.read(0x24, 0, 0, 3).is_ok());

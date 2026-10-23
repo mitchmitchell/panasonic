@@ -43,3 +43,19 @@ required-features = ["faults"]
 [[test]]
 name = "sim_client"
 required-features = ["faults"]
+
+[[test]]
+name = "review_bugbot2"
+required-features = ["faults"]
+
+[[test]]
+name = "review_p1"
+required-features = ["faults"]
+
+[[test]]
+name = "stale_resync"
+required-features = ["faults"]
+
+[[test]]
+name = "transmit_cutoff"
+required-features = ["faults"]

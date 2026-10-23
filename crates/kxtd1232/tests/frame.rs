@@ -4,7 +4,7 @@
 
 use kxtd1232::error::{FrameError, NotAllowed};
 use kxtd1232::frame::{
-    checksum, classify, decode, encode, Access, Cmd, Encoder, ReplyKind, MAX_READ_WORDS,
+    checksum, classify, decode, Access, Cmd, Encoder, ReplyKind, MAX_READ_WORDS,
 };
 use kxtd1232::Error;
 
@@ -110,7 +110,7 @@ fn test_read_word_limit_fits_one_frame() {
         Err(Error::Frame(FrameError::BadWordCount(0)))
     );
     // A full data reply for 126 words fits in one LEN byte.
-    assert!(encode(Cmd::Read, &[0u8; 1 + 252]).is_ok());
+    assert!(Encoder::new(Access::ReadOnly).read(0x24, 0, 0, 126).is_ok());
 }
 
 #[test]
@@ -152,4 +152,27 @@ fn test_full_upload_commands_cannot_be_encoded() {
             assert!(![0x0A, 0x10].contains(&b));
         }
     }
+    // Bytes out of every public encoding path: no frame carries command 0x0A or 0x10.
+    // (encode/encode_raw are crate-private: see the compile_fail doctests on frame::encode.)
+    let e = Encoder::new(Access::ReadWrite);
+    let mut frames = vec![
+        e.version_probe(),
+        e.status_probe(),
+        e.clock(),
+        e.end_binary(),
+    ];
+    for t in 0u8..=0xFF {
+        frames.extend(e.read(t, 0, 0, 1).ok());
+        frames.extend(e.write(t, 0, 0, &[0, 0]).ok());
+    }
+    assert!(frames.len() > 70);
+    for f in &frames {
+        assert!(![0x0A, 0x10].contains(&f[1]), "{f:02x?}");
+        assert_eq!(decode(f).unwrap().cmd, f[1]);
+    }
+}
+
+#[test]
+fn test_decode_empty_is_its_own_error() {
+    assert_eq!(decode(&[]), Err(FrameError::Empty));
 }

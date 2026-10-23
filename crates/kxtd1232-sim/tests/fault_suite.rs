@@ -5,7 +5,7 @@
 
 use kxtd1232::error::UnackedReason;
 use kxtd1232::frame::Access;
-use kxtd1232::{Client, Error, SessionState, Timing, VerifyOutcome};
+use kxtd1232::{Client, Error, SessionState, SignOn, Timing, VerifyOutcome};
 use kxtd1232_sim::{Fault, SimPbx, SimTransport, PLACEHOLDER_PASSWORD};
 
 fn client() -> Client<SimTransport> {
@@ -149,7 +149,6 @@ fn test_a2_unacked_then_busy_before_verify() {
         c.verify_block(0x24, 0, 0, &new, &base),
         Ok(VerifyOutcome::Applied)
     );
-    assert!(!c.drained().is_empty());
 }
 
 #[test]
@@ -184,7 +183,7 @@ fn test_a2_another_terminal_login_fault() {
     );
     c.transport_mut()
         .sim
-        .inject(Fault::AnotherTerminal("Another Terminal Connected".into()));
+        .inject(Fault::AnotherTerminal(SignOn::default().in_use.clone()));
     assert!(matches!(
         c.login(PLACEHOLDER_PASSWORD),
         Err(Error::Login(kxtd1232::error::LoginFailure::AnotherTerminal))

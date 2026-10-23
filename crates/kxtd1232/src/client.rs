@@ -2,9 +2,10 @@
 //! supplies bytes and the time, so the same rules run under the simulator (virtual time)
 //! and, later, under the daemon's serial port.
 
-use crate::error::{Error, FrameError, LoginFailure, UnackedReason, UnackedWrite};
+use crate::error::{Error, FrameError, LoginFailure, Op, UnackedReason, UnackedWrite};
 use crate::frame::{self, Access, Cmd, Encoder, Reply, ReplyKind};
 use crate::session::{Login, LoginState};
+use crate::signon::SignOn;
 use crate::tables;
 
 /// Transport errors.
@@ -34,8 +35,36 @@ pub struct Timing {
     pub ack_timeout_ms: u64,
     /// Longest busy run tolerated (observed ~7 s at ~128 ms cadence, plus margin).
     pub busy_limit_ms: u64,
-    /// Quiet window that ends drain-until-quiet before a verify re-read.
+    /// Quiet window: ends drain-until-quiet, and is the window after every reply in which
+    /// any further non-busy frame makes that reply suspect (possibly stale).
     pub quiet_ms: u64,
+    /// Quiet interval required before every send (shorter than `quiet_ms`, which is used
+    /// after any failed or unacked request).
+    pub presend_quiet_ms: u64,
+    /// Overall limit for the text login.
+    pub login_timeout_ms: u64,
+    /// Line rate for the post-send cutoff (10 bits per byte).
+    pub link_baud: u32,
+    /// Margin added to the post-send cutoff for the PBX's turnaround.
+    pub reply_guard_ms: u64,
+}
+
+/// Shortest reply frame (an ack), for the post-send cutoff.
+const MIN_REPLY_LEN: usize = 4;
+
+impl Timing {
+    /// Milliseconds to transmit `n` bytes at `link_baud`, 10 bits per byte, rounded up.
+    pub fn tx_ms(&self, n: usize) -> u64 {
+        let bits = n as u64 * 10 * 1000;
+        bits.div_ceil(u64::from(self.link_baud.max(1)))
+    }
+
+    /// Earliest time after a send starts at which a genuine reply can have arrived: the
+    /// request must finish transmitting, the PBX turn round, and the shortest reply
+    /// arrive. Anything before that is stale and dropped.
+    pub fn reply_cutoff_ms(&self, request_len: usize) -> u64 {
+        self.tx_ms(request_len) + self.tx_ms(MIN_REPLY_LEN) + self.reply_guard_ms
+    }
 }
 
 impl Default for Timing {
@@ -45,6 +74,10 @@ impl Default for Timing {
             ack_timeout_ms: 2_000,
             busy_limit_ms: 12_000,
             quiet_ms: 500,
+            presend_quiet_ms: 100,
+            login_timeout_ms: 30_000,
+            link_baud: 9600,
+            reply_guard_ms: 20,
         }
     }
 }
@@ -63,7 +96,9 @@ pub enum SessionState {
     NeedsRollback(UnackedWrite),
     /// Rollback failed or the line never went quiet: read-only, end allowed.
     Locked,
-    /// `end_binary` acked.
+    /// End-binary acked and BYE sent, but OK not yet seen. `end_binary` re-sends BYE.
+    ByePending,
+    /// Logout confirmed (BYE answered OK).
     Closed,
     /// Link lost while in binary mode; [`Client::login`] after transport reconnect.
     Disconnected,
@@ -96,6 +131,11 @@ pub struct Client<T: Transport> {
     /// Restored after [`Client::login`] following [`SessionState::Disconnected`].
     resume: Option<SessionState>,
     drained: Vec<Drained>,
+    /// Set when a write went unacked (or a resync failed); cleared by a completed
+    /// drain-until-quiet. `end_binary` drains first while it is set, and is held if the
+    /// drain cannot finish, so a late ack is never matched to the end-binary request.
+    needs_drain: bool,
+    signon: SignOn,
 }
 
 impl<T: Transport> Client<T> {
@@ -113,7 +153,15 @@ impl<T: Transport> Client<T> {
             state: SessionState::Text,
             resume: None,
             drained: Vec::new(),
+            needs_drain: false,
+            signon: SignOn::default(),
         }
+    }
+
+    /// Use deployment sign-on text instead of the placeholders.
+    pub fn with_signon(mut self, signon: SignOn) -> Self {
+        self.signon = signon;
+        self
     }
 
     fn require_session(&self) -> Result<(), Error> {
@@ -123,6 +171,8 @@ impl<T: Transport> Client<T> {
         Ok(())
     }
 
+    /// Link lost: remember any pending verify/rollback so it resumes after a fresh login
+    /// (and is drained first), and refuse everything else until then.
     fn note_link_down(&mut self, pending_verify: Option<UnackedWrite>) {
         self.resume = pending_verify
             .map(SessionState::AwaitingVerify)
@@ -133,6 +183,9 @@ impl<T: Transport> Client<T> {
                 )
                 .then(|| self.state.clone())
             });
+        if self.resume.is_some() {
+            self.needs_drain = true;
+        }
         self.state = SessionState::Disconnected;
         self.rx.clear();
     }
@@ -145,6 +198,9 @@ impl<T: Transport> Client<T> {
         &self.t
     }
 
+    /// Mutable transport access. Public only because `kxprovd` is the sole owner of the
+    /// serial port and the client (A3), and the simulator tests inject faults through it.
+    /// Bytes sent this way bypass every guard in this type; nothing else may hold it.
     pub fn transport_mut(&mut self) -> &mut T {
         &mut self.t
     }
@@ -156,6 +212,8 @@ impl<T: Transport> Client<T> {
 
     fn recv(&mut self, timeout_ms: u64) -> Result<Vec<u8>, Error> {
         match self.t.recv(timeout_ms) {
+            // The trait forbids an empty Ok; treat one as a dead link so no loop spins.
+            Ok(b) if b.is_empty() => Err(Error::LinkDown("transport returned no bytes".into())),
             Ok(b) => Ok(b),
             Err(TransportError::Timeout) => Err(Error::Timeout),
             Err(TransportError::LinkDown(s)) => Err(Error::LinkDown(s)),
@@ -169,11 +227,18 @@ impl<T: Transport> Client<T> {
         })
     }
 
-    /// Text login to binary mode.
+    /// Text login to binary mode, within `login_timeout_ms` overall and at most
+    /// [`crate::session::MAX_LINES`] lines.
     pub fn login(&mut self, password: &str) -> Result<(), Error> {
-        let mut sm = Login::new(password).map_err(Error::Login)?;
+        let mut sm = Login::with_signon(password, self.signon.clone()).map_err(Error::Login)?;
+        let start = self.t.now_ms();
+        let limit = self.timing.login_timeout_ms;
         while !sm.state().is_terminal() {
-            let data = self.recv(self.timing.reply_timeout_ms)?;
+            let elapsed = self.t.now_ms().saturating_sub(start);
+            if elapsed >= limit {
+                return Err(Error::Login(LoginFailure::TimedOut { ms: limit }));
+            }
+            let data = self.recv(self.timing.reply_timeout_ms.min(limit - elapsed))?;
             let out = sm.feed(&data);
             if !out.is_empty() {
                 self.send(&out)?;
@@ -203,27 +268,143 @@ impl<T: Transport> Client<T> {
         }
     }
 
-    /// Send once and return the reply for `cmd`. Busy frames are waited out (never answered
-    /// with a resend) for at most the busy bound. A reply that does not decode, or whose
-    /// command byte differs from the request, is an error. On any error the receive buffer
-    /// is cleared so the next exchange starts on a frame boundary.
+    /// Send once and return the reply for `cmd`.
+    ///
+    /// 1. Input already waiting is discarded (and logged) before the send, so a stale frame
+    ///    of the same command is never taken as this reply.
+    /// 2. Busy frames are waited out (never answered with a resend) for at most the bound.
+    /// 3. A reply that does not decode, or whose command byte differs, is an error.
+    /// 4. After the reply, any further non-busy frame within `quiet_ms` is
+    ///    [`Error::ExtraFrame`]: one of the two was stale, so neither is trusted.
+    ///
+    /// On any error the stream is resynced by drain-until-quiet, so the real reply to a
+    /// failed request is never handed to the next one.
     fn request(&mut self, raw: &[u8], cmd: Cmd, timeout_ms: u64) -> Result<Reply, Error> {
         self.require_session()?;
-        if matches!(self.state, SessionState::Text | SessionState::Closed) {
-            return Err(Error::UnexpectedReply("not in binary mode".into()));
+        if matches!(
+            self.state,
+            SessionState::Text | SessionState::Closed | SessionState::ByePending
+        ) {
+            return Err(Error::BadState {
+                op: Op::Request,
+                state: self.state.clone(),
+            });
         }
-        if let Err(e @ Error::LinkDown(_)) = self.send(raw) {
-            self.note_link_down(None);
+        if let Err(e) = self.flush_pending() {
+            if matches!(&e, Error::PreSend(inner) if matches!(**inner, Error::LinkDown(_))) {
+                // A verify/rollback is already pending: let that path record disconnect.
+                if !self.needs_drain {
+                    self.note_link_down(None);
+                }
+            }
             return Err(e);
         }
-        let r = self.await_reply(cmd, timeout_ms);
+        let sent_at = self.t.now_ms();
+        if let Err(e @ Error::LinkDown(_)) = self.send(raw) {
+            // Frame never fully left the host: nothing to verify after reconnect.
+            return Err(Error::PreSend(Box::new(e)));
+        }
+        let r = match self
+            .drop_before_cutoff(sent_at + self.timing.reply_cutoff_ms(raw.len()))
+            .and_then(|()| self.await_reply(cmd, timeout_ms))
+        {
+            Ok(reply) => self.check_trailing().map(|()| reply),
+            Err(e) => Err(e),
+        };
         if matches!(r, Err(Error::LinkDown(_))) {
             self.note_link_down(None);
+            return r;
         }
         if r.is_err() {
             self.rx.clear();
+            match self.drain_until_quiet() {
+                Ok(()) => {}
+                // The drain already recorded the disconnect; report the lost link.
+                Err(e @ Error::LinkDown(_)) => return Err(e),
+                Err(_) => self.needs_drain = true,
+            }
         }
         r
+    }
+
+    /// Before a send: discard (and log) input until the line has been quiet for
+    /// `presend_quiet_ms`. Failure (never quiet within the busy bound, or link down) is
+    /// [`Error::PreSend`]: nothing was sent.
+    fn flush_pending(&mut self) -> Result<(), Error> {
+        let start = self.t.now_ms();
+        if !self.rx.is_empty() {
+            let bytes = std::mem::take(&mut self.rx);
+            self.drained.push(Drained {
+                at_ms: start,
+                bytes,
+            });
+        }
+        loop {
+            match self.recv(self.timing.presend_quiet_ms) {
+                Ok(bytes) => {
+                    let at_ms = self.t.now_ms();
+                    self.drained.push(Drained { at_ms, bytes });
+                    if at_ms.saturating_sub(start) > self.timing.busy_limit_ms {
+                        return Err(Error::PreSend(Box::new(Error::LineNotQuiet)));
+                    }
+                }
+                Err(Error::Timeout) => return Ok(()),
+                Err(e) => return Err(Error::PreSend(Box::new(e))),
+            }
+        }
+    }
+
+    /// After a reply: anything but busy frames within the quiet window is an extra frame.
+    fn check_trailing(&mut self) -> Result<(), Error> {
+        let mut extra = std::mem::take(&mut self.rx);
+        let deadline = self.t.now_ms().saturating_add(self.timing.quiet_ms);
+        loop {
+            let now = self.t.now_ms();
+            if now >= deadline {
+                break;
+            }
+            match self.recv(deadline - now) {
+                Ok(b) => extra.extend(b),
+                Err(Error::Timeout) => break,
+                Err(e) => return Err(e),
+            }
+        }
+        while extra.starts_with(&frame::BUSY_FRAME) {
+            extra.drain(..frame::BUSY_FRAME.len());
+        }
+        if extra.is_empty() {
+            Ok(())
+        } else {
+            let at_ms = self.t.now_ms();
+            self.drained.push(Drained {
+                at_ms,
+                bytes: extra,
+            });
+            Err(Error::ExtraFrame)
+        }
+    }
+
+    /// Post-send cutoff (ported from prototype 3741820): drop (and log) every byte that
+    /// arrives before `cutoff`, since no genuine reply can be complete that soon. A write
+    /// that only saw such frames then times out and is unacked.
+    fn drop_before_cutoff(&mut self, cutoff: u64) -> Result<(), Error> {
+        loop {
+            let now = self.t.now_ms();
+            if now >= cutoff {
+                return Ok(());
+            }
+            match self.recv(cutoff - now - 1) {
+                Ok(bytes) => {
+                    let at_ms = self.t.now_ms();
+                    self.drained.push(Drained { at_ms, bytes });
+                }
+                Err(Error::Timeout) => {
+                    self.rx.clear();
+                    return Ok(());
+                }
+                Err(e) => return Err(e),
+            }
+        }
     }
 
     fn await_reply(&mut self, cmd: Cmd, timeout_ms: u64) -> Result<Reply, Error> {
@@ -335,7 +516,6 @@ impl<T: Transport> Client<T> {
         word: u16,
         payload: &[u8],
     ) -> Result<(), Error> {
-        self.require_session()?;
         match self.state {
             SessionState::Binary => {}
             SessionState::AwaitingVerify(_) | SessionState::NeedsRollback(_) => {
@@ -343,29 +523,15 @@ impl<T: Transport> Client<T> {
             }
             SessionState::Locked => return Err(Error::Locked),
             SessionState::Disconnected => return Err(Error::SessionLost),
-            _ => return Err(Error::UnexpectedReply("not in binary mode".into())),
+            _ => {
+                return Err(Error::BadState {
+                    op: Op::Write,
+                    state: self.state.clone(),
+                })
+            }
         }
         let raw = self.enc.write(table, record, word, payload)?;
-        if let Err(e @ Error::LinkDown(_)) = self.send(&raw) {
-            self.note_link_down(None);
-            return Err(e);
-        }
-        let reply = self.await_reply(Cmd::Write, self.timing.ack_timeout_ms);
-        if let Err(e @ Error::LinkDown(_)) = reply {
-            let u = UnackedWrite {
-                table,
-                record,
-                word,
-                payload: payload.to_vec(),
-                reason: UnackedReason::Timeout,
-            };
-            self.note_link_down(Some(u));
-            return Err(e);
-        }
-        if reply.is_err() {
-            self.rx.clear();
-        }
-        let reason = match reply {
+        let reason = match self.request(&raw, Cmd::Write, self.timing.ack_timeout_ms) {
             Ok(Reply {
                 kind: ReplyKind::Ack,
                 ..
@@ -379,6 +545,32 @@ impl<T: Transport> Client<T> {
             Err(Error::BusyTimeout) => UnackedReason::BusyTimeout,
             Err(Error::Garbled(e)) => UnackedReason::Garbled(e),
             Err(Error::MismatchedReply { got, .. }) => UnackedReason::MismatchedReply { got },
+            Err(Error::ExtraFrame) => UnackedReason::ExtraFrame,
+            // The frame may have reached the PBX before the link dropped: the session is
+            // Disconnected and resumes in AwaitingVerify (drain first) after a fresh login.
+            Err(Error::LinkDown(s)) => {
+                let u = UnackedWrite {
+                    table,
+                    record,
+                    word,
+                    payload: payload.to_vec(),
+                    reason: UnackedReason::LinkDown(s.clone()),
+                };
+                self.state = SessionState::Binary;
+                self.note_link_down(Some(u));
+                return Err(Error::LinkDown(s));
+            }
+            Err(Error::PreSend(inner)) if matches!(inner.as_ref(), Error::LinkDown(_)) => {
+                // If a verify/rollback is already pending, leave session bookkeeping to
+                // [`Self::rollback_block`] (nothing was sent on this attempt).
+                if let Error::LinkDown(s) = *inner {
+                    if !self.needs_drain {
+                        self.note_link_down(None);
+                    }
+                    return Err(Error::LinkDown(s));
+                }
+                unreachable!()
+            }
             Err(e) => return Err(e),
         };
         let u = UnackedWrite {
@@ -389,6 +581,7 @@ impl<T: Transport> Client<T> {
             reason,
         };
         self.state = SessionState::AwaitingVerify(u.clone());
+        self.needs_drain = true;
         Err(Error::Unacked(u))
     }
 
@@ -414,6 +607,17 @@ impl<T: Transport> Client<T> {
                     }
                 }
                 Err(Error::Timeout) => return Ok(()),
+                Err(e @ Error::LinkDown(_)) => {
+                    // Save any pending verify/rollback as resume before Disconnected.
+                    // Already Disconnected: keep the resume saved then.
+                    if !matches!(
+                        self.state,
+                        SessionState::Text | SessionState::Closed | SessionState::Disconnected
+                    ) {
+                        self.note_link_down(None);
+                    }
+                    return Err(e);
+                }
                 Err(e) => return Err(e),
             }
         }
@@ -431,6 +635,13 @@ impl<T: Transport> Client<T> {
         self.require_session()?;
         if new.len() != base.len() || new.len() % 2 != 0 || new.is_empty() || new.len() > 252 {
             return Err(FrameError::BadPayloadLen(new.len()).into());
+        }
+        // Verifying the pending block must cover the whole pending write: same start and
+        // the same new bytes, so a prefix can never clear AwaitingVerify.
+        if let SessionState::AwaitingVerify(u) = &self.state {
+            if (u.table, u.record, u.word) == (table, record, word) && u.payload != new {
+                return Err(Error::NotPendingBlock);
+            }
         }
         if let Err(e) = self.drain_until_quiet() {
             if e == Error::LineNotQuiet {
@@ -457,8 +668,11 @@ impl<T: Transport> Client<T> {
         Ok(outcome)
     }
 
-    /// Roll a block back to `base` and verify it. Success returns to `Binary`; any failure
-    /// leaves the session `Locked` (read-only; `end_binary` allowed).
+    /// Roll a block back to `base` and verify it. The rollback write follows the same
+    /// rule as any write: if it is not acked the session is `AwaitingVerify`, and the
+    /// verify drains until quiet before re-reading, so a late rollback ack is consumed
+    /// there. Success returns to `Binary`; otherwise the session is `Locked`, and
+    /// `end_binary` still drains first (held if it cannot).
     pub fn rollback_block(
         &mut self,
         table: u8,
@@ -471,19 +685,58 @@ impl<T: Transport> Client<T> {
             self.state,
             SessionState::NeedsRollback(_) | SessionState::AwaitingVerify(_)
         ) {
-            return Err(Error::UnexpectedReply("nothing to roll back".into()));
+            return Err(Error::BadState {
+                op: Op::Rollback,
+                state: self.state.clone(),
+            });
         }
+        // Only the block that needs recovery, with a backup of the same length.
+        if let SessionState::NeedsRollback(u) | SessionState::AwaitingVerify(u) = &self.state {
+            if (u.table, u.record, u.word, u.payload.len()) != (table, record, word, base.len()) {
+                return Err(Error::NotPendingBlock);
+            }
+        }
+        let prior = self.state.clone();
         self.state = SessionState::Binary;
-        let ok = self.write(table, record, word, base).is_ok()
-            && matches!(
-                self.verify_block(table, record, word, base, base),
-                Ok(VerifyOutcome::Applied)
-            );
-        if ok {
-            Ok(())
-        } else {
-            self.state = SessionState::Locked;
-            Err(Error::Locked)
+        match self.write(table, record, word, base) {
+            Ok(()) | Err(Error::Unacked(_)) => {}
+            // Disconnected; resumes in AwaitingVerify for this rollback after login.
+            Err(e @ Error::LinkDown(_)) => {
+                // If the write already recorded disconnect + resume, keep that snapshot.
+                if !matches!(self.state, SessionState::Disconnected) {
+                    self.state = prior;
+                    self.note_link_down(None);
+                }
+                return Err(e);
+            }
+            // Nothing was sent: the prior state stands. If the pre-send drain lost the
+            // link, the prior state is what resumes after login.
+            Err(e @ Error::PreSend(_)) => {
+                let lost = matches!(self.state, SessionState::Disconnected);
+                self.state = prior;
+                if lost {
+                    self.note_link_down(None);
+                }
+                return Err(e);
+            }
+            Err(_) => {
+                self.state = SessionState::Locked;
+                self.needs_drain = true;
+                return Err(Error::Locked);
+            }
+        }
+        match self.verify_block(table, record, word, base, base) {
+            Ok(VerifyOutcome::Applied) => {
+                self.state = SessionState::Binary;
+                Ok(())
+            }
+            // Link lost mid-verify: keep Disconnected and the saved resume.
+            Err(e) if matches!(self.state, SessionState::Disconnected) => Err(e),
+            _ => {
+                self.state = SessionState::Locked;
+                self.needs_drain = true;
+                Err(Error::Locked)
+            }
         }
     }
 
@@ -493,7 +746,7 @@ impl<T: Transport> Client<T> {
     }
 
     /// Leave binary mode. Held (refused, nothing sent) while a write awaits verify or
-    /// rollback.
+    /// rollback, or while a pending drain cannot finish (line busy or link down).
     pub fn end_binary(&mut self) -> Result<(), Error> {
         if matches!(self.state, SessionState::Disconnected) {
             return Err(Error::SessionLost);
@@ -505,15 +758,58 @@ impl<T: Transport> Client<T> {
             }
             SessionState::Text | SessionState::Closed => return Ok(()),
             SessionState::Disconnected => return Err(Error::SessionLost),
+            SessionState::ByePending => return self.bye(),
+        }
+        if self.needs_drain {
+            match self.drain_until_quiet() {
+                Ok(()) => {}
+                Err(e @ Error::LinkDown(_)) => return Err(e),
+                Err(_) => return Err(Error::EndBinaryHeld),
+            }
         }
         let raw = self.enc.end_binary();
         let r = self.request(&raw, Cmd::EndBinary, self.timing.reply_timeout_ms)?;
         match r.kind {
-            ReplyKind::Ack => {
+            ReplyKind::Ack => {}
+            k => return Err(Error::UnexpectedReply(format!("end-binary: {k:?}"))),
+        }
+        self.state = SessionState::ByePending;
+        self.bye()
+    }
+
+    /// Text logout (recorded exchange step 28): BYE, then wait for OK. The PBX may follow
+    /// the OK with its sign-on prompt, which also confirms the logout. Any failure leaves
+    /// `ByePending`, so the next `end_binary` sends BYE again.
+    fn bye(&mut self) -> Result<(), Error> {
+        self.rx.clear();
+        self.send(b"BYE\r\n")?;
+        let start = self.t.now_ms();
+        let mut text = Vec::new();
+        loop {
+            let s = String::from_utf8_lossy(&text).into_owned();
+            let lines: Vec<&str> = s.split('\n').map(str::trim).collect();
+            if lines
+                .iter()
+                .any(|l| *l == "OK" || *l == self.signon.password_prompt)
+            {
                 self.state = SessionState::Closed;
-                Ok(())
+                return Ok(());
             }
-            k => Err(Error::UnexpectedReply(format!("end-binary: {k:?}"))),
+            if let Some(l) = lines.iter().find(|l| l.starts_with("NG")) {
+                return Err(Error::ByeNotConfirmed((*l).to_string()));
+            }
+            if text.len() > crate::session::MAX_LINE * crate::session::MAX_LINES {
+                return Err(Error::ByeNotConfirmed("too much text".into()));
+            }
+            let elapsed = self.t.now_ms().saturating_sub(start);
+            if elapsed >= self.timing.reply_timeout_ms {
+                return Err(Error::ByeNotConfirmed("no reply".into()));
+            }
+            match self.recv(self.timing.reply_timeout_ms - elapsed) {
+                Ok(b) => text.extend(b),
+                Err(Error::Timeout) => return Err(Error::ByeNotConfirmed("no reply".into())),
+                Err(e) => return Err(e),
+            }
         }
     }
 }

@@ -110,21 +110,19 @@ fn check_ranges(cmd: &Command) -> Result<(), CliError> {
     Ok(())
 }
 
-fn run(cli: &Cli) -> Result<(), CliError> {
-    check_ranges(&cli.cmd)?;
+/// Command result plus any close (end-binary) failure, which is always reported.
+fn run(cli: &Cli) -> (Result<(), CliError>, Option<Error>) {
+    if let Err(e) = check_ranges(&cli.cmd) {
+        return (Err(e), None);
+    }
     let TransportKind::Sim = cli.transport;
     let mut c = Client::new(SimTransport::new(SimPbx::default()));
-    c.login(PLACEHOLDER_PASSWORD)?;
-    let result = command(&mut c, &cli.cmd);
-    // Always try to leave binary mode. A teardown failure is reported only when the
-    // command itself succeeded, so the original error is never masked. Both sides are the
-    // typed kxtd1232::Error; there is no catch-all.
-    let teardown = c.end_binary();
-    match (result, teardown) {
-        (Err(e), _) => Err(e),
-        (Ok(()), Err(e)) => Err(CliError::Runtime(e)),
-        (Ok(()), Ok(())) => Ok(()),
+    if let Err(e) = c.login(PLACEHOLDER_PASSWORD) {
+        return (Err(e.into()), None);
     }
+    let result = command(&mut c, &cli.cmd);
+    // Always try to leave binary mode, and never hide a failure to do so.
+    (result, c.end_binary().err())
 }
 
 fn json_str(s: &str) -> String {
@@ -176,12 +174,86 @@ fn command(c: &mut Client<SimTransport>, cmd: &Command) -> Result<(), CliError> 
 }
 
 fn main() -> ExitCode {
-    let cli = Cli::parse();
-    match run(&cli) {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(e) => {
-            eprintln!("kxprov: error: {e}");
-            ExitCode::from(e.code())
+    let cli = match Cli::try_parse() {
+        Ok(c) => c,
+        Err(e) if !e.use_stderr() => {
+            // --help / --version
+            print!("{e}");
+            return ExitCode::SUCCESS;
         }
+        Err(e) => {
+            let msg = e.to_string();
+            let mut lines = msg.lines().map(str::trim).filter(|l| !l.is_empty());
+            let first = lines.next().unwrap_or("usage error");
+            let mut text = first.strip_prefix("error: ").unwrap_or(first).to_string();
+            if text.ends_with(':') {
+                if let Some(next) = lines.next() {
+                    text = format!("{text} {next}");
+                }
+            }
+            eprintln!("kxprov: error: {text} (see kxprov --help)");
+            return ExitCode::from(2);
+        }
+    };
+    let (result, close) = run(&cli);
+    let (code, lines) = report(&result, close.as_ref());
+    for l in lines {
+        eprintln!("{l}");
+    }
+    ExitCode::from(code)
+}
+
+/// Exit code and stderr lines. A close failure is always printed, after the command's own
+/// error if there is one, and turns success into exit 1.
+fn report(result: &Result<(), CliError>, close: Option<&Error>) -> (u8, Vec<String>) {
+    let mut code = 0;
+    let mut lines = Vec::new();
+    if let Err(e) = result {
+        lines.push(format!("kxprov: error: {e}"));
+        code = e.code();
+    }
+    if let Some(e) = close {
+        lines.push(format!("kxprov: error: closing session: {e}"));
+        if code == 0 {
+            code = 1;
+        }
+    }
+    (code, lines)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn close_error_is_reported_after_success() {
+        let (code, lines) = report(&Ok(()), Some(&Error::EndBinaryHeld));
+        assert_eq!(code, 1);
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].starts_with("kxprov: error: closing session: "));
+    }
+
+    #[test]
+    fn close_error_is_not_hidden_by_command_error() {
+        let (code, lines) = report(
+            &Err(CliError::Runtime(Error::Timeout)),
+            Some(&Error::EndBinaryHeld),
+        );
+        assert_eq!(code, 1);
+        assert_eq!(lines.len(), 2);
+        assert!(lines[1].contains("closing session"));
+    }
+
+    #[test]
+    fn close_is_attempted_and_fails_on_a_dead_link() {
+        // A real client whose end-binary cannot be sent: the close error surfaces.
+        let mut t = SimTransport::new(SimPbx::default());
+        t.drop_link_after_write = true;
+        let mut c = Client::with(t, kxtd1232::frame::Access::ReadWrite, Default::default());
+        c.login(PLACEHOLDER_PASSWORD).expect("login");
+        let _ = c.write(0x25, 0, 0, &[0x41; 16]);
+        let close = c.end_binary().err();
+        let (code, lines) = report(&Ok(()), close.as_ref());
+        assert_eq!(code, 1, "{lines:?}");
     }
 }
