@@ -32,18 +32,30 @@ fn test_fault_timing_fixture_matches_sim_defaults() {
 }
 
 #[test]
-fn test_scrubbed_exchanges_use_password_placeholder() {
-    let login = lines("exchanges.jsonl")
-        .into_iter()
-        .find(|r| r["step"].as_u64() == Some(2))
-        .unwrap();
+fn test_scrubbed_exchanges_use_placeholders() {
+    let rows = lines("exchanges.jsonl");
+    let login = rows.iter().find(|r| r["step"].as_u64() == Some(2)).unwrap();
     assert_eq!(login["data"].as_str().unwrap(), "<PASSWORD>\\r\\n");
-    assert!(
-        lines("exchanges.jsonl")
-            .iter()
-            .all(|r| !r["data"].as_str().unwrap_or("").contains("mitch")),
-        "no operator or site identifiers in exchange fixtures"
-    );
+    let banner = rows.iter().find(|r| r["step"].as_u64() == Some(1)).unwrap();
+    assert!(banner["data"]
+        .as_str()
+        .unwrap()
+        .starts_with("<SIGNON_BANNER>"));
+    for row in &rows {
+        let data = row["data"].as_str().unwrap_or("");
+        let note = row["note"].as_str().unwrap_or("");
+        let blob = format!("{data}{note}");
+        assert!(
+            !blob.contains("Welcome To") && !blob.contains("Panasonic"),
+            "step {} must not carry verbatim sign-on banner text",
+            row["step"]
+        );
+        assert!(
+            !note.contains("real capture") && !note.contains("DSHSOMT"),
+            "step {} notes must stay generic",
+            row["step"]
+        );
+    }
 }
 
 #[test]

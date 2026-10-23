@@ -1,12 +1,13 @@
-# kxtd1232-sim fixtures (synthetic / scrubbed)
+# kxtd1232-sim fixtures
 
-Clean-room only: addresses, timing, and frame headers. No real PBX payloads, passwords,
-ROM ids, or capture bytes from the unit.
+**All data here is synthetic**, derived from the KX-TD1232 **behavior spec** and table layout
+(RE handoff / design v2.2). Nothing is copied from live serial captures, `.DBH` dumps, or a
+real unit. Payload bytes are omitted or invented; passwords and ROM ids are placeholders.
 
-| File | Contents |
-|---|---|
-| `exchanges.jsonl` | Login and binary-mode exchange steps (hex/text placeholders) |
-| `full-upload-headers.jsonl` | 288 write-frame headers + ack timing (no payload bytes) |
-| `fault-timing.jsonl` | Simulator fault parameters (busy cadence, ack bounds) |
+| File | Role | Provenance |
+|---|---|---|
+| `exchanges.jsonl` | Login and binary-mode exchange **shape** (steps, frame hex, placeholders) | Behavior spec login and frame rules; hex patterns from the contract suite, not capture replay |
+| `full-upload-headers.jsonl` | 288 write-frame **addresses** (`header_hex`) plus synthetic schedule fields | `kxtd1232::tables` read/write plan (table spec §1); monotonic synthetic `t_send_s` / `ack_latency_s` |
+| `fault-timing.jsonl` | Simulator fault parameters for tests | Design v2.2 §6 / §9b defaults wired in `kxtd1232` / `kxtd1232-sim` |
 
-Copied from Reverse Engineer's vault set; same rules as `crates/kxtd1232/tests/fixtures/`.
+Do not paste real sign-on banner text, site config, or capture timing into these files.

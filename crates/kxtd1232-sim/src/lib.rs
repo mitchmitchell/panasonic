@@ -12,8 +12,9 @@ use std::collections::{HashMap, VecDeque};
 
 pub const PLACEHOLDER_PASSWORD: &str = "0000";
 pub const PLACEHOLDER_ROM_ID: &str = "-----PXXXXXXXXXX";
-pub const BANNER: &[u8] = b"Welcome To KX-TD1232  Ver 2.0 Panasonic CO.,LTD.\r\nEnter Password\r\n";
-/// Busy-frame cadence observed on the real unit.
+/// Sign-on line is a neutral placeholder; only the `Enter Password` prompt is behavior-spec text.
+pub const BANNER: &[u8] = b"<SIGNON_BANNER>\r\nEnter Password\r\n";
+/// Busy-frame cadence (behavior spec / design §9b default until H5).
 pub const BUSY_CADENCE_MS: u64 = 128;
 
 /// Injected faults, consumed in order.
@@ -344,7 +345,7 @@ pub struct SimTransport {
 }
 
 impl SimTransport {
-    /// Opening the port raises DTR; the simulator answers XOFF/XON.
+    /// Opening the port raises DTR; the simulator emits flow-control bytes then the banner.
     pub fn new(mut sim: SimPbx) -> Self {
         let first = sim.dtr_up();
         let mut q = VecDeque::new();
