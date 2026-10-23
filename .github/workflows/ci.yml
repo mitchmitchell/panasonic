@@ -25,12 +25,31 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --workspace --exclude kxprovd --locked
+      - run: cargo test --workspace --exclude kxprovd --exclude kxprov-gw --locked
       - run: cargo test -p kxprovd --features test-util --locked
+      - run: cargo test -p kxprov-gw --features test-secret-skip --locked
       - name: H5 tool absent from default workspace build
         run: |
           ! cargo build --locked -p kxprov-h5 2>/dev/null
           cargo build --locked -p kxprov-h5 --features h5-test-tool
+  release-sim-fault-strings:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --locked -p kxprovd -p kxprov-gw
+      - name: Sim fault trigger markers absent from release binaries
+        run: |
+          set -euo pipefail
+          markers=(sim_trigger_busy SimTriggerGoliathCopyFail trigger_next_copy_fail sim_trigger_goliath)
+          for bin in target/release/kxprovd target/release/kxprov-gw; do
+            for m in "${markers[@]}"; do
+              if strings "$bin" | grep -q "$m"; then
+                echo "release binary $bin must not contain sim-fault marker: $m" >&2
+                exit 1
+              fi
+            done
+          done
   build-aarch64:
     runs-on: ubuntu-latest
     steps:

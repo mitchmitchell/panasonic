@@ -74,13 +74,49 @@ impl Default for GatewayConfig {
             tls_key_path: "/etc/kx-provision/tls/lan.key".into(),
             session_ttl_secs: 900,
             rate_limit_per_minute: 120,
-            allowed_hosts: vec!["localhost".into(), "127.0.0.1".into()],
-            allowed_origins: vec!["http://localhost".into(), "http://127.0.0.1".into()],
+            allowed_hosts: vec![],
+            allowed_origins: vec![],
         }
     }
 }
 
 impl GatewayConfig {
+    /// Site Host / Origin allow-list: explicit config, else loopback names with listener ports.
+    pub fn effective_allowed_hosts(&self) -> Vec<String> {
+        if !self.allowed_hosts.is_empty() {
+            return self.allowed_hosts.clone();
+        }
+        self.derived_loopback_hosts()
+    }
+
+    pub fn effective_allowed_origins(&self) -> Vec<String> {
+        if !self.allowed_origins.is_empty() {
+            return self.allowed_origins.clone();
+        }
+        self.effective_allowed_hosts()
+            .iter()
+            .map(|host| format!("http://{host}"))
+            .collect()
+    }
+
+    fn derived_loopback_hosts(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut binds = vec![self.web_tailnet_bind.clone()];
+        binds.extend(self.web_lan_bind_addresses());
+        for bind in binds {
+            let Ok(addr) = bind.parse::<SocketAddr>() else {
+                continue;
+            };
+            let port = addr.port();
+            for host in ["localhost", "127.0.0.1"] {
+                out.push(format!("{host}:{port}"));
+            }
+        }
+        out.sort();
+        out.dedup();
+        out
+    }
+
     /// HTTPS listen addresses (§5a): loopback always; site LAN only when `lan_ip` is configured.
     pub fn web_lan_bind_addresses(&self) -> Vec<String> {
         if let Some(ref single) = self.bind {
@@ -332,6 +368,17 @@ mod tests {
             cfg.web_lan_bind_addresses(),
             vec!["127.0.0.1:9443".to_string()]
         );
+    }
+
+    #[test]
+    fn default_allowlist_uses_explicit_listener_ports() {
+        let cfg = GatewayConfig::default();
+        let hosts = cfg.effective_allowed_hosts();
+        assert!(hosts.contains(&"localhost:8080".to_string()));
+        assert!(hosts.contains(&"127.0.0.1:8080".to_string()));
+        assert!(hosts.contains(&"127.0.0.1:443".to_string()));
+        let origins = cfg.effective_allowed_origins();
+        assert!(origins.contains(&"http://localhost:8080".to_string()));
     }
 
     #[test]

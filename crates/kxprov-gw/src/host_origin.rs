@@ -4,7 +4,9 @@ use axum::http::{header, HeaderValue, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 
-use crate::host_match::{host_allowed, origin_allowed as origin_matches, request_host_authority};
+use crate::host_match::{
+    effective_host_authority, host_allowed, origin_allowed as origin_matches, HostAuthorityError,
+};
 
 #[derive(Clone)]
 pub struct HostOriginConfig {
@@ -17,8 +19,14 @@ pub async fn host_origin_middleware(
     req: Request<Body>,
     next: Next,
 ) -> Response {
-    let Some(host) = request_host_authority(&req) else {
-        return (StatusCode::BAD_REQUEST, "missing host").into_response();
+    let host = match effective_host_authority(&req) {
+        Ok(h) => h,
+        Err(HostAuthorityError::Missing) => {
+            return (StatusCode::BAD_REQUEST, "missing host").into_response();
+        }
+        Err(HostAuthorityError::Mismatch) => {
+            return (StatusCode::BAD_REQUEST, "host authority mismatch").into_response();
+        }
     };
     if !host_allowed(&cfg.allowed_hosts, &host) {
         return (StatusCode::MISDIRECTED_REQUEST, "unknown host").into_response();

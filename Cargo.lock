@@ -1366,6 +1366,7 @@ dependencies = [
  "kxprovd",
  "kxtd1232",
  "libc",
+ "nix 0.29.0",
  "rand 0.8.8",
  "rcgen",
  "reqwest",

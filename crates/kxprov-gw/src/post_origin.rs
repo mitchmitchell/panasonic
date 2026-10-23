@@ -54,37 +54,33 @@ mod tests {
     #[test]
     fn missing_origin_and_referer_is_rejected() {
         let cfg = HostOriginConfig {
-            allowed_hosts: vec!["localhost".into()],
-            allowed_origins: vec!["https://localhost".into()],
+            allowed_hosts: vec!["localhost:8443".into()],
+            allowed_origins: vec!["https://localhost:8443".into()],
         };
         assert!(!origin_allowed(&cfg, &HeaderMap::new()));
     }
 
     #[test]
-    fn localhost_ported_origin_and_host_allowed() {
+    fn localhost_ported_origin_allowed_when_listed() {
         let cfg = HostOriginConfig {
-            allowed_hosts: vec!["localhost".into()],
-            allowed_origins: vec!["http://localhost".into()],
+            allowed_hosts: vec!["localhost:8080".into()],
+            allowed_origins: vec!["http://localhost:8080".into()],
         };
         let mut headers = HeaderMap::new();
         headers.insert(header::ORIGIN, "http://localhost:8080".parse().unwrap());
         assert!(origin_allowed(&cfg, &headers));
-        assert!(crate::host_match::host_allowed(
-            &cfg.allowed_hosts,
-            "localhost:8080"
-        ));
     }
 
     #[test]
     fn referer_fallback_matches_allowed_origin() {
         let cfg = HostOriginConfig {
-            allowed_hosts: vec!["127.0.0.1".into()],
-            allowed_origins: vec!["https://127.0.0.1".into()],
+            allowed_hosts: vec!["127.0.0.1:8443".into()],
+            allowed_origins: vec!["https://127.0.0.1:8443".into()],
         };
         let mut headers = HeaderMap::new();
         headers.insert(
             header::REFERER,
-            "https://127.0.0.1/dashboard".parse().unwrap(),
+            "https://127.0.0.1:8443/dashboard".parse().unwrap(),
         );
         assert!(origin_allowed(&cfg, &headers));
     }

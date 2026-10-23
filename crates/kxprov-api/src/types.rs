@@ -205,14 +205,17 @@ pub enum RequestBody {
     },
     /// Returns token id + scopes for the presented bearer (gateway startup).
     Whoami,
-    /// Simulator / test profile only: queue a BUSY fault on the next sim transport op.
+    /// Simulator / test profile only (feature `sim-fault-triggers`).
+    #[cfg(feature = "sim-fault-triggers")]
     SimTriggerBusy {
         params: SimTriggerBusyParams,
     },
-    /// Simulator / test profile only: force the next Goliath backup copy to fail.
+    /// Simulator / test profile only (feature `sim-fault-triggers`).
+    #[cfg(feature = "sim-fault-triggers")]
     SimTriggerGoliathCopyFail,
 }
 
+#[cfg(feature = "sim-fault-triggers")]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SimTriggerBusyParams {
     pub frames: u32,
@@ -224,6 +227,7 @@ pub struct WhoamiResult {
     pub scopes: Vec<Scope>,
 }
 
+#[cfg(feature = "sim-fault-triggers")]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SimTriggerResult {
     pub ok: bool,
@@ -255,6 +259,7 @@ pub enum ResponseResult {
     ApplyApprovalRequired(ApplyApprovalRequiredResult),
     Unlock(UnlockResult),
     Whoami(WhoamiResult),
+    #[cfg(feature = "sim-fault-triggers")]
     SimTrigger(SimTriggerResult),
 }
 

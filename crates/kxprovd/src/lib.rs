@@ -167,6 +167,41 @@ impl Daemon {
     }
 
     #[cfg(feature = "test-util")]
+    pub fn sim_for_tests_serial_profile(
+        data_dir: impl AsRef<std::path::Path>,
+        peer_uid: u32,
+        profile: kxprov_api::Profile,
+    ) -> (Self, std::path::PathBuf) {
+        let data_dir = data_dir.as_ref().to_path_buf();
+        test_util::write_integration_tokens(&data_dir.join("tokens.json"));
+        let socket = data_dir.join("kxprovd.sock");
+        let mut cfg = Config::sim_test(data_dir, socket.clone(), peer_uid);
+        cfg.profile = profile;
+        cfg.transport = TransportKind::Serial;
+        cfg.sim_pbx = None;
+        let daemon = Self::start_test(cfg).expect("daemon starts");
+        (daemon, socket)
+    }
+
+    #[cfg(feature = "test-util")]
+    pub fn sim_for_tests_as_gateway_profile(
+        data_dir: impl AsRef<std::path::Path>,
+        gateway_uid: u32,
+        profile: kxprov_api::Profile,
+    ) -> (Self, std::path::PathBuf) {
+        let data_dir = data_dir.as_ref().to_path_buf();
+        test_util::write_integration_tokens(&data_dir.join("tokens.json"));
+        let socket = data_dir.join("kxprovd.sock");
+        let mut cfg = Config::sim_test_gateway_caller(data_dir, socket.clone(), gateway_uid);
+        cfg.profile = profile;
+        if profile == Profile::Prod {
+            cfg.gates.live_writes_approved = true;
+        }
+        let daemon = Self::start_test(cfg).expect("daemon starts");
+        (daemon, socket)
+    }
+
+    #[cfg(feature = "test-util")]
     pub fn sim_for_tests_profile(
         data_dir: impl AsRef<std::path::Path>,
         peer_uid: u32,

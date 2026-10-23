@@ -22,8 +22,9 @@ fn gateway_auth() -> RequestAuth {
 #[tokio::test]
 async fn daemon_client_status_uses_bearer_and_audit() {
     let tmp = TempDir::new().unwrap();
-    let uid = unsafe { libc::getuid() };
-    let (_daemon, sock) = kxprovd::Daemon::sim_for_tests_profile(tmp.path(), uid, Profile::Sim);
+    let uid = nix::unistd::getuid().as_raw();
+    let (_daemon, sock) =
+        kxprovd::Daemon::sim_for_tests_as_gateway_profile(tmp.path(), uid, Profile::Sim);
     for _ in 0..100 {
         if sock.exists() {
             break;
@@ -55,8 +56,9 @@ async fn daemon_client_status_uses_bearer_and_audit() {
 #[tokio::test]
 async fn gateway_service_token_can_plan_not_apply_approve_or_set_mode() {
     let tmp = TempDir::new().unwrap();
-    let uid = unsafe { libc::getuid() };
-    let (_daemon, sock) = kxprovd::Daemon::sim_for_tests_profile(tmp.path(), uid, Profile::Sim);
+    let gateway_uid = nix::unistd::getuid().as_raw();
+    let (_daemon, sock) =
+        kxprovd::Daemon::sim_for_tests_as_gateway_profile(tmp.path(), gateway_uid, Profile::Sim);
     for _ in 0..100 {
         if sock.exists() {
             break;
@@ -152,7 +154,7 @@ async fn gateway_service_token_can_plan_not_apply_approve_or_set_mode() {
 
     let bad = api
         .call_auth(
-            RequestBody::Status,
+            RequestBody::Whoami,
             Some(RequestAuth {
                 bearer: "not-a-real-bearer".into(),
             }),

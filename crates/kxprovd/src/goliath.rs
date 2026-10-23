@@ -24,6 +24,7 @@ impl GoliathQueue {
         })
     }
 
+    #[cfg(feature = "sim-fault-triggers")]
     pub fn trigger_next_copy_fail(&self) {
         self.fail_next_copy.store(true, Ordering::SeqCst);
     }

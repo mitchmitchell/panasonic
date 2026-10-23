@@ -24,7 +24,7 @@ use std::net::SocketAddr;
 use templates::{DashboardTemplate, ReadFieldRow};
 use tower_sessions::Session;
 
-pub use login_limit::{LoginBusy, LoginRateLimiter};
+pub use login_limit::{LoginBusy, LoginPrecheck, LoginRateLimiter};
 pub use session::{reject_authenticated_login, require_web_session, SESSION_AUTH_KEY};
 pub use static_files::serve_static;
 
@@ -236,6 +236,16 @@ pub fn client_ip(headers: &HeaderMap, peer: Option<SocketAddr>) -> String {
     "unknown".into()
 }
 
+fn login_rate_limited_response(message: &str, retry_after: std::time::Duration) -> Response {
+    let secs = retry_after.as_secs().max(1);
+    let mut resp = (StatusCode::TOO_MANY_REQUESTS, message.to_string()).into_response();
+    if let Ok(value) = axum::http::HeaderValue::from_str(&secs.to_string()) {
+        resp.headers_mut()
+            .insert(axum::http::header::RETRY_AFTER, value);
+    }
+    resp
+}
+
 async fn login_form(session: Session) -> impl IntoResponse {
     let token = csrf::token_for_session(&session).await;
     let cookie = csrf::csrf_set_cookie_value(&token);
@@ -280,8 +290,24 @@ async fn login_submit(
     let ip = client_ip(&headers, Some(peer));
     let acct_key = "acct:admin".to_string();
     let ip_key = format!("ip:{ip}");
-    let (_guard, delay) = match state.login_limiter.begin_login(&acct_key, &ip_key).await {
-        Ok(v) => v,
+    match state.login_limiter.precheck_login(&acct_key, &ip_key).await {
+        LoginPrecheck::RateLimited(delay) => {
+            return login_rate_limited_response(
+                "Too many login attempts. Try again later.",
+                delay,
+            );
+        }
+        LoginPrecheck::AccountInProgress => {
+            return (
+                StatusCode::TOO_MANY_REQUESTS,
+                "Login already in progress. Try again shortly.",
+            )
+                .into_response();
+        }
+        LoginPrecheck::Ready => {}
+    }
+    let _guard = match state.login_limiter.begin_password_verify(&acct_key) {
+        Ok(g) => g,
         Err(LoginBusy::AccountInProgress) => {
             return (
                 StatusCode::TOO_MANY_REQUESTS,
@@ -290,9 +316,6 @@ async fn login_submit(
                 .into_response();
         }
     };
-    if !delay.is_zero() {
-        tokio::time::sleep(delay).await;
-    }
     if !state.admin.verify(&form.password) {
         state.login_limiter.record_failure(&acct_key, &ip_key).await;
         return Redirect::to("/login?error=1").into_response();

@@ -4,6 +4,8 @@ use crate::config::Config;
 use crate::gates::{prod_write_gate, GateState, ProdWriteGate};
 use crate::locked::LockedStore;
 use crate::mode::{write_approval_required, ModeStore};
+#[cfg(feature = "sim-fault-triggers")]
+use crate::peer::PeerCred;
 use crate::peer::{PeerPolicy, PeerRole};
 use crate::plan_live::verify_live_diff_hash;
 use crate::plan_store::PlanStore;
@@ -15,7 +17,7 @@ use crate::worker::backup_info;
 use kxprov_api::{
     ApiErrorBody, ApplyPlanParams, OperationalMode, PlanChangeParams, Profile, RequestAuth,
     RequestBody, RequestEnvelope, Response, ResponseResult, Scope, SetModeParams, SetModeResult,
-    SimTriggerBusyParams, SimTriggerResult, SubmitApprovalParams, SubmitApprovalResult, TokenId,
+    SubmitApprovalParams, SubmitApprovalResult, TokenId,
     UnlockParams, UnlockResult, WhoamiResult,
 };
 use std::sync::Arc;
@@ -177,8 +179,14 @@ async fn dispatch(
         }
         RequestBody::Unlock { params } => unlock(state, cred, params.clone()).await,
         RequestBody::Whoami => whoami(state, role, &env.auth).await,
-        RequestBody::SimTriggerBusy { params } => sim_trigger_busy(state, params).await,
-        RequestBody::SimTriggerGoliathCopyFail => sim_trigger_goliath_copy_fail(state).await,
+        #[cfg(feature = "sim-fault-triggers")]
+        RequestBody::SimTriggerBusy { params } => {
+            sim_trigger_busy(state, cred, role, &env.auth, params).await
+        }
+        #[cfg(feature = "sim-fault-triggers")]
+        RequestBody::SimTriggerGoliathCopyFail => {
+            sim_trigger_goliath_copy_fail(state, cred, role, &env.auth).await
+        }
     };
 
     match result {
@@ -228,6 +236,7 @@ async fn whoami(
     }))
 }
 
+#[cfg(feature = "sim-fault-triggers")]
 async fn sim_runtime_allowed(state: &ApiState) -> Result<(), ApiErrorBody> {
     if state.config.transport != crate::config::TransportKind::Sim {
         return Err(api_err("forbidden", "sim transport only"));
@@ -239,11 +248,15 @@ async fn sim_runtime_allowed(state: &ApiState) -> Result<(), ApiErrorBody> {
     Ok(())
 }
 
+#[cfg(feature = "sim-fault-triggers")]
 async fn sim_trigger_busy(
     state: &ApiState,
-    params: &SimTriggerBusyParams,
+    cred: PeerCred,
+    role: PeerRole,
+    auth: &Option<RequestAuth>,
+    params: &kxprov_api::SimTriggerBusyParams,
 ) -> Result<ResponseResult, ApiErrorBody> {
-    sim_runtime_allowed(state).await?;
+    sim_trigger_access(state, cred, role, auth).await?;
     let Some(pbx) = state.config.sim_pbx.as_ref() else {
         return Err(api_err("forbidden", "no sim transport"));
     };
@@ -255,13 +268,33 @@ async fn sim_trigger_busy(
         .inject(kxtd1232_sim::Fault::Busy {
             frames: params.frames,
         });
-    Ok(ResponseResult::SimTrigger(SimTriggerResult { ok: true }))
+    Ok(ResponseResult::SimTrigger(kxprov_api::SimTriggerResult { ok: true }))
 }
 
-async fn sim_trigger_goliath_copy_fail(state: &ApiState) -> Result<ResponseResult, ApiErrorBody> {
-    sim_runtime_allowed(state).await?;
+#[cfg(feature = "sim-fault-triggers")]
+async fn sim_trigger_goliath_copy_fail(
+    state: &ApiState,
+    cred: PeerCred,
+    role: PeerRole,
+    auth: &Option<RequestAuth>,
+) -> Result<ResponseResult, ApiErrorBody> {
+    sim_trigger_access(state, cred, role, auth).await?;
     state.goliath.trigger_next_copy_fail();
-    Ok(ResponseResult::SimTrigger(SimTriggerResult { ok: true }))
+    Ok(ResponseResult::SimTrigger(kxprov_api::SimTriggerResult { ok: true }))
+}
+
+#[cfg(feature = "sim-fault-triggers")]
+async fn sim_trigger_access(
+    state: &ApiState,
+    cred: PeerCred,
+    role: PeerRole,
+    auth: &Option<RequestAuth>,
+) -> Result<(), ApiErrorBody> {
+    sim_runtime_allowed(state).await?;
+    if state.peer_policy.is_admin(cred) {
+        return Ok(());
+    }
+    require_access(state, role, auth, Scope::Write).map(|_| ())
 }
 
 fn verify_bearer(

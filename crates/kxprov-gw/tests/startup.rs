@@ -70,8 +70,8 @@ fn sample_config(dir: &TempDir) -> GatewayConfig {
         tls_key_path: key_path,
         session_ttl_secs: 900,
         rate_limit_per_minute: 120,
-        allowed_hosts: vec!["localhost".into(), "127.0.0.1".into()],
-        allowed_origins: vec!["http://localhost".into(), "http://127.0.0.1".into()],
+        allowed_hosts: vec![],
+        allowed_origins: vec![],
     }
 }
 

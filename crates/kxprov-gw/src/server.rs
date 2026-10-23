@@ -69,8 +69,8 @@ pub async fn serve(
     };
 
     let host_origin = HostOriginConfig {
-        allowed_hosts: config.allowed_hosts.clone(),
-        allowed_origins: config.allowed_origins.clone(),
+        allowed_hosts: config.effective_allowed_hosts(),
+        allowed_origins: config.effective_allowed_origins(),
     };
 
     let rate_limiter = RateLimiter::new(config.rate_limit_per_minute);
@@ -85,7 +85,7 @@ pub async fn serve(
     let mut mcp_http_config = StreamableHttpServerConfig::default();
     mcp_http_config.json_response = true;
     mcp_http_config.stateful_mode = true;
-    mcp_http_config.allowed_hosts = config.allowed_hosts.clone();
+    mcp_http_config.allowed_hosts = config.effective_allowed_hosts();
     let mcp_service = StreamableHttpService::new(
         move || Ok(KxMcpServer::new(mcp_backend.clone())),
         Arc::new(LocalSessionManager::default()),

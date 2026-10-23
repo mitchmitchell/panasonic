@@ -24,8 +24,11 @@ fn production_like_app() -> axum::Router {
     production_web_router(
         state,
         HostOriginConfig {
-            allowed_hosts: vec!["127.0.0.1".into(), "localhost".into()],
-            allowed_origins: vec!["http://127.0.0.1".into(), "http://localhost".into()],
+            allowed_hosts: vec!["127.0.0.1:4321".into(), "localhost:4321".into()],
+            allowed_origins: vec![
+                "http://127.0.0.1:4321".into(),
+                "http://localhost:4321".into(),
+            ],
         },
         900,
         RateLimiter::new(120),
@@ -37,7 +40,7 @@ fn production_request(method: Method, uri: &str) -> Request<Body> {
     let mut req = Request::builder()
         .method(method)
         .uri(uri)
-        .header(header::HOST, "127.0.0.1")
+        .header(header::HOST, "127.0.0.1:4321")
         .body(Body::empty())
         .unwrap();
     req.extensions_mut().insert(ConnectInfo(peer));
@@ -49,8 +52,8 @@ fn production_post(uri: &str, body: &str) -> Request<Body> {
     let mut req = Request::builder()
         .method(Method::POST)
         .uri(uri)
-        .header(header::HOST, "127.0.0.1")
-        .header(header::ORIGIN, "http://127.0.0.1")
+        .header(header::HOST, "127.0.0.1:4321")
+        .header(header::ORIGIN, "http://127.0.0.1:4321")
         .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
         .body(Body::from(body.to_string()))
         .unwrap();

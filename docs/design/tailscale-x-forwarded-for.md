@@ -15,6 +15,10 @@ X-Forwarded-For: 203.0.113.5
 
 The gateway’s `client_ip` helper (`kxprov-web`) uses the **first** non-empty hop when the peer is loopback (which is also the only hop Serve sets).
 
+## Loopback spoofing (non-Serve)
+
+Any process on the same host can connect to a loopback listener and send an arbitrary `X-Forwarded-For` first hop. The gateway does **not** treat that value as proof of client identity unless the request arrived through a trusted edge (for example Tailscale Serve) that overwrites the header. Prefer binding site LAN HTTPS on the real site IP when loopback XFF trust is insufficient.
+
 ## References
 
 - [Tailscale Serve](https://tailscale.com/kb/1242/tailscale-serve)

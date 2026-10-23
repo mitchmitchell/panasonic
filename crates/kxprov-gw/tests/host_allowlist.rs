@@ -1,4 +1,4 @@
-//! Host / Origin allow-list: port-less entries and HTTP/2-style URI authority.
+//! Host / Origin allow-list: explicit ports and HTTP/2-style URI authority.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -26,21 +26,24 @@ async fn localhost_with_port_passes_host_and_origin_on_login_post() {
     let app = production_web_router(
         state,
         HostOriginConfig {
-            allowed_hosts: vec!["localhost".into()],
-            allowed_origins: vec!["http://localhost".into()],
+            allowed_hosts: vec!["localhost:8080".into()],
+            allowed_origins: vec!["http://localhost:8080".into()],
         },
         900,
         RateLimiter::new(120),
     );
 
+    let peer: std::net::SocketAddr = "127.0.0.1:8080".parse().unwrap();
     let get = app
         .clone()
-        .oneshot(
-            Request::builder()
+        .oneshot({
+            let mut req = Request::builder()
                 .uri("http://localhost:8080/login")
                 .body(Body::empty())
-                .unwrap(),
-        )
+                .unwrap();
+            req.extensions_mut().insert(ConnectInfo(peer));
+            req
+        })
         .await
         .unwrap();
     assert_eq!(get.status(), StatusCode::OK);
@@ -53,7 +56,6 @@ async fn localhost_with_port_passes_host_and_origin_on_login_post() {
         .and_then(|s| s.split('"').next())
         .expect("csrf");
 
-    let peer: std::net::SocketAddr = "127.0.0.1:8080".parse().unwrap();
     let mut req = Request::builder()
         .method(Method::POST)
         .uri("http://localhost:8080/login")

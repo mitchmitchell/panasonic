@@ -6,7 +6,14 @@ use tokio::sync::Mutex;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LoginBusy {
-    /// Another login attempt for this account is already in progress.
+    /// Another login attempt for this account is already verifying a password.
+    AccountInProgress,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoginPrecheck {
+    Ready,
+    RateLimited(Duration),
     AccountInProgress,
 }
 
@@ -25,7 +32,7 @@ struct Entry {
     next_allowed: Instant,
 }
 
-/// Held for the duration of one login attempt; releases the per-account slot.
+/// Held only while the password is verified; releases the per-account slot on drop.
 pub struct LoginAttemptGuard {
     limiter: LoginRateLimiter,
     account_key: String,
@@ -54,27 +61,32 @@ impl LoginRateLimiter {
         }
     }
 
-    /// Serialize login per account; reject concurrent attempts while one is in flight.
-    pub async fn begin_login(
-        &self,
-        account_key: &str,
-        ip_key: &str,
-    ) -> Result<(LoginAttemptGuard, Duration), LoginBusy> {
+    /// Backoff / concurrency gate before password verification (does not take the verify slot).
+    pub async fn precheck_login(&self, account_key: &str, ip_key: &str) -> LoginPrecheck {
         {
-            let mut active = self.account_active.lock().expect("account login lock");
+            let active = self.account_active.lock().expect("account login lock");
             if active.contains_key(account_key) {
-                return Err(LoginBusy::AccountInProgress);
+                return LoginPrecheck::AccountInProgress;
             }
-            active.insert(account_key.to_string(), ());
         }
         let delay = self.delay_before_attempt(account_key, ip_key).await;
-        Ok((
-            LoginAttemptGuard {
-                limiter: self.clone(),
-                account_key: account_key.to_string(),
-            },
-            delay,
-        ))
+        if delay > Duration::ZERO {
+            return LoginPrecheck::RateLimited(delay);
+        }
+        LoginPrecheck::Ready
+    }
+
+    /// Serialize password verification per account.
+    pub fn begin_password_verify(&self, account_key: &str) -> Result<LoginAttemptGuard, LoginBusy> {
+        let mut active = self.account_active.lock().expect("account login lock");
+        if active.contains_key(account_key) {
+            return Err(LoginBusy::AccountInProgress);
+        }
+        active.insert(account_key.to_string(), ());
+        Ok(LoginAttemptGuard {
+            limiter: self.clone(),
+            account_key: account_key.to_string(),
+        })
     }
 
     pub async fn delay_before_attempt(&self, account_key: &str, ip_key: &str) -> Duration {
@@ -179,19 +191,59 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn concurrent_logins_for_same_account_are_rejected() {
+    async fn concurrent_password_verify_for_same_account_is_rejected() {
         let limiter = LoginRateLimiter::new(
             Duration::from_millis(1),
             Duration::from_secs(30),
             Duration::from_secs(30),
         );
-        let (_guard, _) = limiter
-            .begin_login("acct:admin", "ip:1")
-            .await
+        let _guard = limiter
+            .begin_password_verify("acct:admin")
             .expect("first");
         assert!(matches!(
-            limiter.begin_login("acct:admin", "ip:2").await,
+            limiter.begin_password_verify("acct:admin"),
             Err(LoginBusy::AccountInProgress)
         ));
+    }
+
+    #[tokio::test]
+    async fn rate_limited_precheck_does_not_hold_verify_slot() {
+        let limiter = LoginRateLimiter::new(
+            Duration::from_millis(200),
+            Duration::from_secs(30),
+            Duration::from_secs(30),
+        );
+        limiter.record_failure("acct:admin", "ip:1").await;
+        assert!(matches!(
+            limiter.precheck_login("acct:admin", "ip:2").await,
+            LoginPrecheck::RateLimited(_)
+        ));
+        assert!(
+            limiter
+                .begin_password_verify("acct:admin")
+                .is_ok(),
+            "backoff must not hold the verify slot"
+        );
+    }
+
+    #[tokio::test]
+    async fn rapid_hammer_cannot_extend_mitch_delay_past_account_cap() {
+        let limiter = LoginRateLimiter::new(
+            Duration::from_secs(5),
+            Duration::from_secs(30),
+            Duration::from_secs(300),
+        );
+        for i in 0..100 {
+            limiter
+                .record_failure("acct:admin", &format!("ip:hammer-{i}"))
+                .await;
+        }
+        let wait = limiter
+            .precheck_login("acct:admin", "ip:mitch-home")
+            .await;
+        let LoginPrecheck::RateLimited(d) = wait else {
+            panic!("mitch should still be rate limited");
+        };
+        assert!(d <= Duration::from_secs(30));
     }
 }

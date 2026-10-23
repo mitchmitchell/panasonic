@@ -16,12 +16,16 @@ path = "src/main.rs"
 workspace = true
 
 [features]
-test-util = ["kxtd1232/test-transport-access"]
+sim-fault-triggers = ["kxprov-api/sim-fault-triggers"]
+test-util = [
+    "kxtd1232/test-transport-access",
+    "sim-fault-triggers",
+]
 
 [dependencies]
+kxprov-api = { path = "../kxprov-api" }
 kxtd1232 = { path = "../kxtd1232" }
 kxtd1232-sim = { path = "../kxtd1232-sim" }
-kxprov-api = { path = "../kxprov-api" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
@@ -67,3 +71,6 @@ required-features = ["test-util"]
 [[test]]
 name = "run_seed"
 required-features = ["test-util"]
+
+[[test]]
+name = "release_markers"

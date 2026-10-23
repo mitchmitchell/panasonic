@@ -197,4 +197,27 @@ impl Config {
             tokens_path: data_dir.join("tokens.json"),
         }
     }
+
+    #[cfg(feature = "test-util")]
+    pub fn sim_test_gateway_caller(data_dir: PathBuf, socket_path: PathBuf, gateway_uid: u32) -> Self {
+        let admin_uid = gateway_uid.wrapping_add(1);
+        Self {
+            profile: Profile::Sim,
+            transport: TransportKind::Sim,
+            data_dir: data_dir.clone(),
+            socket_path,
+            password: kxtd1232_sim::PLACEHOLDER_PASSWORD.to_string(),
+            gates: GateConfig::default(),
+            peer_policy: PeerPolicy::new(gateway_uid, admin_uid),
+            goliath_target: data_dir.join("goliath"),
+            serial_device: PathBuf::from("/dev/kxpbx"),
+            gateway_uid,
+            admin_uid,
+            totp_enabled: false,
+            totp_secret_path: None,
+            timing: Timing::default(),
+            sim_pbx: Some(Arc::new(Mutex::new(SimPbx::default()))),
+            tokens_path: data_dir.join("tokens.json"),
+        }
+    }
 }
