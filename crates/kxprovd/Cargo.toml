@@ -47,6 +47,7 @@ chrono-tz = "0.10"
 [dev-dependencies]
 tempfile = "3"
 kxprov = { path = "../kxprov" }
+serial_test = "3"
 
 [[test]]
 name = "daemon"

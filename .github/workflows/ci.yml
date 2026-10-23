@@ -100,6 +100,15 @@ jobs:
               fi
             done
           done
+  systemd-stack:
+    name: systemd stack (ubuntu)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - run: rustup show active-toolchain || rustup toolchain install
+      - name: Sim stack under systemd (LoadCredential, sockets, split runtime dirs)
+        run: bash scripts/ci-systemd-stack.sh
   build-aarch64:
     runs-on: ubuntu-latest
     steps:

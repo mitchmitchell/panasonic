@@ -39,6 +39,29 @@ pub fn init_test_daemon(
     kxprovd::Daemon::sim_for_tests_profile(tmp.path(), uid, profile)
 }
 
+/// Poll until the daemon Unix socket accepts API connections (avoids fixed sleeps in integration tests).
+pub async fn wait_daemon_api_ready(sock: &std::path::Path) {
+    use kxprov_api::ApiClient;
+    use std::time::{Duration, Instant};
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if sock.exists() {
+            if let Ok(mut c) = ApiClient::connect(sock).await {
+                if c.call(kxprov_api::RequestBody::Status).await.is_ok() {
+                    return;
+                }
+            }
+        }
+        if Instant::now() >= deadline {
+            panic!(
+                "daemon socket {} not ready for Status within 10s",
+                sock.display()
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
 /// Daemon where `local_uid` connects as read-only (not admin/gateway).
 pub fn init_test_daemon_local_readonly(
     tmp: &tempfile::TempDir,

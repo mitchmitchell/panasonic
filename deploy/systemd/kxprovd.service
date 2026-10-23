@@ -2,6 +2,7 @@
 Description=kx-provision daemon (serial owner, job queue)
 After=network-online.target
 Wants=network-online.target
+Documentation=file:///usr/share/doc/kx-provision/systemd-serial-device.md
 
 [Service]
 Type=simple
@@ -18,12 +19,17 @@ ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes
 ProtectProc=invisible
-PrivateUsers=yes
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectKernelLogs=yes
 ProtectControlGroups=yes
-PrivateDevices=yes
+# Serial transport needs /dev/kxpbx (override via drop-in if `serial_device` differs).
+DevicePolicy=closed
+DeviceAllow=char-rtc r
+DeviceAllow=char-random r
+DeviceAllow=char-urandom r
+DeviceAllow=/dev/null rw
+DeviceAllow=/dev/kxpbx rw
 RestrictNamespaces=yes
 SystemCallFilter=@system-service
 MemoryDenyWriteExecute=yes

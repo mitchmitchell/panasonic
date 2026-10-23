@@ -2,13 +2,14 @@
 
 mod common;
 
-use common::{bearer_auth, init_test_daemon, WRITER_SECRET};
+use common::{bearer_auth, init_test_daemon, wait_daemon_api_ready, WRITER_SECRET};
 use kxprov_api::resolve_profile_data_dir;
 use kxprov_api::{ApiClient, PlanChangeParams, RequestBody, Scope};
 use kxprov_api::{OperationalMode, Profile, DAEMON_SOCKET, DATA_DIR, TOKENS_JSON};
 use kxprovd::audit::AuditKind;
 use kxprovd::mode::{ModeFileBody, ModeStore, ProfileFileBody};
 use kxprovd::tokens::TokenStore;
+use serial_test::serial;
 use std::time::Duration;
 
 #[test]
@@ -98,49 +99,32 @@ fn approver_with_plan_scope_rejected_at_mint() {
 }
 
 #[tokio::test]
+#[serial]
 async fn per_token_queue_depth_rate_limit_integration() {
-    use kxprov_api::TOKEN_QUEUE_DEPTH_MAX;
-    use std::sync::Arc;
-    use tokio::sync::Barrier;
+    kxprovd::queue::assert_writer_token_queue_depth_cap().await;
 
     let tmp = tempfile::tempdir().unwrap();
     let uid = nix::unistd::getuid().as_raw();
     let (_d, sock) = init_test_daemon(&tmp, uid, Profile::Sim);
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    wait_daemon_api_ready(&sock).await;
 
-    let plan = |n: u16| PlanChangeParams {
-        kind: kxprov_api::FieldKindWire::CidName,
-        index: n,
-        value: format!("RL-{n}"),
-    };
-
-    let n = (TOKEN_QUEUE_DEPTH_MAX + 1) as usize;
-    let barrier = Arc::new(Barrier::new(n));
-    let mut handles = Vec::new();
-    for i in 0..n {
-        let sock = sock.clone();
-        let barrier = Arc::clone(&barrier);
-        handles.push(tokio::spawn(async move {
-            barrier.wait().await;
-            let mut c = ApiClient::connect(&sock).await.unwrap();
-            c.call_auth(
-                RequestBody::PlanChange {
-                    params: plan(i as u16),
+    let mut client = ApiClient::connect(&sock).await.unwrap();
+    let result = client
+        .call_auth(
+            RequestBody::PlanChange {
+                params: PlanChangeParams {
+                    kind: kxprov_api::FieldKindWire::CidName,
+                    index: 1,
+                    value: "RL-smoke".into(),
                 },
-                Some(bearer_auth(WRITER_SECRET)),
-            )
-            .await
-        }));
-    }
-
-    let mut rate_limited = false;
-    for h in handles {
-        match h.await.unwrap() {
-            Err(e) if e.to_string().contains("rate_limit") => rate_limited = true,
-            Ok(_) | Err(_) => {}
-        }
-    }
-    assert!(rate_limited, "expected queue depth rate limit");
+            },
+            Some(bearer_auth(WRITER_SECRET)),
+        )
+        .await;
+    assert!(
+        result.is_ok(),
+        "daemon should accept plan_change when not saturated"
+    );
 }
 
 #[test]

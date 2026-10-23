@@ -5,6 +5,7 @@
 
 use kxprov_api::Scope;
 use kxprovd::tokens::{TokenError, TokenStore};
+use serial_test::serial;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -15,6 +16,7 @@ fn write_tokens(path: &std::path::Path) {
 }
 
 #[test]
+#[serial]
 fn fifo_tokens_single_probe_thread_fast_fail_and_recovery() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let path = tmp.path().join("tokens.json");
