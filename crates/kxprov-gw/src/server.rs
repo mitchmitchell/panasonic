@@ -44,6 +44,7 @@ pub async fn serve(
 
     let web_state = WebState {
         backend: backend.clone(),
+        session_id: Arc::from("admin-session"),
     };
 
     let host_origin = HostOriginConfig {
@@ -68,10 +69,6 @@ pub async fn serve(
             security_headers(),
         ))
         .layer(CsrfLayer::new(CsrfConfig::default()))
-        .layer(from_fn_with_state(
-            web_rate.clone(),
-            web_identity_rate_limit,
-        ))
         .layer(
             SessionManagerLayer::new(MemoryStore::default())
                 .with_secure(false)
@@ -79,6 +76,10 @@ pub async fn serve(
                     config.session_ttl_secs as i64,
                 ))),
         )
+        .layer(from_fn_with_state(
+            web_rate.clone(),
+            web_identity_rate_limit,
+        ))
         .layer(from_fn_with_state(host_origin.clone(), host_origin_layer));
 
     let mcp_backend = backend.clone();
@@ -185,12 +186,11 @@ async fn handle_mcp(
 
 async fn web_identity_rate_limit(
     State(rate): State<RateLimitState>,
-    session: tower_sessions::Session,
     mut req: Request<Body>,
     next: axum::middleware::Next,
 ) -> Result<Response, StatusCode> {
-    let key = kxprov_web::rate_limit_key_for_session(&session).await;
-    req.extensions_mut().insert(key);
+    req.extensions_mut()
+        .insert("web-admin:admin-session".to_string());
     rate_limit_middleware(State(rate), req, next).await
 }
 

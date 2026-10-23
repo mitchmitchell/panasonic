@@ -7,7 +7,6 @@ pub struct LoginTemplate {
     pub show_error: bool,
     pub error: String,
     pub csrf_token: String,
-    pub next_path: String,
 }
 
 #[derive(Template)]
@@ -26,6 +25,8 @@ pub struct DashboardTemplate {
     pub csrf_token: String,
 }
 
+/// Reserved for per-plan approval links (login return flow not wired yet).
+#[allow(dead_code)]
 #[derive(Template)]
 #[template(path = "approve.html")]
 pub struct ApproveTemplate {
@@ -38,6 +39,8 @@ pub struct ApproveTemplate {
     pub csrf_token: String,
 }
 
+/// Reserved for expired approval windows (login return flow not wired yet).
+#[allow(dead_code)]
 #[derive(Template)]
 #[template(path = "approval_expired.html")]
 pub struct ApprovalExpiredTemplate {}
