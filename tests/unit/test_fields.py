@@ -54,3 +54,9 @@ def test_ext_name_layout():
         f.encode_ext_name("X" * 11)
     with pytest.raises(ValueError):
         f.encode_cid_name("caf\u00e9")
+
+
+@pytest.mark.parametrize("bad", ["\u0660", "1\u0663", "\uff11", "\u00b2"])
+def test_cid_number_rejects_unicode_digits(bad):
+    with pytest.raises(ValueError):
+        f.encode_cid_number(bad)

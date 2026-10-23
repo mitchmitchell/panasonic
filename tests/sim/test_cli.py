@@ -48,8 +48,31 @@ def test_bad_ranges_are_usage_errors(argv, capsys):
     assert "usage:" in err and "Traceback" not in err
 
 
-def test_protocol_error_is_one_line(capsys):
-    # within the spec range but past the 50-record synthetic sim table
+def test_last_cid_name_record_matches_sim(capsys):
+    # 499 is the last record in both the CLI limit and the simulator (RE spec: 500 records)
+    assert main(["read", "cid_name", "--first", "499", "--count", "1"]) == 0
+    assert capsys.readouterr().out.startswith("499\t")
+
+
+def test_protocol_error_is_one_line_and_ends_binary(capsys, monkeypatch):
+    from panasonic.kxtd1232 import cli
+    from panasonic.kxtd1232.client import Client
+    from panasonic.sim import LoopbackTransport, SimPBX, synthetic_db
+
+    sim = SimPBX(db=synthetic_db(cid_records=50))  # smaller than the spec, so reads refuse
+
+    def small():
+        c = Client(LoopbackTransport(sim))
+        c.login("0000")
+        return c
+
+    monkeypatch.setattr(cli, "_connect", small)
     assert main(["read", "cid_name", "--first", "100", "--count", "1"]) == 1
     err = capsys.readouterr().err
     assert err.startswith("kxtd1232: error:") and err.count("\n") == 1
+    assert sim.mode == "await_password_again"  # end_binary ran on the error path
+
+
+def test_invalid_value_uses_error_prefix(capsys):
+    assert main(["plan", "cid_number", "0", "abc"]) == 2
+    assert capsys.readouterr().err.startswith("kxtd1232: error:")

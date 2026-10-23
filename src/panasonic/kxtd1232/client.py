@@ -71,10 +71,19 @@ class Client:
         """Send once and return the reply. Busy frames are waited out, never answered with a
         resend (design §3), for at most ``busy_limit`` seconds (BusyTimeoutError)."""
         self.t.send(raw)
+        try:
+            return self._await_reply(raw[1], timeout)
+        except (BusyTimeoutError, TimeoutError, ProtocolError):
+            # Drop leftover busy or partial bytes so a following re-read (verify_block)
+            # starts on a clean frame boundary.
+            self._rx = b""
+            raise
+
+    def _await_reply(self, request_cmd: int, timeout: float) -> Reply:
         busy_since: float | None = None
         while True:
             try:
-                reply = classify(self._recv_frame(timeout), raw[1])
+                reply = classify(self._recv_frame(timeout), request_cmd)
             except FrameError as e:
                 raise ProtocolError(f"bad reply: {e}") from e
             if reply.kind != "busy":

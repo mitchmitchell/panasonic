@@ -17,8 +17,9 @@ PLACEHOLDER_ROM_ID = "-----PXXXXXXXXXX"
 BANNER = b"Welcome To KX-TD1232  Ver 2.0 Panasonic CO.,LTD.\r\nEnter Password\r\n"
 
 
-def synthetic_db(cid_records: int = 50, ext_records: int = 32) -> dict[int, bytearray]:
-    """A small fake database: a few caller-ID entries and extension names."""
+def synthetic_db(cid_records: int = 500, ext_records: int = 128) -> dict[int, bytearray]:
+    """A fake database sized per the RE table spec (500 caller-ID records, 128 extension
+    names on a single-cabinet KX-TD1232), with a few synthetic entries."""
     nums = bytearray(encode_cid_number("") * cid_records)
     names = bytearray(encode_cid_name("") * cid_records)
     nums[0:6] = encode_cid_number("123")

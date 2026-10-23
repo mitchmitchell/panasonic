@@ -36,14 +36,14 @@ def test_wrong_password():
 def test_read_records_blocks_match_db():
     sim, c = connect()
     data = c.read_records(0x24, 6, 0, 50)
-    assert data == bytes(sim.db[0x24])
+    assert data == bytes(sim.db[0x24][:300])
     assert sim.requests == 2  # 25-record blocks
 
 
 def test_refusal_past_end():
     _, c = connect()
     with pytest.raises(ProtocolError) as e:
-        c.read(0x24, 49, 0, 6)
+        c.read(0x24, 499, 0, 6)
     assert e.value.reply.kind == "refused"
 
 

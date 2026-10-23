@@ -10,7 +10,7 @@ MAX_CID_DIGITS = 11
 
 def encode_cid_number(number: str) -> bytes:
     """Nibble 0 = digit count, 0xA = digit 0, 0xF pad."""
-    if not number.isdigit() and number != "":
+    if any(d not in "0123456789" for d in number):  # ASCII only; str.isdigit allows Unicode
         raise ValueError("caller-ID number must be digits only")
     if len(number) > MAX_CID_DIGITS:
         raise ValueError(f"at most {MAX_CID_DIGITS} digits")

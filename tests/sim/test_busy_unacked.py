@@ -74,3 +74,13 @@ def test_write_fault_survives_intervening_reads():
     w = one_write(c)  # reads happen first
     c.write(w.table, w.record, w.word, w.new)
     assert c.verify_block(w.table, w.record, w.word, w.new, w.base) == "not_applied"
+
+
+def test_busy_forever_then_verify_block_starts_clean():
+    sim, c = connect()
+    w = one_write(c)
+    sim.inject("busy_forever")
+    with pytest.raises(UnackedWriteError):
+        c.write(w.table, w.record, w.word, w.new)
+    assert c._rx == b""
+    assert c.verify_block(w.table, w.record, w.word, w.new, w.base) in ("applied", "not_applied")

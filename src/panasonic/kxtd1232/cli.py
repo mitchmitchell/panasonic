@@ -1,4 +1,10 @@
-"""``kxtd1232`` CLI. Phase A: simulator only, read-only and dry-run."""
+"""``kxtd1232`` CLI. Phase A: simulator only, read-only and dry-run.
+
+Exit codes: 0 success; 1 runtime error, including a refused write or plan (for example a
+table outside the editable list) and protocol, frame or login failures; 2 usage error
+(bad arguments, out-of-range records, invalid field values). Errors print one line,
+``kxtd1232: error: ...``, with no traceback.
+"""
 
 from __future__ import annotations
 
@@ -70,6 +76,20 @@ def main(argv: list[str] | None = None) -> int:
 
 def _run(a: argparse.Namespace) -> int:
     c = _connect()
+    ok = False
+    try:
+        rc = _command(c, a)
+        ok = True
+        return rc
+    finally:
+        try:
+            c.end_binary()
+        except Exception:  # noqa: BLE001 - best-effort teardown; keep the original error
+            if ok:
+                raise
+
+
+def _command(c: Client, a: argparse.Namespace) -> int:
     if a.cmd == "version":
         print(c.version())
     elif a.cmd == "read":
@@ -84,11 +104,10 @@ def _run(a: argparse.Namespace) -> int:
         try:
             patch = field_patch(a.kind, a.index, a.value)
         except ValueError as e:
-            print(f"error: {e}", file=sys.stderr)
+            print(f"kxtd1232: error: {e}", file=sys.stderr)
             return 2
         plan = build_plan(table, size, base, [patch])
         print(json.dumps({"table": table, "writes": len(plan.writes), "diff": plan.diff()}))
-    c.end_binary()
     return 0
 
 
