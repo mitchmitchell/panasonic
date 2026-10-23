@@ -1,7 +1,6 @@
 //! HTTPS listener: port-less Host and https://127.0.0.1 Origin (P5-22).
 
 use axum::body::Body;
-use axum::extract::ConnectInfo;
 use axum::http::{header, Method, Request, StatusCode};
 use kxprov_gw::{production_web_router, HostOriginConfig, RateLimiter};
 use support::{apply_web_connect, cookie_header_from_set_cookies, test_web_state};

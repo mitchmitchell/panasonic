@@ -1,7 +1,6 @@
 //! Host authority consistency (P5-18).
 
 use axum::body::Body;
-use axum::extract::ConnectInfo;
 use axum::http::{Request, StatusCode};
 use kxprov_gw::{production_web_router, HostOriginConfig, RateLimiter};
 use support::{apply_web_connect, test_web_state};

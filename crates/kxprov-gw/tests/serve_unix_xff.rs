@@ -70,6 +70,23 @@ async fn tcp_loopback_connection_never_trusts_xff() {
     assert_ne!(peer, SocketAddr::from(([0, 0, 0, 0], 0)));
 }
 
+#[tokio::test]
+async fn web_serve_bind_sets_socket_mode_0660() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("web-serve.sock");
+    let _listener = kxprov_gw::serve_peer::bind_web_serve_listener(&path, None)
+        .await
+        .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o660
+        );
+    }
+}
+
 #[test]
 fn config_rejects_missing_and_invalid_serve_peer_uid() {
     let missing = kxprov_gw::config::GatewayConfig::default();

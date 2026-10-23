@@ -31,6 +31,12 @@ impl ServeTrustConfig {
     pub fn web_connect_info(&self, stream: &UnixStream) -> WebConnectInfo {
         let peer_uid = peer_connection_uid(stream);
         let serve_proxy_trusted = self.evaluate(peer_uid);
+        tracing::debug!(
+            resolved_peer_uid = ?peer_uid,
+            expected_serve_peer_uid = self.expected_peer_uid,
+            serve_proxy_trusted,
+            "Serve Unix SO_PEERCRED"
+        );
         WebConnectInfo::from_parts(SERVE_LOOPBACK_PEER, serve_proxy_trusted)
     }
 }

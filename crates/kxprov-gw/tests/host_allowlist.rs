@@ -4,7 +4,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::body::Body;
-use axum::extract::ConnectInfo;
 use axum::http::{header, Method, Request, StatusCode};
 use http_body_util::BodyExt;
 use kxprov_gw::{production_web_router, HostOriginConfig, RateLimiter};

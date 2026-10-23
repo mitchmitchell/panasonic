@@ -147,9 +147,9 @@ pub async fn serve(
     let tailnet_serve_trust = config.tailnet_serve_trust();
     tracing::info!(
         path = %web_serve_socket.display(),
-        serve_peer_uid = tailnet_serve_trust.expected_peer_uid,
+        resolved_serve_peer_uid = tailnet_serve_trust.expected_peer_uid,
         trust_x_forwarded_for = tailnet_serve_trust.trust_x_forwarded_for,
-        "web Serve Unix listener"
+        "web Serve Unix listener (SO_PEERCRED trust)"
     );
 
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
