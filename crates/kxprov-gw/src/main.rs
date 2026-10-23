@@ -12,7 +12,7 @@ async fn main() -> anyhow::Result<()> {
 
     let config = GatewayConfig::from_env_and_args()?;
     let gateway_token =
-        GatewayDaemonToken::load(&config.daemon_tokens_path, &config.gateway_bearer_path)?;
+        GatewayDaemonToken::load(&config.gateway_bearer_path, &config.daemon_socket_path).await?;
     let backend = DaemonClient::connect(
         &config.daemon_socket_path,
         gateway_token.bearer().to_string(),

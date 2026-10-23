@@ -15,7 +15,8 @@ use crate::worker::backup_info;
 use kxprov_api::{
     ApiErrorBody, ApplyPlanParams, OperationalMode, PlanChangeParams, Profile, RequestAuth,
     RequestBody, RequestEnvelope, Response, ResponseResult, Scope, SetModeParams, SetModeResult,
-    SubmitApprovalParams, SubmitApprovalResult, TokenId, UnlockParams, UnlockResult,
+    SimTriggerBusyParams, SimTriggerResult, SubmitApprovalParams, SubmitApprovalResult, TokenId,
+    UnlockParams, UnlockResult, WhoamiResult,
 };
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -175,6 +176,9 @@ async fn dispatch(
             apply_plan(state, params, token, locked).await
         }
         RequestBody::Unlock { params } => unlock(state, cred, params.clone()).await,
+        RequestBody::Whoami => whoami(state, role, &env.auth).await,
+        RequestBody::SimTriggerBusy { params } => sim_trigger_busy(state, params).await,
+        RequestBody::SimTriggerGoliathCopyFail => sim_trigger_goliath_copy_fail(state).await,
     };
 
     match result {
@@ -195,6 +199,69 @@ fn err_response(id: String, e: ApiErrorBody) -> Response {
         result: None,
         error: Some(e),
     }
+}
+
+async fn whoami(
+    state: &ApiState,
+    role: PeerRole,
+    auth: &Option<RequestAuth>,
+) -> Result<ResponseResult, ApiErrorBody> {
+    if role == PeerRole::ReadOnly {
+        return Err(api_err("forbidden", "read-only peer"));
+    }
+    let auth = auth
+        .as_ref()
+        .ok_or_else(|| api_err("token_required", "bearer required"))?;
+    let now = now_ms();
+    let verified = state
+        .tokens
+        .verify_bearer_identity(&auth.bearer, now)
+        .map_err(|e| match e {
+            TokenError::Unauthorized | TokenError::Revoked | TokenError::Expired => {
+                api_err("unauthorized", "invalid bearer")
+            }
+            _ => api_err("token", &e.to_string()),
+        })?;
+    Ok(ResponseResult::Whoami(WhoamiResult {
+        token_id: verified.id,
+        scopes: verified.scopes,
+    }))
+}
+
+async fn sim_runtime_allowed(state: &ApiState) -> Result<(), ApiErrorBody> {
+    if state.config.transport != crate::config::TransportKind::Sim {
+        return Err(api_err("forbidden", "sim transport only"));
+    }
+    let profile = *state.profile.read().await;
+    if profile != Profile::Sim && profile != Profile::Test {
+        return Err(api_err("forbidden", "sim/test profile only"));
+    }
+    Ok(())
+}
+
+async fn sim_trigger_busy(
+    state: &ApiState,
+    params: &SimTriggerBusyParams,
+) -> Result<ResponseResult, ApiErrorBody> {
+    sim_runtime_allowed(state).await?;
+    let Some(pbx) = state.config.sim_pbx.as_ref() else {
+        return Err(api_err("forbidden", "no sim transport"));
+    };
+    if params.frames == 0 {
+        return Err(api_err("bad_request", "frames must be > 0"));
+    }
+    pbx.lock()
+        .expect("sim pbx lock")
+        .inject(kxtd1232_sim::Fault::Busy {
+            frames: params.frames,
+        });
+    Ok(ResponseResult::SimTrigger(SimTriggerResult { ok: true }))
+}
+
+async fn sim_trigger_goliath_copy_fail(state: &ApiState) -> Result<ResponseResult, ApiErrorBody> {
+    sim_runtime_allowed(state).await?;
+    state.goliath.trigger_next_copy_fail();
+    Ok(ResponseResult::SimTrigger(SimTriggerResult { ok: true }))
 }
 
 fn verify_bearer(

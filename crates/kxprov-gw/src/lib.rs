@@ -2,6 +2,7 @@ pub mod auth;
 pub mod config;
 pub mod daemon_client;
 pub mod gateway_token;
+pub mod host_match;
 pub mod host_origin;
 pub mod post_origin;
 pub mod ratelimit;

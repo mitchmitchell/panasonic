@@ -24,7 +24,7 @@ use std::net::SocketAddr;
 use templates::{DashboardTemplate, ReadFieldRow};
 use tower_sessions::Session;
 
-pub use login_limit::LoginRateLimiter;
+pub use login_limit::{LoginBusy, LoginRateLimiter};
 pub use session::{reject_authenticated_login, require_web_session, SESSION_AUTH_KEY};
 pub use static_files::serve_static;
 
@@ -220,19 +220,14 @@ fn caller_from_session(session: &Session) -> CallerIdentity {
 /// Client IP for login rate limiting. Trust `X-Forwarded-For` only when the TCP peer is loopback
 /// (e.g. tailscale serve forwarding from `127.0.0.1` on the gateway host).
 ///
-/// Tailscale Serve **appends** the client address to any existing `X-Forwarded-For` chain, so the
-/// rightmost hop is the original client (see `docs/design/tailscale-x-forwarded-for.md`).
+/// Tailscale Serve **replaces** `X-Forwarded-For` with the client it observed (see
+/// `docs/design/tailscale-x-forwarded-for.md`).
 pub fn client_ip(headers: &HeaderMap, peer: Option<SocketAddr>) -> String {
     if let Some(peer) = peer {
         if peer.ip().is_loopback() {
             if let Some(v) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
-                let hops: Vec<&str> = v
-                    .split(',')
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                    .collect();
-                if let Some(client) = hops.last() {
-                    return (*client).to_string();
+                if let Some(client) = v.split(',').map(str::trim).find(|s| !s.is_empty()) {
+                    return client.to_string();
                 }
             }
         }
@@ -285,10 +280,16 @@ async fn login_submit(
     let ip = client_ip(&headers, Some(peer));
     let acct_key = "acct:admin".to_string();
     let ip_key = format!("ip:{ip}");
-    let delay = state
-        .login_limiter
-        .delay_before_attempt(&acct_key, &ip_key)
-        .await;
+    let (_guard, delay) = match state.login_limiter.begin_login(&acct_key, &ip_key).await {
+        Ok(v) => v,
+        Err(LoginBusy::AccountInProgress) => {
+            return (
+                StatusCode::TOO_MANY_REQUESTS,
+                "Login already in progress. Try again shortly.",
+            )
+                .into_response();
+        }
+    };
     if !delay.is_zero() {
         tokio::time::sleep(delay).await;
     }
@@ -477,10 +478,7 @@ mod client_ip_tests {
         let peer = "127.0.0.1:8080".parse().unwrap();
         assert_eq!(client_ip(&headers, Some(peer)), "203.0.113.5");
 
-        headers.insert(
-            "x-forwarded-for",
-            "198.51.100.1, 203.0.113.5".parse().unwrap(),
-        );
+        headers.insert("x-forwarded-for", "203.0.113.5".parse().unwrap());
         assert_eq!(client_ip(&headers, Some(peer)), "203.0.113.5");
 
         let peer = "10.0.0.2:443".parse().unwrap();

@@ -317,6 +317,44 @@ fn mode_daemon(cli: &Cli) -> Result<(), CliError> {
     })
 }
 
+fn cargo_workspace_root() -> Result<PathBuf, CliError> {
+    if let Ok(root) = std::env::var("KXPROV_WORKSPACE") {
+        let root = PathBuf::from(root);
+        if is_cargo_workspace(&root) {
+            return Ok(root);
+        }
+        return Err(CliError::Usage(format!(
+            "KXPROV_WORKSPACE is not a Cargo workspace: {}",
+            root.display()
+        )));
+    }
+    let mut dir = std::env::current_dir().map_err(|e| CliError::Usage(e.to_string()))?;
+    loop {
+        if is_cargo_workspace(&dir) {
+            return Ok(dir);
+        }
+        if !dir.pop() {
+            break;
+        }
+    }
+    let fallback = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..");
+    if is_cargo_workspace(&fallback) {
+        return Ok(fallback);
+    }
+    Err(CliError::Usage(
+        "could not find Cargo workspace (set KXPROV_WORKSPACE or run from the repo)".into(),
+    ))
+}
+
+fn is_cargo_workspace(dir: &std::path::Path) -> bool {
+    let manifest = dir.join("Cargo.toml");
+    std::fs::read_to_string(manifest)
+        .ok()
+        .is_some_and(|s| s.contains("[workspace]"))
+}
+
 fn sim_mark(cli: &Cli) -> Result<(), CliError> {
     let Command::SimMark { cmd } = &cli.cmd else {
         return Err(CliError::Usage("sim-mark".into()));
@@ -340,9 +378,7 @@ fn sim_mark(cli: &Cli) -> Result<(), CliError> {
             Ok(())
         }
         SimMarkCommand::Write { data_dir } => {
-            let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("..")
-                .join("..");
+            let workspace = cargo_workspace_root()?;
             let status = std::process::Command::new("cargo")
                 .current_dir(&workspace)
                 .args([

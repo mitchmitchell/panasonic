@@ -1327,6 +1327,7 @@ dependencies = [
  "kxtd1232",
  "kxtd1232-sim",
  "serde_json",
+ "tempfile",
  "tokio",
 ]
 

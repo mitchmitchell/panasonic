@@ -4,6 +4,7 @@ use axum::http::{header, Method, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 
+use crate::host_match::origin_allowed as origin_matches;
 use crate::host_origin::HostOriginConfig;
 
 /// Fail closed on state-changing requests without a matching Origin or Referer.
@@ -34,16 +35,11 @@ fn state_changing_method(method: &Method) -> bool {
 
 fn origin_allowed(cfg: &HostOriginConfig, headers: &axum::http::HeaderMap) -> bool {
     if let Some(origin) = headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()) {
-        return cfg
-            .allowed_origins
-            .iter()
-            .any(|allowed| origin.eq_ignore_ascii_case(allowed));
+        return origin_matches(&cfg.allowed_origins, origin);
     }
     if let Some(referer) = headers.get(header::REFERER).and_then(|v| v.to_str().ok()) {
         return cfg.allowed_origins.iter().any(|allowed| {
-            referer
-                .trim_end_matches('/')
-                .eq_ignore_ascii_case(allowed.trim_end_matches('/'))
+            origin_matches(&[allowed.clone()], referer.trim_end_matches('/'))
                 || referer.starts_with(&format!("{allowed}/"))
         });
     }
@@ -62,6 +58,21 @@ mod tests {
             allowed_origins: vec!["https://localhost".into()],
         };
         assert!(!origin_allowed(&cfg, &HeaderMap::new()));
+    }
+
+    #[test]
+    fn localhost_ported_origin_and_host_allowed() {
+        let cfg = HostOriginConfig {
+            allowed_hosts: vec!["localhost".into()],
+            allowed_origins: vec!["http://localhost".into()],
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert(header::ORIGIN, "http://localhost:8080".parse().unwrap());
+        assert!(origin_allowed(&cfg, &headers));
+        assert!(crate::host_match::host_allowed(
+            &cfg.allowed_hosts,
+            "localhost:8080"
+        ));
     }
 
     #[test]

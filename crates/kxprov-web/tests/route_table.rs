@@ -4,11 +4,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::body::Body;
+use axum::extract::ConnectInfo;
 use axum::http::{header, Method, Request, StatusCode};
 use kxprov_gw::{production_web_router, HostOriginConfig, RateLimiter};
 use kxprov_mcp::KxMcpServer;
 use kxprov_mock::{MCP_APPROVAL_TOOLS, MCP_TOOLS, WEB_ROUTES};
 use kxprov_web::LoginRateLimiter;
+use std::net::SocketAddr;
 use support::{test_web_state, TestVerifier};
 use tower::ServiceExt;
 fn production_like_app() -> axum::Router {
@@ -31,12 +33,29 @@ fn production_like_app() -> axum::Router {
 }
 
 fn production_request(method: Method, uri: &str) -> Request<Body> {
-    Request::builder()
+    let peer: SocketAddr = "127.0.0.1:4321".parse().unwrap();
+    let mut req = Request::builder()
         .method(method)
         .uri(uri)
         .header(header::HOST, "127.0.0.1")
         .body(Body::empty())
-        .unwrap()
+        .unwrap();
+    req.extensions_mut().insert(ConnectInfo(peer));
+    req
+}
+
+fn production_post(uri: &str, body: &str) -> Request<Body> {
+    let peer: SocketAddr = "127.0.0.1:4321".parse().unwrap();
+    let mut req = Request::builder()
+        .method(Method::POST)
+        .uri(uri)
+        .header(header::HOST, "127.0.0.1")
+        .header(header::ORIGIN, "http://127.0.0.1")
+        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .body(Body::from(body.to_string()))
+        .unwrap();
+    req.extensions_mut().insert(ConnectInfo(peer));
+    req
 }
 
 fn allowed_status(status: StatusCode) -> bool {
@@ -99,20 +118,12 @@ async fn n1_registered_routes_exist_on_production_router() {
             "POST" => Method::POST,
             _ => continue,
         };
-        let mut builder = Request::builder()
-            .method(method)
-            .uri(uri)
-            .header(header::HOST, "127.0.0.1");
-        if route.method == "POST" {
-            builder = builder
-                .header(header::ORIGIN, "http://127.0.0.1")
-                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded");
-        }
-        let resp = app
-            .clone()
-            .oneshot(builder.body(Body::from("_csrf=x")).unwrap())
-            .await
-            .unwrap();
+        let req = if route.method == "POST" {
+            production_post(uri, "_csrf=x")
+        } else {
+            production_request(method, uri)
+        };
+        let resp = app.clone().oneshot(req).await.unwrap();
         assert_ne!(
             resp.status(),
             StatusCode::NOT_FOUND,
@@ -129,16 +140,7 @@ async fn n1_approval_http_paths_are_registered_and_fail_closed_without_session()
     for path in ["/api/apply", "/api/approval/submit"] {
         let resp = app
             .clone()
-            .oneshot(
-                Request::builder()
-                    .method(Method::POST)
-                    .uri(path)
-                    .header(header::HOST, "127.0.0.1")
-                    .header(header::ORIGIN, "http://127.0.0.1")
-                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
-                    .body(Body::from("_csrf=x"))
-                    .unwrap(),
-            )
+            .oneshot(production_post(path, "_csrf=x"))
             .await
             .unwrap();
         assert_ne!(resp.status(), StatusCode::NOT_FOUND, "{path} must exist");

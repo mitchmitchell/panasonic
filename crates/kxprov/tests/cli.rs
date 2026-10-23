@@ -100,6 +100,36 @@ fn test_invalid_value_uses_error_prefix() {
 }
 
 #[test]
+fn sim_mark_resolves_workspace_from_env_outside_checkout() {
+    let workspace = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .canonicalize()
+        .expect("workspace");
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let data = tmp.path().join("data");
+    let o = std::process::Command::new(env!("CARGO_BIN_EXE_kxprov"))
+        .current_dir("/tmp")
+        .env("KXPROV_WORKSPACE", &workspace)
+        .args([
+            "sim-mark",
+            "status",
+            "--data-dir",
+            data.to_str().expect("path"),
+        ])
+        .output()
+        .expect("run");
+    assert_eq!(
+        o.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&o.stderr)
+    );
+    let out = String::from_utf8_lossy(&o.stdout);
+    assert!(out.contains("marked="), "{out}");
+}
+
+#[test]
 fn test_clap_usage_errors_are_one_line() {
     for argv in [
         &["read"][..],

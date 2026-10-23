@@ -10,12 +10,7 @@ async fn login_limiter_tracks_account_and_ip_separately() {
         Duration::from_secs(30),
     );
     limiter.record_failure("acct:admin", "ip:1").await;
-    assert!(
-        limiter
-            .delay_before_attempt("acct:admin", "ip:1")
-            .await
-            > Duration::ZERO
-    );
+    assert!(limiter.delay_before_attempt("acct:admin", "ip:1").await > Duration::ZERO);
     limiter.on_success("acct:admin", "ip:1").await;
     assert_eq!(
         limiter.delay_before_attempt("acct:admin", "ip:1").await,

@@ -149,6 +149,11 @@ impl Config {
         if let Some(guard) = file.reply_guard_ms {
             timing.reply_guard_ms = guard;
         }
+        let sim_pbx = if transport == TransportKind::Sim {
+            Some(Arc::new(Mutex::new(SimPbx::default())))
+        } else {
+            None
+        };
         let cfg = Self {
             profile: file.profile,
             transport,
@@ -164,7 +169,7 @@ impl Config {
             totp_enabled: file.totp_enabled,
             totp_secret_path: file.totp_secret_path,
             timing,
-            sim_pbx: None,
+            sim_pbx,
             tokens_path: file.tokens_path,
         };
         cfg.validate()?;

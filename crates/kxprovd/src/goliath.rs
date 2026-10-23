@@ -4,12 +4,14 @@ use crate::backup::BackupMeta;
 use kxprov_api::GoliathCopyStatus;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 #[derive(Debug, Clone)]
 pub struct GoliathQueue {
     target: PathBuf,
     state: Arc<Mutex<HashMap<String, GoliathCopyStatus>>>,
+    fail_next_copy: Arc<AtomicBool>,
 }
 
 impl GoliathQueue {
@@ -18,7 +20,12 @@ impl GoliathQueue {
         Ok(Self {
             target,
             state: Arc::new(Mutex::new(HashMap::new())),
+            fail_next_copy: Arc::new(AtomicBool::new(false)),
         })
+    }
+
+    pub fn trigger_next_copy_fail(&self) {
+        self.fail_next_copy.store(true, Ordering::SeqCst);
     }
 
     pub fn enqueue_copy(&self, meta: &BackupMeta) {
@@ -30,8 +37,13 @@ impl GoliathQueue {
         let src = meta.path.clone();
         let sha = meta.sha256.clone();
         let state = Arc::clone(&self.state);
+        let fail = self.fail_next_copy.swap(false, Ordering::SeqCst);
         std::thread::spawn(move || {
-            let result = copy_one(&target, &id, &src, &sha);
+            let result = if fail {
+                false
+            } else {
+                copy_one(&target, &id, &src, &sha)
+            };
             let mut st = state.lock().expect("goliath lock");
             st.insert(
                 id,

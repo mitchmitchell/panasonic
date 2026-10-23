@@ -1,7 +1,8 @@
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use axum::body::Body;
-use axum::extract::Request;
+use axum::extract::{ConnectInfo, Request};
 use axum::http::header;
 use axum::middleware::{from_fn, from_fn_with_state};
 use axum::Router;
@@ -24,12 +25,7 @@ pub fn production_web_router(
 ) -> Router {
     let web_rate = RateLimitState {
         limiter: rate_limiter,
-        key_from_request: Arc::new(|req: &Request<Body>| {
-            req.extensions()
-                .get::<String>()
-                .cloned()
-                .or_else(|| Some("web-anonymous".into()))
-        }),
+        key_from_request: Arc::new(|req: &Request<Body>| req.extensions().get::<String>().cloned()),
     };
 
     let session_layer = SessionManagerLayer::new(MemoryStore::default())
@@ -45,6 +41,7 @@ pub fn production_web_router(
         .layer(from_fn(require_web_session))
         .layer(from_fn(reject_authenticated_login))
         .layer(session_layer)
+        .layer(from_fn(inject_web_rate_limit_key))
         .layer(from_fn_with_state(
             web_rate.clone(),
             web_identity_rate_limit,
@@ -60,19 +57,22 @@ pub fn production_web_router(
         ))
 }
 
-async fn web_identity_rate_limit(
-    axum::extract::State(rate): axum::extract::State<RateLimitState>,
+async fn inject_web_rate_limit_key(
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     mut req: Request<Body>,
     next: axum::middleware::Next,
-) -> Result<axum::response::Response, axum::http::StatusCode> {
-    if let Some(session_key) = req
-        .extensions()
-        .get::<String>()
-        .cloned()
-        .or_else(|| Some("web-anonymous".into()))
-    {
-        req.extensions_mut().insert(session_key);
+) -> axum::response::Response {
+    if req.extensions().get::<String>().is_none() {
+        req.extensions_mut().insert(format!("web-ip:{}", peer.ip()));
     }
+    next.run(req).await
+}
+
+async fn web_identity_rate_limit(
+    axum::extract::State(rate): axum::extract::State<RateLimitState>,
+    req: Request<Body>,
+    next: axum::middleware::Next,
+) -> Result<axum::response::Response, axum::http::StatusCode> {
     rate_limit_middleware(axum::extract::State(rate), req, next).await
 }
 

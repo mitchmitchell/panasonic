@@ -15,6 +15,21 @@ name = "startup"
 path = "tests/startup.rs"
 required-features = ["test-secret-skip"]
 
+[[test]]
+name = "daemon_e2e"
+path = "tests/daemon_e2e.rs"
+required-features = ["test-secret-skip"]
+
+[[test]]
+name = "host_allowlist"
+path = "tests/host_allowlist.rs"
+required-features = ["test-secret-skip"]
+
+[[test]]
+name = "run_seed"
+path = "tests/run_seed.rs"
+required-features = ["test-secret-skip"]
+
 [features]
 test-secret-skip = []
 

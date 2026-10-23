@@ -1,4 +1,4 @@
-use crate::ids::{Approval, DiffHash, PlanId};
+use crate::ids::{Approval, DiffHash, PlanId, TokenId};
 use serde::{Deserialize, Serialize};
 
 pub use crate::ids::Profile;
@@ -183,14 +183,50 @@ pub struct UnlockResult {
 #[serde(tag = "method", rename_all = "snake_case")]
 pub enum RequestBody {
     Status,
-    ReadFields { params: ReadFieldsParams },
-    PlanChange { params: PlanChangeParams },
-    SubmitApproval { params: SubmitApprovalParams },
-    SetMode { params: SetModeParams },
+    ReadFields {
+        params: ReadFieldsParams,
+    },
+    PlanChange {
+        params: PlanChangeParams,
+    },
+    SubmitApproval {
+        params: SubmitApprovalParams,
+    },
+    SetMode {
+        params: SetModeParams,
+    },
     BackupNow,
     ListBackups,
-    ApplyPlan { params: ApplyPlanParams },
-    Unlock { params: UnlockParams },
+    ApplyPlan {
+        params: ApplyPlanParams,
+    },
+    Unlock {
+        params: UnlockParams,
+    },
+    /// Returns token id + scopes for the presented bearer (gateway startup).
+    Whoami,
+    /// Simulator / test profile only: queue a BUSY fault on the next sim transport op.
+    SimTriggerBusy {
+        params: SimTriggerBusyParams,
+    },
+    /// Simulator / test profile only: force the next Goliath backup copy to fail.
+    SimTriggerGoliathCopyFail,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SimTriggerBusyParams {
+    pub frames: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WhoamiResult {
+    pub token_id: TokenId,
+    pub scopes: Vec<Scope>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SimTriggerResult {
+    pub ok: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -218,6 +254,8 @@ pub enum ResponseResult {
     Job(JobRef),
     ApplyApprovalRequired(ApplyApprovalRequiredResult),
     Unlock(UnlockResult),
+    Whoami(WhoamiResult),
+    SimTrigger(SimTriggerResult),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

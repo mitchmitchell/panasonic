@@ -59,3 +59,11 @@ required-features = ["test-util"]
 [[test]]
 name = "security_b2_b3_b6"
 required-features = ["test-util"]
+
+[[test]]
+name = "sim_triggers"
+required-features = ["test-util"]
+
+[[test]]
+name = "run_seed"
+required-features = ["test-util"]

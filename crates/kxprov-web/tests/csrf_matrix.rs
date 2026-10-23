@@ -25,6 +25,12 @@ use tower_sessions::{Expiry, MemoryStore, SessionManagerLayer};
 
 const PEER: &str = "127.0.0.1:4321";
 
+fn with_peer(mut req: Request<Body>) -> Request<Body> {
+    req.extensions_mut()
+        .insert(ConnectInfo(PEER.parse::<SocketAddr>().unwrap()));
+    req
+}
+
 fn production_app() -> Router {
     let mut state = test_web_state();
     state.login_limiter = Arc::new(LoginRateLimiter::new(
@@ -64,13 +70,13 @@ async fn body_string(resp: axum::response::Response) -> String {
 async fn csrf_from_login(app: &Router) -> (String, String) {
     let resp = app
         .clone()
-        .oneshot(
+        .oneshot(with_peer(
             Request::builder()
                 .uri("/login")
                 .header(header::HOST, "127.0.0.1")
                 .body(Body::empty())
                 .unwrap(),
-        )
+        ))
         .await
         .unwrap();
     let cookie = cookie_header_from_set_cookies(resp.headers());
@@ -118,14 +124,14 @@ async fn login_session(app: &Router) -> (String, String) {
     let session_cookie = merge_cookie_headers(&cookie, resp.headers());
     let dash = app
         .clone()
-        .oneshot(
+        .oneshot(with_peer(
             Request::builder()
                 .uri("/")
                 .header(header::HOST, "127.0.0.1")
                 .header(header::COOKIE, &session_cookie)
                 .body(Body::empty())
                 .unwrap(),
-        )
+        ))
         .await
         .unwrap();
     let session_cookie = merge_cookie_headers(&session_cookie, dash.headers());

@@ -230,6 +230,30 @@ impl TokenStore {
             .clone()
     }
 
+    pub fn verify_bearer_identity(
+        &self,
+        bearer: &str,
+        now_ms: u64,
+    ) -> Result<VerifiedToken, TokenError> {
+        let mut state = self.inner.lock().expect("token store lock");
+        let newly = Self::refresh_if_modified(&mut state)?;
+        drop(state);
+        self.notify_newly_revoked(&newly);
+        let state = self.inner.lock().expect("token store lock");
+        let hash = hash_bearer_secret(bearer);
+        let entry = Self::find_entry(&state.entries, &hash).ok_or(TokenError::Unauthorized)?;
+        if entry.revoked {
+            return Err(TokenError::Revoked);
+        }
+        if now_ms >= entry.expires_at_ms {
+            return Err(TokenError::Expired);
+        }
+        Ok(VerifiedToken {
+            id: entry.id.clone(),
+            scopes: entry.scopes.clone(),
+        })
+    }
+
     pub fn verify_bearer(
         &self,
         bearer: &str,
