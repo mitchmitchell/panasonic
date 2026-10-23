@@ -6,8 +6,9 @@ Documentation=file:///usr/share/doc/kx-provision/systemd-serial-device.md
 
 [Service]
 Type=simple
-RuntimeDirectory=kx-provision
-RuntimeDirectoryMode=0750
+# root:kxprovision so gateway (SupplementaryGroups=kxprovision) can reach kxprovd.sock.
+Group=kxprovision
+RuntimeDirectory=kx-provision:0750:root:kxprovision
 UMask=0077
 
 EnvironmentFile=-/etc/kx-provision/daemon.env

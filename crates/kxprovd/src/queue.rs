@@ -208,7 +208,7 @@ pub fn field_kind_wire(w: FieldKindWire) -> kxtd1232::FieldKind {
 }
 
 /// Deterministic per-token queue depth cap (used by integration tests; does not complete jobs).
-#[cfg(feature = "test-util")]
+#[cfg(any(feature = "test-util", test))]
 pub async fn assert_writer_token_queue_depth_cap() {
     use crate::rate_limit::QUEUE_DEPTH_MAX;
     use kxprov_api::ReadFieldsParams;

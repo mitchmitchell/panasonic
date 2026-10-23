@@ -1,6 +1,6 @@
 # kxprov-gw
 
-One process hosting the web UI and MCP listeners. Production runs as the dedicated **`kxprov-gw`** user (see `deploy/systemd/kxprov-gw.service`), not root. HTTPS on port 443 uses `CAP_NET_BIND_SERVICE`; Tailscale Serve connects to the Unix socket via the **`tailscale`** group; the daemon API socket uses the **`kxprovision`** supplementary group.
+One process hosting the web UI and MCP listeners. Production runs as the dedicated **`kxprov-gw`** user (see `deploy/systemd/kxprov-gw.service`), not root. HTTPS on port 443 uses `CAP_NET_BIND_SERVICE`; Tailscale Serve (root) connects to the Unix socket at mode **`0660`** owned by **`kxprov-gw`**; the daemon API socket uses the **`kxprovision`** supplementary group.
 
 Root-only operations (for example **`kxprov sim-mark`**) stay in the `kxprov` CLI.
 
@@ -8,7 +8,7 @@ Root-only operations (for example **`kxprov sim-mark`**) stay in the `kxprov` CL
 
 | Listener | Default |
 |----------|---------|
-| Web (Tailscale Serve / Unix HTTP) | `/run/kx-provision/web-serve.sock` (`0660`, group `tailscale`, owner `kxprov-gw`) |
+| Web (Tailscale Serve / Unix HTTP) | `/run/kx-provision-gw/web-serve.sock` (`0660`, group `kxprov-gw`, owner `kxprov-gw`) |
 | Web (HTTPS, §5a) | `127.0.0.1:443`, plus `{lan_ip}:443` when configured |
 | MCP (tailnet / loopback) | `127.0.0.1:8081` |
 

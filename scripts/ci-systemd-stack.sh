@@ -94,7 +94,7 @@ JSON
 sudo tee /etc/kx-provision/gateway.toml >/dev/null <<TOML
 bind = "127.0.0.1:8443"
 web_serve_socket = "/run/kx-provision-gw/web-serve.sock"
-serve_socket_group = ""
+serve_socket_group = "kxprov-gw"
 mcp_tailnet_bind = "127.0.0.1:8081"
 mcp_tokens_path = "/etc/kx-provision/secrets/mcp-tokens.toml"
 gateway_bearer_path = "/etc/kx-provision/secrets/gateway-daemon.bearer"
@@ -136,6 +136,13 @@ for _ in $(seq 1 50); do
 done
 [[ -S /run/kx-provision/kxprovd.sock ]] || { log "kxprovd.sock missing"; exit 1; }
 
+run_prov_group="$(stat -c '%G' /run/kx-provision)"
+run_prov_mode="$(stat -c '%a' /run/kx-provision)"
+[[ "$run_prov_group" == "kxprovision" ]] || { log "/run/kx-provision group=$run_prov_group want kxprovision"; exit 1; }
+[[ "$run_prov_mode" == "750" ]] || { log "/run/kx-provision mode=$run_prov_mode want 750"; exit 1; }
+sudo -u kxprov-gw test -x /run/kx-provision \
+  || { log "gateway cannot traverse /run/kx-provision"; exit 1; }
+
 sock_group="$(stat -c '%G' /run/kx-provision/kxprovd.sock)"
 sock_mode="$(stat -c '%a' /run/kx-provision/kxprovd.sock)"
 [[ "$sock_group" == "kxprovision" ]] || { log "socket group=$sock_group want kxprovision"; exit 1; }
@@ -157,6 +164,20 @@ sudo tr '\0' '\n' < "/proc/${GW_PID}/environ" | grep -q '^CREDENTIALS_DIRECTORY=
 CRED_DIR="$(sudo tr '\0' '\n' < "/proc/${GW_PID}/environ" | sed -n 's/^CREDENTIALS_DIRECTORY=//p')"
 sudo test -r "${CRED_DIR}/gateway-daemon.bearer" -a -r "${CRED_DIR}/lan.key" \
   || { log "credential files missing under $CRED_DIR"; exit 1; }
+cred_key_mode="$(sudo stat -c '%a' "${CRED_DIR}/lan.key")"
+cred_key_uid="$(sudo stat -c '%u' "${CRED_DIR}/lan.key")"
+[[ "$cred_key_uid" == "0" || "$cred_key_uid" == "$GW_UID" ]] \
+  || { log "credential lan.key uid=$cred_key_uid want 0 or $GW_UID"; exit 1; }
+case "$cred_key_mode" in
+  400|440|600) ;;
+  *) log "credential lan.key mode=$cred_key_mode want 400/440/600"; exit 1 ;;
+esac
+sudo -u kxprov-gw test -r "${CRED_DIR}/lan.key" \
+  || { log "gateway cannot read LoadCredential lan.key"; exit 1; }
+
+serve_sock_group="$(stat -c '%G' /run/kx-provision-gw/web-serve.sock)"
+[[ "$serve_sock_group" == "kxprov-gw" ]] \
+  || { log "web-serve.sock group=$serve_sock_group want kxprov-gw"; exit 1; }
 
 run_dir_mode="$(stat -c '%a' /run/kx-provision-gw)"
 [[ "$run_dir_mode" == "750" ]] || { log "gateway runtime mode=$run_dir_mode want 750"; exit 1; }

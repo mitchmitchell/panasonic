@@ -99,7 +99,7 @@ impl Default for GatewayConfig {
             lan_ip: None,
             web_https_port: 443,
             web_serve_socket: GATEWAY_WEB_SERVE_SOCKET.into(),
-            serve_socket_group: Some("tailscale".into()),
+            serve_socket_group: Some("kxprov-gw".into()),
             mcp_tailnet_bind: "127.0.0.1:8081".into(),
             mcp_tokens_path: "/etc/kx-provision/secrets/mcp-tokens.toml".into(),
             daemon_tokens_path: TOKENS_JSON.into(),

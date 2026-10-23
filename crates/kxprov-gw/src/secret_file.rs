@@ -1,6 +1,7 @@
 //! Secret file resolution (`CREDENTIALS_DIRECTORY`) and ownership/mode checks for non-root gateway.
 
-use std::fs;
+use std::fs::{self, File, OpenOptions};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 /// Primary gateway group for `root:<group>` mode `0640` secret files on disk.
@@ -21,11 +22,61 @@ pub fn resolve_secret_path(configured: &Path) -> PathBuf {
 }
 
 pub fn validate_secret_file(path: &Path, label: &str) -> anyhow::Result<()> {
-    validate_secret_file_with_group(path, label, Some(GATEWAY_SECRET_GROUP))
+    let _ = open_validated_secret(path, label)?;
+    Ok(())
+}
+
+/// Open a secret with `O_NOFOLLOW`, validate metadata from the open fd, return handle for reading.
+pub fn open_validated_secret(path: &Path, label: &str) -> anyhow::Result<File> {
+    let path = resolve_secret_path(path);
+    open_validated_secret_resolved(&path, label)
+}
+
+fn open_validated_secret_resolved(path: &Path, label: &str) -> anyhow::Result<File> {
+    #[cfg(unix)]
+    {
+        use nix::fcntl::OFlag;
+        use std::os::unix::fs::OpenOptionsExt;
+
+        let file = OpenOptions::new()
+            .read(true)
+            .custom_flags(OFlag::O_NOFOLLOW.bits())
+            .open(path)
+            .map_err(|e| anyhow::anyhow!("{label}: open: {e}"))?;
+        let meta = file
+            .metadata()
+            .map_err(|e| anyhow::anyhow!("{label}: fstat: {e}"))?;
+        validate_secret_metadata(&meta, path, label, Some(GATEWAY_SECRET_GROUP))?;
+        Ok(file)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = label;
+        fs::File::open(path).map_err(Into::into)
+    }
+}
+
+/// Read entire secret after validation (single fd; no check-then-reopen by path).
+pub fn read_secret_file(path: &Path, label: &str) -> anyhow::Result<String> {
+    let mut file = open_validated_secret(path, label)?;
+    let mut buf = String::new();
+    file.read_to_string(&mut buf)
+        .map_err(|e| anyhow::anyhow!("{label}: read: {e}"))?;
+    Ok(buf)
 }
 
 pub fn validate_secret_file_with_group(
     path: &Path,
+    label: &str,
+    group_for_root_owned: Option<&str>,
+) -> anyhow::Result<()> {
+    let _ = group_for_root_owned;
+    validate_secret_file(path, label)
+}
+
+fn validate_secret_metadata(
+    meta: &fs::Metadata,
+    path_for_cred: &Path,
     label: &str,
     group_for_root_owned: Option<&str>,
 ) -> anyhow::Result<()> {
@@ -36,10 +87,6 @@ pub fn validate_secret_file_with_group(
     {
         use std::os::unix::fs::MetadataExt;
 
-        if path.is_symlink() {
-            anyhow::bail!("{label} file must not be a symlink");
-        }
-        let meta = fs::symlink_metadata(path)?;
         let mode = meta.mode();
         if mode & 0o022 != 0 {
             anyhow::bail!("{label} file must not be group- or world-writable");
@@ -48,17 +95,11 @@ pub fn validate_secret_file_with_group(
         let euid = nix::unistd::geteuid().as_raw();
         let uid = meta.uid();
 
-        if is_under_credentials_directory(path) {
-            if uid != 0 {
-                anyhow::bail!("{label} credential must be owned by root (uid 0)");
-            }
-            if perm != 0o600 && perm != 0o400 {
-                anyhow::bail!("{label} credential must be mode 0600 or 0400");
-            }
-            return Ok(());
+        if is_under_credentials_directory(path_for_cred) {
+            return validate_credentials_directory_metadata(uid, euid, perm, label);
         }
 
-        if uid == euid && (perm == 0o600 || perm == 0o400) {
+        if uid == euid && matches!(perm, 0o600 | 0o400) {
             return Ok(());
         }
 
@@ -90,9 +131,30 @@ pub fn validate_secret_file_with_group(
     }
     #[cfg(not(unix))]
     {
-        let _ = (path, label, group_for_root_owned);
+        let _ = (meta, path_for_cred, label, group_for_root_owned);
         Ok(())
     }
+}
+
+/// Modes systemd commonly uses for `LoadCredential=` (root-owned, service-readable via ACL).
+fn validate_credentials_directory_metadata(
+    uid: u32,
+    euid: u32,
+    perm: u32,
+    label: &str,
+) -> anyhow::Result<()> {
+    if !matches!(perm, 0o400 | 0o440 | 0o600) {
+        anyhow::bail!("{label} credential must be mode 0400, 0440, or 0600 (got {perm:o})");
+    }
+    if uid == euid {
+        return Ok(());
+    }
+    if uid == 0 {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "{label} credential must be owned by root (uid 0) or the service user (uid {euid})"
+    );
 }
 
 fn is_under_credentials_directory(path: &Path) -> bool {
@@ -136,8 +198,11 @@ mod tests {
         write_secret(&target, "x", 0o600);
         let link = dir.path().join("link");
         std::os::unix::fs::symlink(&target, &link).unwrap();
-        let err = validate_secret_file(&link, "test").unwrap_err();
-        assert!(err.to_string().contains("symlink"), "{err}");
+        let err = open_validated_secret(&link, "test").unwrap_err();
+        assert!(
+            err.to_string().contains("open") || err.to_string().contains("symlink"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -157,6 +222,19 @@ mod tests {
         let path = dir.path().join("secret");
         write_secret(&path, "x", 0o600);
         validate_secret_file(&path, "test").expect("owner 0600");
+    }
+
+    #[test]
+    fn accepts_credential_mode_0440_root_owned() {
+        std::env::remove_var("KXPROV_SKIP_SECRET_FILE_CHECKS");
+        let dir = tempfile::tempdir().unwrap();
+        let cred = dir.path().join("creds");
+        std::fs::create_dir_all(&cred).unwrap();
+        let path = cred.join("lan.key");
+        write_secret(&path, "key-data", 0o440);
+        std::env::set_var("CREDENTIALS_DIRECTORY", cred.to_str().unwrap());
+        read_secret_file(&path, "TLS private key").expect("0440 credential");
+        std::env::remove_var("CREDENTIALS_DIRECTORY");
     }
 
     #[test]

@@ -203,7 +203,7 @@ fn resolve_serve_group(name: &str) -> Result<nix::unistd::Gid, ServeListenerErro
     }
 }
 
-/// Prepare runtime dir, bind Serve socket (`0660`), group via path `chown` (e.g. `tailscale`).
+/// Prepare runtime dir, bind Serve socket (`0660`), group via path `chown` (default `kxprov-gw`).
 pub async fn bind_web_serve_listener(
     path: &Path,
     group: Option<&str>,

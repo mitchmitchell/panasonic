@@ -10,7 +10,7 @@ Production defaults:
 - Serve socket path: `/run/kx-provision-gw/web-serve.sock`
 - Daemon socket (separate dir): `/run/kx-provision/kxprovd.sock` on **`RuntimeDirectory=kx-provision`** (daemon unit); stopping the gateway does not remove the daemon socket.
 - Mode: **0660** (umask tightened before `bind`, then explicit `chmod`)
-- Group on Serve socket: **`tailscale`** (configurable via `serve_socket_group`; startup **fails** if the group name is missing). Gateway user is in `SupplementaryGroups=kxprovision` to reach `kxprovd.sock` (group **`kxprovision`** on the daemon socket).
+- Group on Serve socket: **`kxprov-gw`** by default (configurable via `serve_socket_group`; startup **fails** if the group name is missing). Tailscale Serve runs as root and can connect to mode `0660` sockets owned by `kxprov-gw`. Gateway user is in `SupplementaryGroups=kxprovision` to reach `kxprovd.sock` (group **`kxprovision`** on the daemon socket).
 
 Stale sockets are removed only after **`lstat`**: symlinks and non-socket paths are rejected.
 
@@ -18,7 +18,7 @@ Stale sockets are removed only after **`lstat`**: symlinks and non-socket paths 
 
 ```toml
 web_serve_socket = "/run/kx-provision-gw/web-serve.sock"
-serve_socket_group = "tailscale"
+serve_socket_group = "kxprov-gw"
 
 [web_tailnet]
 trust_x_forwarded_for = true

@@ -2,7 +2,8 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::secret_file::{resolve_secret_path, validate_secret_file};
+use crate::secret_file::{open_validated_secret, read_secret_file};
+use std::io::Read;
 use std::sync::Mutex;
 use std::time::SystemTime;
 
@@ -29,9 +30,7 @@ pub struct AdminPassword {
 
 impl AdminPassword {
     pub fn from_file(path: &Path) -> anyhow::Result<Self> {
-        let path = resolve_secret_path(path);
-        validate_secret_file(&path, "admin password")?;
-        let hash = fs::read_to_string(&path)?.trim().to_string();
+        let hash = read_secret_file(path, "admin password")?.trim().to_string();
         if hash.is_empty() {
             anyhow::bail!("empty password hash file");
         }
@@ -77,10 +76,10 @@ pub struct McpTokenStore {
 
 impl McpTokenStore {
     pub fn from_file(path: &Path) -> anyhow::Result<Self> {
-        let path_buf = resolve_secret_path(path);
-        validate_secret_file(&path_buf, "MCP token")?;
-        let by_hash = load_by_hash(&path_buf)?;
-        let meta = fs::metadata(&path_buf)?;
+        let path_buf = crate::secret_file::resolve_secret_path(path);
+        let file = open_validated_secret(path, "MCP token")?;
+        let by_hash = load_by_hash_from_file(&file)?;
+        let meta = file.metadata()?;
         let mtime = meta.modified()?;
         let len = meta.len();
         Ok(Self {
@@ -101,17 +100,20 @@ impl McpTokenStore {
     }
 
     fn load_fresh_map(&self) -> HashMap<[u8; 32], McpTokenRecord> {
-        if validate_secret_file(&self.path, "MCP token").is_err() {
-            self.fail_closed_empty();
-            return HashMap::new();
-        }
-        let meta = fs::metadata(&self.path).ok();
+        let file = match open_validated_secret(&self.path, "MCP token") {
+            Ok(f) => f,
+            Err(_) => {
+                self.fail_closed_empty();
+                return HashMap::new();
+            }
+        };
+        let meta = file.metadata().ok();
         let mtime = meta
             .as_ref()
             .and_then(|m| m.modified().ok())
             .unwrap_or(SystemTime::UNIX_EPOCH);
         let len = meta.map(|m| m.len()).unwrap_or(0);
-        match load_by_hash(&self.path) {
+        match load_by_hash_from_file(&file) {
             Ok(fresh) => {
                 let mut guard = self.cache.lock().expect("token cache");
                 guard.mtime = mtime;
@@ -148,9 +150,14 @@ impl McpTokenStore {
     }
 }
 
-fn load_by_hash(path: &Path) -> anyhow::Result<HashMap<[u8; 32], McpTokenRecord>> {
-    let raw = fs::read_to_string(path)?;
-    let entries = load_token_entries(&raw)?;
+fn load_by_hash_from_file(mut file: &fs::File) -> anyhow::Result<HashMap<[u8; 32], McpTokenRecord>> {
+    let mut raw = String::new();
+    file.read_to_string(&mut raw)?;
+    load_by_hash_from_raw(&raw)
+}
+
+fn load_by_hash_from_raw(raw: &str) -> anyhow::Result<HashMap<[u8; 32], McpTokenRecord>> {
+    let entries = load_token_entries(raw)?;
     let approver_count = entries.iter().filter(|e| e.role == "approver").count();
     if approver_count != 1 {
         anyhow::bail!("token file must contain exactly one approver (found {approver_count})");
