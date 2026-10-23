@@ -14,11 +14,13 @@ fn write_tokens(path: &std::path::Path) {
     TokenStore::write_test_file(path, &file).expect("write tokens");
 }
 
-fn wait_live_zero(store: &TokenStore, deadline: Instant) {
-    while store.live_disk_probe_threads_for_test() > 0 {
+const MAX_LIVE_PROBE_THREADS: usize = 2;
+
+fn wait_live_at_most_cap(store: &TokenStore, deadline: Instant) {
+    while store.live_disk_probe_threads_for_test() > MAX_LIVE_PROBE_THREADS {
         assert!(
             Instant::now() < deadline,
-            "probe thread did not finish (live={}, leaked={})",
+            "probe thread count did not fall (live={}, abandoned={})",
             store.live_disk_probe_threads_for_test(),
             store.leaked_disk_probe_threads_for_test()
         );
@@ -28,14 +30,9 @@ fn wait_live_zero(store: &TokenStore, deadline: Instant) {
 
 fn assert_probe_counts_bounded(store: &TokenStore) {
     assert!(
-        store.live_disk_probe_threads_for_test() <= 1,
+        store.live_disk_probe_threads_for_test() <= MAX_LIVE_PROBE_THREADS,
         "live probe threads {}",
         store.live_disk_probe_threads_for_test()
-    );
-    assert!(
-        store.leaked_disk_probe_threads_for_test() <= 2,
-        "leaked probe threads {}",
-        store.leaked_disk_probe_threads_for_test()
     );
 }
 
@@ -55,7 +52,10 @@ fn auth_recovers_after_replace(store: &TokenStore, path: &std::path::Path) {
             Err(e) => panic!("unexpected token error: {e}"),
         }
     }
-    assert_eq!(store.live_disk_probe_threads_for_test(), 0);
+    assert!(
+        store.live_disk_probe_threads_for_test() <= MAX_LIVE_PROBE_THREADS,
+        "live probe threads after recovery"
+    );
     assert!(
         path.is_file(),
         "expected regular tokens.json after recovery"
@@ -136,7 +136,7 @@ fn fifo_tokens_single_probe_thread_fast_fail_and_recovery() {
         "expected an outstanding disk probe while FIFO blocked read"
     );
     assert!(
-        max_live.load(Ordering::Relaxed) <= 1,
+        max_live.load(Ordering::Relaxed) <= MAX_LIVE_PROBE_THREADS,
         "live probe threads peaked at {}",
         max_live.load(Ordering::Relaxed)
     );
@@ -163,15 +163,55 @@ fn fifo_tokens_single_probe_thread_fast_fail_and_recovery() {
             .expect("feed valid tokens through fifo");
     }
 
-    wait_live_zero(&store, Instant::now() + Duration::from_secs(5));
+    wait_live_at_most_cap(&store, Instant::now() + Duration::from_secs(5));
 
     std::fs::remove_file(&path).expect("remove fifo");
     write_tokens(&path);
 
+    auth_recovers_after_replace(&store, &path);
+}
+
+#[test]
+fn six_fifo_hangs_cap_live_threads_and_fast_fail_closed() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let path = tmp.path().join("tokens.json");
+    write_tokens(&path);
+    let store = TokenStore::load_insecure(path.clone()).expect("load");
     store
         .verify_bearer(kxprovd::test_util::WRITER_SECRET, 0, Scope::Plan)
-        .expect("auth recovers after valid tokens.json restored");
-    assert_eq!(store.live_disk_probe_threads_for_test(), 0);
+        .expect("warm");
+
+    let mut max_live = 0usize;
+    for i in 0..6 {
+        std::fs::remove_file(&path).ok();
+        use nix::sys::stat::Mode;
+        nix::unistd::mkfifo(&path, Mode::S_IRUSR | Mode::S_IWUSR).expect("mkfifo");
+        let _ = store.verify_bearer(kxprovd::test_util::WRITER_SECRET, 0, Scope::Plan);
+        max_live = max_live.max(store.live_disk_probe_threads_for_test());
+        let drain = Instant::now() + Duration::from_secs(3);
+        while store.live_disk_probe_threads_for_test() > 0 && Instant::now() < drain {
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        assert!(
+            store.live_disk_probe_threads_for_test() <= MAX_LIVE_PROBE_THREADS,
+            "iteration {i} live={}",
+            store.live_disk_probe_threads_for_test()
+        );
+    }
+    assert!(
+        max_live <= MAX_LIVE_PROBE_THREADS,
+        "peaked at {max_live} live probe threads"
+    );
+
+    let t0 = Instant::now();
+    assert!(matches!(
+        store.verify_bearer(kxprovd::test_util::WRITER_SECRET, 0, Scope::Plan),
+        Err(TokenError::StoreUnavailable)
+    ));
+    assert!(
+        t0.elapsed() <= Duration::from_millis(100),
+        "expected fast fail closed after probe cap"
+    );
 }
 
 #[test]

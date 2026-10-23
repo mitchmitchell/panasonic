@@ -124,14 +124,7 @@ impl ModeStore {
                 self.fail_closed_profile_rollback(body.counter, last);
                 Profile::Prod
             }
-            Some(body) if self.snapshot_below_highest_epoch(body.counter) => {
-                self.fail_closed(
-                    AuditKind::ModeCounterRollback,
-                    format!(
-                        "profile.json counter {} below highest epoch ever written",
-                        body.counter
-                    ),
-                );
+            Some(body) if self.epoch_snapshot_stale_or_corrupt(body.counter, "profile.json") => {
                 Profile::Prod
             }
             Some(body) => {
@@ -164,10 +157,40 @@ impl ModeStore {
         Some(body.counter)
     }
 
-    fn snapshot_below_highest_epoch(&self, counter: u64) -> bool {
-        match epoch_store::read_highest_epoch(&self.provision_root) {
-            Ok(highest) => highest > 0 && counter < highest,
-            Err(_) => false,
+    fn effective_highest_epoch(&self) -> Result<u64, ModeError> {
+        let mut max = epoch_store::read_highest_epoch(&self.provision_root)?;
+        let profiles = match self.boot_profile {
+            Profile::Prod => [Profile::Prod].as_slice(),
+            Profile::Sim | Profile::Test => &[Profile::Sim, Profile::Test][..],
+        };
+        for &profile in profiles {
+            if let Some(n) = epoch_store::read_counter(&self.provision_root, profile)? {
+                max = max.max(n);
+            }
+        }
+        Ok(max)
+    }
+
+    /// Returns true when the caller should treat stored mode/profile as rejected (Prod).
+    fn epoch_snapshot_stale_or_corrupt(&self, counter: u64, label: &str) -> bool {
+        match self.effective_highest_epoch() {
+            Err(e) => {
+                self.fail_closed(
+                    AuditKind::ModeCorrupt,
+                    format!("{label} epoch highest: {e}"),
+                );
+                true
+            }
+            Ok(highest) if highest > 0 && counter < highest => {
+                self.fail_closed(
+                    AuditKind::ModeCounterRollback,
+                    format!(
+                        "{label} counter {counter} below highest epoch ever written ({highest})"
+                    ),
+                );
+                true
+            }
+            Ok(_) => false,
         }
     }
 
@@ -250,14 +273,10 @@ impl ModeStore {
                 format!("mode.json counter {} < epoch {last}", body.counter),
             );
         }
-        if self.snapshot_below_highest_epoch(body.counter) {
-            return self.fail_closed(
-                AuditKind::ModeCounterRollback,
-                format!(
-                    "mode.json counter {} below highest epoch ever written",
-                    body.counter
-                ),
-            );
+        if self.epoch_snapshot_stale_or_corrupt(body.counter, "mode.json") {
+            return EffectiveMode {
+                operational: OperationalMode::Production,
+            };
         }
         if let Ok(prof_raw) = std::fs::read_to_string(&self.profile_path) {
             if let Ok(prof_body) = serde_json::from_str::<ProfileFileBody>(&prof_raw) {
@@ -303,8 +322,10 @@ impl ModeStore {
             return Err(ModeError::TestingProfile);
         }
         let last = self.last_counter(profile)?;
-        let counter = last.saturating_add(1);
-        if counter <= last {
+        let highest = self.effective_highest_epoch()?;
+        let floor = last.max(highest);
+        let counter = floor.saturating_add(1);
+        if counter <= floor {
             return Err(ModeError::CounterRollback);
         }
         let body = ModeFileBody { mode, counter };
@@ -442,7 +463,87 @@ mod tests {
     }
 
     #[test]
-    fn test_daemon_restart_stays_test_when_sim_epoch_counter_higher() {
+    fn switch_to_test_after_sim_epochs_uses_max_counter_not_prod_lock() {
+        let root = tempfile::tempdir().unwrap();
+        let data = root.path().join("sim");
+        std::fs::create_dir_all(&data).unwrap();
+        let store = ModeStore::new_with_epoch_root(&data, root.path(), Profile::Sim);
+        store
+            .set_operational(OperationalMode::Production, Profile::Sim, true)
+            .unwrap();
+        store
+            .set_operational(OperationalMode::Production, Profile::Sim, true)
+            .unwrap();
+        store
+            .set_operational(OperationalMode::Production, Profile::Sim, true)
+            .unwrap();
+        let (_, profile, counter) = store
+            .set_operational(OperationalMode::Testing, Profile::Test, true)
+            .unwrap();
+        assert_eq!(profile, Profile::Test);
+        assert_eq!(counter, 4);
+        assert_eq!(store.load_profile(), Profile::Test);
+        assert_eq!(
+            store.effective(Profile::Test).operational,
+            OperationalMode::Testing
+        );
+        let restarted = ModeStore::new_with_epoch_root(&data, root.path(), Profile::Sim);
+        assert_eq!(restarted.load_profile(), Profile::Test);
+        assert_eq!(
+            restarted.effective(Profile::Test).operational,
+            OperationalMode::Testing
+        );
+    }
+
+    #[test]
+    fn forged_high_highest_counter_only_raises_next_set_operational() {
+        use crate::config::highest_epoch_counter_path;
+        let root = tempfile::tempdir().unwrap();
+        let data = root.path().join("sim");
+        std::fs::create_dir_all(&data).unwrap();
+        epoch_store::ensure_epoch_dir(root.path()).unwrap();
+        std::fs::write(highest_epoch_counter_path(root.path()), b"999\n").unwrap();
+        let store = ModeStore::new_with_epoch_root(&data, root.path(), Profile::Sim);
+        let (_, profile, counter) = store
+            .set_operational(OperationalMode::Production, Profile::Sim, true)
+            .unwrap();
+        assert_eq!(profile, Profile::Sim);
+        assert_eq!(counter, 1000);
+        assert_eq!(store.load_profile(), Profile::Sim);
+    }
+
+    #[test]
+    fn corrupt_highest_counter_fail_closed() {
+        use crate::config::{highest_epoch_counter_path, profile_data_dir};
+        let root = tempfile::tempdir().unwrap();
+        let data = profile_data_dir(root.path(), Profile::Sim);
+        std::fs::create_dir_all(&data).unwrap();
+        epoch_store::ensure_epoch_dir(root.path()).unwrap();
+        std::fs::write(highest_epoch_counter_path(root.path()), b"not-a-number\n").unwrap();
+        std::fs::write(
+            data.join("profile.json"),
+            serde_json::to_vec_pretty(&ProfileFileBody {
+                profile: Profile::Sim,
+                counter: 1,
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            data.join("mode.json"),
+            serde_json::to_vec_pretty(&ModeFileBody {
+                mode: OperationalMode::Production,
+                counter: 1,
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        let store = ModeStore::new_with_epoch_root(&data, root.path(), Profile::Sim);
+        assert_eq!(store.load_profile(), Profile::Prod);
+    }
+
+    #[test]
+    fn test_daemon_restart_stays_test_when_sim_epoch_counter_lower() {
         use crate::config::profile_epoch_counter_path;
         let root = tempfile::tempdir().unwrap();
         let data = root.path().join("test");
@@ -453,7 +554,7 @@ mod tests {
             .unwrap();
         std::fs::write(
             profile_epoch_counter_path(root.path(), Profile::Sim),
-            b"99\n",
+            b"1\n",
         )
         .unwrap();
         let restarted = ModeStore::new_with_epoch_root(&data, root.path(), Profile::Test);
@@ -462,8 +563,6 @@ mod tests {
             restarted.effective(Profile::Test).operational,
             OperationalMode::Testing
         );
-        let sim_path = profile_epoch_counter_path(root.path(), Profile::Sim);
-        assert!(sim_path.exists());
     }
 
     #[test]

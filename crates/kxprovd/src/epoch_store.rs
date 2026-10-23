@@ -221,12 +221,35 @@ pub fn bump_highest_epoch(provision_root: &Path, counter: u64) -> Result<(), Epo
     Ok(())
 }
 
+/// Highest epoch value implied by `highest.counter` and every per-profile counter file.
+pub fn effective_highest_epoch(provision_root: &Path) -> Result<u64, EpochError> {
+    let mut max = read_highest_epoch(provision_root)?;
+    for profile in [Profile::Sim, Profile::Test, Profile::Prod] {
+        if let Some(n) = read_counter(provision_root, profile)? {
+            max = max.max(n);
+        }
+    }
+    Ok(max)
+}
+
 #[cfg(all(test, feature = "test-util"))]
 mod tests {
     #![allow(clippy::unwrap_used)]
 
     use super::*;
+    use crate::config::highest_epoch_counter_path;
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    #[test]
+    fn effective_highest_is_max_of_highest_file_and_profile_counters() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_counter(tmp.path(), Profile::Sim, 5).unwrap();
+        write_counter(tmp.path(), Profile::Test, 3).unwrap();
+        bump_highest_epoch(tmp.path(), 4).unwrap();
+        assert_eq!(effective_highest_epoch(tmp.path()).unwrap(), 5);
+        std::fs::write(highest_epoch_counter_path(tmp.path()), b"2\n").unwrap();
+        assert_eq!(effective_highest_epoch(tmp.path()).unwrap(), 5);
+    }
 
     #[test]
     fn read_treats_missing_epoch_dir_as_no_counter_yet() {
