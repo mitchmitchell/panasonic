@@ -33,9 +33,9 @@ pub struct ClientIpPolicy {
     pub trust_x_forwarded_for: bool,
 }
 pub use session::{
-    absolute_session_valid, enforce_absolute_session_limit, now_unix_ms,
-    reject_authenticated_login, require_web_session, SESSION_AUTH_KEY, SESSION_STARTED_MS_KEY,
-    WEB_SESSION_ABSOLUTE_SECS, WEB_SESSION_IDLE_SECS,
+    absolute_session_valid, enforce_absolute_session_limit, is_n1_unregistered_web_path,
+    now_unix_ms, reject_authenticated_login, require_web_session, SESSION_AUTH_KEY,
+    SESSION_STARTED_MS_KEY, WEB_SESSION_ABSOLUTE_SECS, WEB_SESSION_IDLE_SECS,
 };
 pub use static_files::serve_static;
 
@@ -64,24 +64,7 @@ pub fn router(state: WebState) -> Router {
         .route("/read", post(read_record))
         .route("/plan", post(plan_change))
         .route("/api/plan", post(plan_change))
-        .route("/api/apply", post(approval_via_mcp_only))
-        .route("/api/approval/submit", post(approval_via_mcp_only))
         .with_state(state)
-}
-
-async fn approval_via_mcp_only(
-    session: Session,
-    headers: HeaderMap,
-    Form(form): Form<LogoutForm>,
-) -> Response {
-    if let Some(resp) = csrf::verify_form_csrf(&session, &headers, &form._csrf).await {
-        return resp;
-    }
-    (
-        StatusCode::FORBIDDEN,
-        "This action is only available through MCP (submit_approval or apply_plan).",
-    )
-        .into_response()
 }
 
 async fn static_file(Path(file): Path<String>) -> impl IntoResponse {

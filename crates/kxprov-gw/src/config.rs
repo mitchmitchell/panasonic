@@ -65,7 +65,6 @@ pub struct GatewayConfig {
     pub web_https_port: u16,
     pub web_tailnet_bind: String,
     pub mcp_tailnet_bind: String,
-    pub mcp_public_bind: String,
     pub mcp_tokens_path: PathBuf,
     pub daemon_tokens_path: PathBuf,
     pub gateway_bearer_path: PathBuf,
@@ -94,7 +93,6 @@ impl Default for GatewayConfig {
             web_https_port: 443,
             web_tailnet_bind: "127.0.0.1:8080".into(),
             mcp_tailnet_bind: "127.0.0.1:8081".into(),
-            mcp_public_bind: "127.0.0.1:8444".into(),
             mcp_tokens_path: "/etc/kx-provision/secrets/mcp-tokens.toml".into(),
             daemon_tokens_path: TOKENS_JSON.into(),
             gateway_bearer_path: "/etc/kx-provision/secrets/gateway-daemon.bearer".into(),
@@ -193,7 +191,7 @@ impl GatewayConfig {
 
     fn derived_mcp_hosts(&self) -> Vec<String> {
         let mut out = Vec::new();
-        if let Ok(addr) = self.mcp_public_bind.parse::<SocketAddr>() {
+        if let Ok(addr) = self.mcp_tailnet_bind.parse::<SocketAddr>() {
             push_http_listener_hosts(&mut out, addr.port(), &["localhost", "127.0.0.1"]);
         }
         out
@@ -274,7 +272,7 @@ impl GatewayConfig {
 
     pub fn warn_if_insecure_bind(&self) {
         let mut addrs: Vec<String> =
-            vec![self.web_tailnet_bind.clone(), self.mcp_public_bind.clone()];
+            vec![self.web_tailnet_bind.clone(), self.mcp_tailnet_bind.clone()];
         addrs.extend(self.web_lan_bind_addresses());
         for raw in addrs {
             if let Ok(addr) = raw.parse::<std::net::SocketAddr>() {
@@ -362,7 +360,6 @@ impl GatewayConfig {
     }
 
     pub fn validate_mcp_loopback_binds(&self) -> anyhow::Result<()> {
-        ensure_mcp_loopback_bind("mcp_public_bind", &self.mcp_public_bind)?;
         ensure_mcp_loopback_bind("mcp_tailnet_bind", &self.mcp_tailnet_bind)?;
         Ok(())
     }
@@ -392,9 +389,6 @@ impl GatewayConfig {
         }
         if let Some(v) = file.web_tailnet_bind {
             self.web_tailnet_bind = v;
-        }
-        if let Some(v) = file.mcp_public_bind {
-            self.mcp_public_bind = v;
         }
         if let Some(v) = file.mcp_tokens_path {
             self.mcp_tokens_path = v.into();
@@ -471,7 +465,6 @@ struct FileConfig {
     web_https_port: Option<u16>,
     web_tailnet_bind: Option<String>,
     mcp_tailnet_bind: Option<String>,
-    mcp_public_bind: Option<String>,
     mcp_tokens_path: Option<String>,
     daemon_tokens_path: Option<String>,
     gateway_bearer_path: Option<String>,
@@ -556,16 +549,16 @@ mod tests {
     }
 
     #[test]
-    fn mcp_public_bind_rejects_non_loopback() {
-        let err = ensure_mcp_loopback_bind("mcp_public_bind", "0.0.0.0:8444").unwrap_err();
+    fn mcp_tailnet_bind_rejects_non_loopback() {
+        let err = ensure_mcp_loopback_bind("mcp_tailnet_bind", "0.0.0.0:8081").unwrap_err();
         assert!(err.to_string().contains("loopback"), "{err}");
-        let err = ensure_mcp_loopback_bind("mcp_public_bind", "192.168.1.1:8444").unwrap_err();
+        let err = ensure_mcp_loopback_bind("mcp_tailnet_bind", "192.168.1.1:8081").unwrap_err();
         assert!(err.to_string().contains("loopback"), "{err}");
     }
 
     #[test]
-    fn mcp_public_bind_accepts_loopback() {
-        ensure_mcp_loopback_bind("mcp_public_bind", "127.0.0.1:8444").unwrap();
+    fn mcp_tailnet_bind_accepts_loopback() {
+        ensure_mcp_loopback_bind("mcp_tailnet_bind", "127.0.0.1:8081").unwrap();
     }
 
     #[test]

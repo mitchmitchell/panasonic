@@ -41,15 +41,10 @@ pub const WEB_ROUTES: &[HttpRoute] = &[
         method: "POST",
         path: "/api/plan",
     },
-    HttpRoute {
-        method: "POST",
-        path: "/api/apply",
-    },
-    HttpRoute {
-        method: "POST",
-        path: "/api/approval/submit",
-    },
 ];
+
+/// Every HTTP approval/apply path (web listener must not implement these; MCP only).
+pub const WEB_APPROVAL_APPLY_HTTP_PATHS: &[&str] = kxprov_api::HTTP_APPROVAL_APPLY_PATHS;
 
 /// MCP tools on the approval/apply path (N1 surface).
 pub const MCP_APPROVAL_TOOLS: &[&str] = &["submit_approval", "apply_plan"];

@@ -159,7 +159,6 @@ fn default_post_body(path: &str, csrf: &str) -> String {
         "/plan" | "/api/plan" => {
             format!("table=36&record=1&field=cid_number&new_value=5550100&_csrf={token}")
         }
-        "/api/apply" | "/api/approval/submit" => format!("_csrf={token}"),
         other => panic!("unexpected POST path {other}"),
     }
 }

@@ -8,7 +8,9 @@ use axum::extract::ConnectInfo;
 use axum::http::{header, Method, Request, StatusCode};
 use kxprov_gw::{production_web_router, HostOriginConfig, RateLimiter};
 use kxprov_mcp::KxMcpServer;
-use kxprov_mock::{MCP_APPROVAL_TOOLS, MCP_TOOLS, WEB_ROUTES};
+use kxprov_mock::{
+    MCP_APPROVAL_TOOLS, MCP_TOOLS, WEB_APPROVAL_APPLY_HTTP_PATHS, WEB_ROUTES,
+};
 use kxprov_web::LoginRateLimiter;
 use std::net::SocketAddr;
 use support::{test_web_state, TestVerifier};
@@ -63,13 +65,10 @@ fn production_post(uri: &str, body: &str) -> Request<Body> {
     req
 }
 
-fn allowed_status(status: StatusCode) -> bool {
+fn n1_not_found_or_method_not_allowed(status: StatusCode) -> bool {
     matches!(
         status,
-        StatusCode::NOT_FOUND
-            | StatusCode::METHOD_NOT_ALLOWED
-            | StatusCode::SEE_OTHER
-            | StatusCode::FORBIDDEN
+        StatusCode::NOT_FOUND | StatusCode::METHOD_NOT_ALLOWED
     )
 }
 
@@ -93,20 +92,30 @@ async fn n1_forbidden_mode_profile_paths_return_404_or_405() {
     use kxprov_mock::FORBIDDEN_MODE_PROFILE_PATHS;
     let app = production_like_app();
     for path in FORBIDDEN_MODE_PROFILE_PATHS {
-        for method in [Method::GET, Method::POST, Method::PUT, Method::DELETE] {
+        for method in [Method::GET, Method::PUT, Method::DELETE] {
             let resp = app
                 .clone()
                 .oneshot(production_request(method.clone(), path))
                 .await
                 .unwrap();
             assert!(
-                allowed_status(resp.status()),
+                n1_not_found_or_method_not_allowed(resp.status()),
                 "{} {} on {path} returned {}",
                 method,
                 path,
                 resp.status()
             );
         }
+        let post_resp = app
+            .clone()
+            .oneshot(production_post(path, "_csrf=x"))
+            .await
+            .unwrap();
+        assert!(
+            n1_not_found_or_method_not_allowed(post_resp.status()),
+            "POST {path} returned {} (expected 404 or 405 only)",
+            post_resp.status()
+        );
     }
 }
 
@@ -140,19 +149,30 @@ async fn n1_registered_routes_exist_on_production_router() {
 }
 
 #[tokio::test]
-async fn n1_approval_http_paths_are_registered_and_fail_closed_without_session() {
+async fn n1_approval_and_apply_http_paths_are_not_on_web_listener() {
     let app = production_like_app();
-    for path in ["/api/apply", "/api/approval/submit"] {
-        let resp = app
+    for path in WEB_APPROVAL_APPLY_HTTP_PATHS {
+        for method in [Method::GET, Method::PUT, Method::DELETE] {
+            let resp = app
+                .clone()
+                .oneshot(production_request(method.clone(), path))
+                .await
+                .unwrap();
+            assert!(
+                n1_not_found_or_method_not_allowed(resp.status()),
+                "{method} {path} returned {} (expected 404 or 405 only)",
+                resp.status()
+            );
+        }
+        let post_resp = app
             .clone()
             .oneshot(production_post(path, "_csrf=x"))
             .await
             .unwrap();
-        assert_ne!(resp.status(), StatusCode::NOT_FOUND, "{path} must exist");
         assert!(
-            resp.status() == StatusCode::SEE_OTHER || resp.status() == StatusCode::FORBIDDEN,
-            "{path} returned {}",
-            resp.status()
+            n1_not_found_or_method_not_allowed(post_resp.status()),
+            "{path} POST returned {} (expected 404 or 405 only)",
+            post_resp.status()
         );
     }
 }

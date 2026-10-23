@@ -16,9 +16,20 @@ pub fn is_public_web_path(path: &str) -> bool {
     path.starts_with("/static/") || path == "/login"
 }
 
+/// Paths that must not be implemented on the web listener (N1). Skip the login redirect so
+/// unauthenticated requests reach the router and receive 404 or 405.
+pub fn is_n1_unregistered_web_path(path: &str) -> bool {
+    if kxprov_api::HTTP_APPROVAL_APPLY_PATHS.contains(&path) {
+        return true;
+    }
+    kxprov_mock::FORBIDDEN_MODE_PROFILE_PATHS
+        .iter()
+        .any(|p| path == *p || path.starts_with(&format!("{p}/")))
+}
+
 pub async fn require_web_session(session: Session, req: Request<Body>, next: Next) -> Response {
     let path = req.uri().path();
-    if is_public_web_path(path) {
+    if is_public_web_path(path) || is_n1_unregistered_web_path(path) {
         return next.run(req).await;
     }
     match session.get::<bool>(SESSION_AUTH_KEY).await {
@@ -42,7 +53,7 @@ pub async fn enforce_absolute_session_limit(
     max_lifetime_secs: u64,
 ) -> Response {
     let path = req.uri().path();
-    if is_public_web_path(path) {
+    if is_public_web_path(path) || is_n1_unregistered_web_path(path) {
         return next.run(req).await;
     }
     let authenticated = session.get::<bool>(SESSION_AUTH_KEY).await.ok().flatten() == Some(true);

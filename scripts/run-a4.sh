@@ -65,7 +65,7 @@ JSON
 cat >"$etc_dir/gateway.toml" <<TOML
 bind = "127.0.0.1:8443"
 web_tailnet_bind = "127.0.0.1:8080"
-mcp_public_bind = "127.0.0.1:8444"
+mcp_tailnet_bind = "127.0.0.1:8081"
 mcp_tokens_path = "$secrets_dir/mcp-tokens.toml"
 gateway_bearer_path = "$secrets_dir/gateway-daemon.bearer"
 admin_password_path = "$secrets_dir/admin.hash"

@@ -22,7 +22,7 @@ pub struct HttpRoute {
     pub path: &'static str,
 }
 
-/// Planned A4 web routes (read/plan/approval only; no mode or profile).
+/// Planned A4 web routes (read/plan only; approval/apply are MCP-only).
 pub const HTTP_ROUTES: &[HttpRoute] = &[
     HttpRoute {
         method: HttpMethod::Get,
@@ -36,14 +36,19 @@ pub const HTTP_ROUTES: &[HttpRoute] = &[
         method: HttpMethod::Post,
         path: "/api/plan",
     },
-    HttpRoute {
-        method: HttpMethod::Post,
-        path: "/api/apply",
-    },
-    HttpRoute {
-        method: HttpMethod::Post,
-        path: "/api/approval/submit",
-    },
+];
+
+/// HTTP paths reserved for approval/apply; the web listener must return 404 or 405 only.
+pub const HTTP_APPROVAL_APPLY_PATHS: &[&str] = &[
+    "/apply",
+    "/approval",
+    "/approve-plan",
+    "/api/apply",
+    "/api/apply_plan",
+    "/api/approval",
+    "/api/approval/submit",
+    "/api/approve",
+    "/api/submit_approval",
 ];
 
 /// Paths that must never switch mode or profile over HTTP (v2.8 N1).
@@ -142,6 +147,17 @@ mod tests {
             http_dispatch(HttpMethod::Get, "/api/plan"),
             HttpStatus::MethodNotAllowed
         );
+    }
+
+    #[test]
+    fn approval_apply_http_paths_are_not_web_routes() {
+        for path in HTTP_APPROVAL_APPLY_PATHS {
+            assert_eq!(
+                http_dispatch(HttpMethod::Post, path),
+                HttpStatus::NotFound,
+                "POST {path}"
+            );
+        }
     }
 
     #[test]

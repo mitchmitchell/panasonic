@@ -118,7 +118,7 @@ pub async fn serve(
     );
 
     let web_tailnet_addr: SocketAddr = config.web_tailnet_bind.parse()?;
-    let mcp_addr: SocketAddr = config.mcp_public_bind.parse()?;
+    let mcp_addr: SocketAddr = config.mcp_tailnet_bind.parse()?;
     let web_lan_addrs: Vec<SocketAddr> = config
         .web_lan_bind_addresses()
         .iter()

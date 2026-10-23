@@ -8,7 +8,7 @@ One process hosting the web UI and MCP listeners.
 |----------|---------|
 | Web (tailnet / plain HTTP) | `127.0.0.1:8080` |
 | Web (HTTPS, §5a) | `127.0.0.1:443`, plus `{lan_ip}:443` when configured |
-| MCP (public) | `127.0.0.1:8444` |
+| MCP (tailnet / loopback) | `127.0.0.1:8081` |
 
 HTTPS never binds to `0.0.0.0`. `lan_ip` and `bind` / `--bind` / `KXPROV_BIND` are rejected at startup if the address is unspecified (`0.0.0.0` or `::`). Loopback is always included when using the §5a bind list.
 

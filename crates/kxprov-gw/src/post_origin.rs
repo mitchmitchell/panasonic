@@ -4,6 +4,8 @@ use axum::http::{header, Method, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 
+use kxprov_web::is_n1_unregistered_web_path;
+
 use crate::host_match::origin_allowed as origin_matches;
 use crate::host_origin::HostOriginConfig;
 
@@ -17,7 +19,7 @@ pub async fn post_origin_middleware(
         return next.run(req).await;
     }
     let path = req.uri().path();
-    if path.starts_with("/mcp") {
+    if path.starts_with("/mcp") || is_n1_unregistered_web_path(path) {
         return next.run(req).await;
     }
     if origin_allowed(&cfg, req.headers()) {
