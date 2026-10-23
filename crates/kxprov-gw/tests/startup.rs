@@ -74,7 +74,10 @@ fn sample_config(dir: &TempDir) -> GatewayConfig {
         rate_limit_per_minute: 120,
         allowed_hosts: vec![],
         allowed_origins: vec![],
-        web_tailnet: Default::default(),
+        web_tailnet: kxprov_gw::config::WebListenerSettings {
+            serve_peer_uid: Some(0),
+            ..Default::default()
+        },
         web_https: Default::default(),
     }
 }

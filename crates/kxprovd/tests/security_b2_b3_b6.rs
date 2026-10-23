@@ -8,8 +8,8 @@ use common::{
     bearer_auth, init_test_daemon, write_testing_mode_backup_meta, READER_SECRET, WRITER_SECRET,
 };
 use kxprov_api::{
-    ApiClient, OperationalMode, PlanChangeParams, Profile, RequestBody, ResponseResult,
-    SetModeParams, TokensFile,
+    resolve_profile_data_dir, ApiClient, OperationalMode, PlanChangeParams, Profile, RequestBody,
+    ResponseResult, SetModeParams, TokensFile,
 };
 use kxprovd::config::{Config, ConfigError};
 use kxprovd::mode::ModeFileBody;
@@ -22,8 +22,10 @@ use std::time::Duration;
 #[tokio::test]
 async fn b2_stale_testing_mode_backup_ignored_for_prod_transition() {
     let tmp = tempfile::tempdir().unwrap();
+    let test_root = resolve_profile_data_dir(tmp.path(), Profile::Test);
+    std::fs::create_dir_all(&test_root).unwrap();
     std::fs::write(
-        tmp.path().join("mode.json"),
+        test_root.join("mode.json"),
         serde_json::to_vec_pretty(&ModeFileBody {
             mode: OperationalMode::Testing,
             counter: 0,
@@ -43,7 +45,7 @@ async fn b2_stale_testing_mode_backup_ignored_for_prod_transition() {
         );
         kxprovd::transition::live_caller_id_digest(&cfg).unwrap()
     };
-    write_testing_mode_backup_meta(&tmp.path().join("backups"), &live_digest);
+    write_testing_mode_backup_meta(&test_root.join("backups"), &live_digest);
 
     let mut admin = ApiClient::connect(&sock).await.unwrap();
     let err = admin
@@ -59,7 +61,7 @@ async fn b2_stale_testing_mode_backup_ignored_for_prod_transition() {
         err.to_string().contains("backup") || err.to_string().contains("transition"),
         "{err}"
     );
-    assert!(TransitionBlockStore::new(tmp.path()).writes_blocked());
+    assert!(TransitionBlockStore::new(&test_root).writes_blocked());
 }
 
 /// B3: BackupNow with read scope only is denied.
@@ -98,7 +100,8 @@ async fn b6_missing_prod_backup_blocks_transition() {
         .await
         .expect_err("missing backup");
     assert!(err.to_string().contains("backup") || err.to_string().contains("transition"));
-    assert!(TransitionBlockStore::new(tmp.path()).writes_blocked());
+    let sim_root = resolve_profile_data_dir(tmp.path(), Profile::Sim);
+    assert!(TransitionBlockStore::new(&sim_root).writes_blocked());
 }
 
 /// B7: revoking a token on disk is enforced on the next request without restarting the daemon.

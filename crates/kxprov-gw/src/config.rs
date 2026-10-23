@@ -383,10 +383,13 @@ impl GatewayConfig {
                  enable trust_x_forwarded_for only on [web_tailnet] (Tailscale Serve Unix HTTP)"
             );
         }
-        if self.web_tailnet.serve_peer_uid == Some(u32::MAX) {
-            anyhow::bail!(
-                "web_tailnet.serve_peer_uid cannot be 4294967295 (invalid / unset peer uid)"
-            );
+        let uid = self.web_tailnet.serve_peer_uid.ok_or_else(|| {
+            anyhow::anyhow!(
+                "web_tailnet.serve_peer_uid is required for the Serve Unix listener (SO_PEERCRED trust)"
+            )
+        })?;
+        if uid == u32::MAX {
+            anyhow::bail!("web_tailnet.serve_peer_uid cannot be 4294967295 (invalid peer uid)");
         }
         Ok(())
     }
@@ -395,7 +398,10 @@ impl GatewayConfig {
     pub fn tailnet_serve_trust(&self) -> crate::serve_peer::ServeTrustConfig {
         crate::serve_peer::ServeTrustConfig {
             trust_x_forwarded_for: self.web_tailnet.trust_x_forwarded_for,
-            expected_peer_uid: self.web_tailnet.serve_peer_uid.unwrap_or(0),
+            expected_peer_uid: self
+                .web_tailnet
+                .serve_peer_uid
+                .expect("validate_web_xff_trust"),
         }
     }
 
@@ -619,6 +625,14 @@ mod tests {
         GatewayConfig::default()
             .validate_mcp_loopback_binds()
             .unwrap();
+    }
+
+    #[test]
+    fn serve_unix_listener_requires_explicit_serve_peer_uid() {
+        let err = GatewayConfig::default()
+            .validate_web_xff_trust()
+            .unwrap_err();
+        assert!(err.to_string().contains("serve_peer_uid"), "{err}");
     }
 
     #[test]

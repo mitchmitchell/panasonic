@@ -19,11 +19,11 @@ serve_socket_group = "tailscale"
 
 [web_tailnet]
 trust_x_forwarded_for = true
-# Tailscale Serve runs as root by default:
+# Required — no default (stock tailscaled runs as root):
 serve_peer_uid = 0
 ```
 
-`serve_peer_uid = 4294967295` (`u32::MAX`, Linux “invalid uid”) is rejected at startup.
+`serve_peer_uid` must be set whenever the Serve Unix listener is enabled. `4294967295` (`u32::MAX`) is rejected at startup.
 
 On each accepted Unix connection the gateway reads **SO_PEERCRED** and sets `serve_proxy_trusted` only when the peer uid equals `serve_peer_uid`. Otherwise login limits use the synthetic loopback peer (`127.0.0.1:0`) and ignore client-supplied `X-Forwarded-For`.
 

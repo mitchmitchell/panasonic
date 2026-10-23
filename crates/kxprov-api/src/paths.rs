@@ -52,13 +52,9 @@ pub fn production_layout(base: &Path) -> bool {
     base == Path::new(DATA_DIR)
 }
 
-/// Profile-scoped data directory (plans, backups, mode.json, …).
+/// Profile-scoped data directory (plans, backups, mode.json, …): `{base}/<profile>/`.
 pub fn resolve_profile_data_dir(base: &Path, profile: Profile) -> PathBuf {
-    if production_layout(base) {
-        PathBuf::from(profile_data_dir(profile))
-    } else {
-        base.to_path_buf()
-    }
+    base.join(profile_dir_name(profile))
 }
 
 /// Path to [`SIM_PASSED_JSON`] (or `{base}/sim-passed.json` in isolated test trees).
@@ -70,19 +66,10 @@ pub fn sim_passed_path(base: &Path) -> PathBuf {
     }
 }
 
-/// Per-profile epoch counter under `{base}/.epoch/<profile>.counter` (or production default).
+/// Per-profile epoch counter: `{base}/.epoch/<profile>.counter`.
 pub fn profile_epoch_counter_path(base: &Path, profile: Profile) -> PathBuf {
-    if production_layout(base) {
-        PathBuf::from(format!(
-            "{}/{}/{}.counter",
-            DATA_DIR,
-            EPOCH_DIR_NAME,
-            profile_dir_name(profile)
-        ))
-    } else {
-        base.join(EPOCH_DIR_NAME)
-            .join(format!("{}.counter", profile_dir_name(profile)))
-    }
+    base.join(EPOCH_DIR_NAME)
+        .join(format!("{}.counter", profile_dir_name(profile)))
 }
 
 /// Alias for [`profile_epoch_counter_path`] (daemon mode / v2.12 tests).
@@ -112,6 +99,35 @@ mod tests {
         assert_eq!(
             profile_data_dir(Profile::Prod),
             "/var/lib/kx-provision/prod"
+        );
+    }
+
+    #[test]
+    fn custom_data_dir_gives_distinct_profile_trees_and_epoch_counters() {
+        let base = Path::new("/opt/kx-data");
+        assert_eq!(
+            resolve_profile_data_dir(base, Profile::Sim),
+            PathBuf::from("/opt/kx-data/sim")
+        );
+        assert_eq!(
+            resolve_profile_data_dir(base, Profile::Test),
+            PathBuf::from("/opt/kx-data/test")
+        );
+        assert_eq!(
+            resolve_profile_data_dir(base, Profile::Prod),
+            PathBuf::from("/opt/kx-data/prod")
+        );
+        assert_ne!(
+            resolve_profile_data_dir(base, Profile::Sim),
+            resolve_profile_data_dir(base, Profile::Prod)
+        );
+        assert_eq!(
+            profile_epoch_counter_path(base, Profile::Sim),
+            PathBuf::from("/opt/kx-data/.epoch/sim.counter")
+        );
+        assert_eq!(
+            profile_epoch_counter_path(base, Profile::Prod),
+            PathBuf::from("/opt/kx-data/.epoch/prod.counter")
         );
     }
 }

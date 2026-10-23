@@ -4,8 +4,8 @@ mod common;
 
 use kxprov_api::{http_dispatch, mcp_invoke, HttpMethod, HttpStatus};
 use kxprov_api::{
-    ApiClient, FieldKindWire, OperationalMode, Profile, RequestAuth, RequestBody, ResponseResult,
-    SetModeParams, TokenId,
+    resolve_profile_data_dir, ApiClient, FieldKindWire, OperationalMode, Profile, RequestAuth,
+    RequestBody, ResponseResult, SetModeParams, TokenId,
 };
 use kxprovd::audit::AuditKind;
 use kxprovd::mode::{ModeFileBody, ModeStore};
@@ -26,8 +26,10 @@ fn route_table_no_mode_profile_over_http_or_mcp() {
 #[tokio::test]
 async fn test_apply_without_backup_when_not_prod() {
     let tmp = tempfile::tempdir().unwrap();
+    let sim_root = resolve_profile_data_dir(tmp.path(), Profile::Sim);
+    std::fs::create_dir_all(&sim_root).unwrap();
     std::fs::write(
-        tmp.path().join("mode.json"),
+        sim_root.join("mode.json"),
         serde_json::to_vec_pretty(&ModeFileBody {
             mode: OperationalMode::Testing,
             counter: 0,
@@ -76,8 +78,10 @@ async fn test_apply_without_backup_when_not_prod() {
 #[tokio::test]
 async fn testing_to_production_mismatch_blocks_writes() {
     let tmp = tempfile::tempdir().unwrap();
+    let sim_root = resolve_profile_data_dir(tmp.path(), Profile::Sim);
+    std::fs::create_dir_all(&sim_root).unwrap();
     std::fs::write(
-        tmp.path().join("mode.json"),
+        sim_root.join("mode.json"),
         serde_json::to_vec_pretty(&ModeFileBody {
             mode: OperationalMode::Testing,
             counter: 0,
@@ -100,15 +104,14 @@ async fn testing_to_production_mismatch_blocks_writes() {
         panic!("backup");
     };
     let digest = {
-        let meta_path = tmp
-            .path()
+        let meta_path = sim_root
             .join("backups")
             .join(format!("{}.meta", first.backup.id));
         let meta: kxprovd::backup::BackupMeta =
             serde_json::from_slice(&std::fs::read(meta_path).unwrap()).unwrap();
         meta.caller_id_digest.unwrap()
     };
-    common::write_prod_mode_backup_meta(&tmp.path().join("backups"), &digest);
+    common::write_prod_mode_backup_meta(&sim_root.join("backups"), &digest);
     let ResponseResult::PlanChange(plan) = gw
         .call_auth(
             RequestBody::PlanChange {
@@ -152,7 +155,7 @@ async fn testing_to_production_mismatch_blocks_writes() {
         .expect_err("tables differ from first backup digest");
     assert!(err.to_string().contains("transition") || err.to_string().contains("verify"));
 
-    assert!(TransitionBlockStore::new(tmp.path()).writes_blocked());
+    assert!(TransitionBlockStore::new(&sim_root).writes_blocked());
     let audit = ModeStore::new(tmp.path(), Profile::Sim)
         .audit()
         .load()

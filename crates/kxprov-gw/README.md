@@ -10,7 +10,7 @@ One process hosting the web UI and MCP listeners.
 | Web (HTTPS, §5a) | `127.0.0.1:443`, plus `{lan_ip}:443` when configured |
 | MCP (tailnet / loopback) | `127.0.0.1:8081` |
 
-HTTPS and MCP use **TCP only** and never trust client `X-Forwarded-For`. Serve-fronted admin HTTP uses the Unix socket; XFF is honored only when SO_PEERCRED matches `[web_tailnet] serve_peer_uid` (default **0**, root, matching stock `tailscaled`).
+HTTPS and MCP use **TCP only** and never trust client `X-Forwarded-For`. Serve-fronted admin HTTP uses the Unix socket; XFF is honored only when SO_PEERCRED matches **`[web_tailnet] serve_peer_uid`** (required at startup — typically root/`0` for stock `tailscaled`).
 
 ### Tailscale Serve
 

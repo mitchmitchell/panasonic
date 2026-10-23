@@ -71,13 +71,18 @@ async fn tcp_loopback_connection_never_trusts_xff() {
 }
 
 #[test]
-fn config_rejects_invalid_serve_peer_uid() {
-    let cfg = kxprov_gw::config::GatewayConfig {
+fn config_rejects_missing_and_invalid_serve_peer_uid() {
+    let missing = kxprov_gw::config::GatewayConfig::default();
+    assert!(
+        missing.validate_web_xff_trust().is_err(),
+        "Serve Unix listener requires explicit serve_peer_uid"
+    );
+    let invalid = kxprov_gw::config::GatewayConfig {
         web_tailnet: kxprov_gw::config::WebListenerSettings {
             serve_peer_uid: Some(u32::MAX),
             ..Default::default()
         },
         ..Default::default()
     };
-    assert!(cfg.validate_web_xff_trust().is_err());
+    assert!(invalid.validate_web_xff_trust().is_err());
 }

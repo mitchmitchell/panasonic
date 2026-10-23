@@ -3,7 +3,8 @@
 mod common;
 
 use kxprov_api::{
-    ApiClient, FieldKindWire, OperationalMode, Profile, RequestBody, ResponseResult, SetModeParams,
+    resolve_profile_data_dir, ApiClient, FieldKindWire, OperationalMode, Profile, RequestBody,
+    ResponseResult, SetModeParams,
 };
 use kxprovd::audit::AuditKind;
 use kxprovd::mode::{ModeFileBody, ModeStore, ProfileFileBody};
@@ -71,7 +72,8 @@ async fn mode_set_via_root_socket_increments_counter() {
     assert_eq!(r.mode, OperationalMode::Testing);
     assert_eq!(r.profile, Profile::Test);
     assert!(kxprovd::config::profile_epoch_counter_path(tmp.path(), Profile::Test).exists());
-    let raw = std::fs::read_to_string(tmp.path().join("mode.json")).unwrap();
+    let sim_root = resolve_profile_data_dir(tmp.path(), Profile::Sim);
+    let raw = std::fs::read_to_string(sim_root.join("mode.json")).unwrap();
     assert!(raw.contains("counter"));
 }
 
@@ -88,8 +90,10 @@ fn mode_set_rejected_when_not_idle() {
 #[tokio::test]
 async fn sim_profile_skips_approval() {
     let tmp = tempfile::tempdir().unwrap();
-    write_mode(tmp.path(), OperationalMode::Production);
-    write_profile(tmp.path(), Profile::Sim);
+    let sim_root = resolve_profile_data_dir(tmp.path(), Profile::Sim);
+    std::fs::create_dir_all(&sim_root).unwrap();
+    write_mode(&sim_root, OperationalMode::Production);
+    write_profile(&sim_root, Profile::Sim);
     let uid = nix::unistd::getuid().as_raw();
     let (_d, sock) = common::init_test_daemon(&tmp, uid, Profile::Sim);
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -141,7 +145,9 @@ async fn sim_profile_skips_approval() {
 #[tokio::test]
 async fn submit_approval_accepts_eight_hex_prefix() {
     let tmp = tempfile::tempdir().unwrap();
-    write_mode(tmp.path(), OperationalMode::Production);
+    let sim_root = resolve_profile_data_dir(tmp.path(), Profile::Sim);
+    std::fs::create_dir_all(&sim_root).unwrap();
+    write_mode(&sim_root, OperationalMode::Production);
     let uid = nix::unistd::getuid().as_raw();
     let (_d, sock) = common::init_test_daemon(&tmp, uid, Profile::Sim);
     tokio::time::sleep(Duration::from_millis(50)).await;

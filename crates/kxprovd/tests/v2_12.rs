@@ -184,6 +184,18 @@ fn data_dir_honors_configured_override() {
         cfg.profile_data_dir(),
         resolve_profile_data_dir(&custom, Profile::Sim)
     );
+    assert_eq!(
+        resolve_profile_data_dir(&custom, Profile::Test),
+        custom.join("test")
+    );
+    assert_eq!(
+        resolve_profile_data_dir(&custom, Profile::Prod),
+        custom.join("prod")
+    );
+    assert_ne!(
+        resolve_profile_data_dir(&custom, Profile::Sim),
+        resolve_profile_data_dir(&custom, Profile::Prod)
+    );
 }
 
 #[test]
