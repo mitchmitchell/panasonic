@@ -6,6 +6,8 @@ from .engine import SimPBX
 
 
 class LoopbackTransport:
+    instant = True  # replies appear synchronously; no timing to guard
+
     def __init__(self, sim: SimPBX) -> None:
         self.sim = sim
         self.sent = bytearray()

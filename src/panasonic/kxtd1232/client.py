@@ -19,11 +19,15 @@ from .transport import Transport
 
 DEFAULT_TIMEOUT = 5.0
 READ_BLOCK_BYTES = 150  # DSHSOMT reads 0x24 in 150-byte blocks
-# Observed busy run: ~128 ms cadence for ~7 s (live-capture §6). 12 s = 7 s plus margin.
+# Busy runs are bounded per the behavior spec (busy/unacked rules); 12 s leaves margin over
+# the spec's expected busy duration.
 BUSY_LIMIT_S = 12.0
 MAX_STALE_FRAMES = 4
 QUIET_S = 0.05  # after a reply, any further frame inside this window is an error
+PRE_SEND_QUIET_S = 0.05  # line must be silent this long before each send
+RECOVER_QUIET_S = 0.5  # longer silence required after an unacked or timed-out request
 MAX_DRAIN_READS = 64
+LINK_BAUD = 9600  # used for the post-send guard: no genuine reply can start sooner
 
 
 class ProtocolError(RuntimeError):
@@ -42,6 +46,10 @@ class RecordDecodeError(ProtocolError):
 
 class WriteRejectedError(ProtocolError):
     """The PBX answered a write with a NAK or refusal: nothing was applied (per spec)."""
+
+
+class PreSendError(ProtocolError):
+    """The line never went quiet before a send, so nothing was sent."""
 
 
 class BusyTimeoutError(ProtocolError):
@@ -71,6 +79,7 @@ class Client:
         self.busy_limit = busy_limit
         self.clock = clock
         self._rx = b""
+        self._dirty = False  # last request unacked/timed out: wait longer before next
 
     # -- login ----------------------------------------------------------------
     def login(self, password: str, timeout: float = DEFAULT_TIMEOUT) -> None:
@@ -101,28 +110,45 @@ class Client:
     def request(self, raw: bytes, timeout: float = DEFAULT_TIMEOUT) -> Reply:
         """Send once and return the reply. Busy frames are waited out, never answered with a
         resend (design §3), for at most ``busy_limit`` seconds (BusyTimeoutError)."""
-        self._drain()
+        self._wait_quiet(RECOVER_QUIET_S if self._dirty else PRE_SEND_QUIET_S)
         self.t.send(raw)
         try:
+            self._guard(len(raw))
             reply = self._await_reply(raw[1], timeout)
             self._expect_quiet()
+            self._dirty = False
             return reply
         except (TimeoutError, ProtocolError):
+            self._dirty = True
             # Drop leftover busy or partial bytes so a following re-read (verify_block)
             # starts on a clean frame boundary.
             self._rx = b""
             raise
 
-    def _drain(self) -> None:
-        """Discard anything already waiting, so a stale frame is never read as this reply."""
+    def _wait_quiet(self, quiet_s: float) -> None:
+        """Discard input until the line has been silent for ``quiet_s``, so a late stale
+        frame is never read as the next reply. Raises PreSendError (nothing sent)."""
         self._rx = b""
-        for _ in range(MAX_DRAIN_READS):
+        for _ in range(MAX_DRAIN_READS + 1):
             try:
-                if not self.t.recv(0):
-                    return
+                self.t.recv(quiet_s)
             except TimeoutError:
                 return
-        raise ProtocolError("link will not go quiet before send")
+        raise PreSendError(f"line not quiet for {quiet_s} s before send")
+
+    def _guard(self, nbytes: int) -> None:
+        """Drop anything arriving before the request could even have been transmitted
+        (10 bits/byte at LINK_BAUD): it cannot be the reply. Skipped for instant
+        in-process transports, which have no timing."""
+        if getattr(self.t, "instant", False):
+            return
+        window = nbytes * 10 / LINK_BAUD
+        for _ in range(MAX_DRAIN_READS + 1):
+            try:
+                self.t.recv(window)
+            except TimeoutError:
+                return
+        raise ProtocolError("line not quiet after send")
 
     def _expect_quiet(self) -> None:
         """A second frame right after the reply means we may have taken a stale frame with
@@ -187,6 +213,8 @@ class Client:
         raw = self.enc.write(table, record, word, payload)
         try:
             r = self.request(raw)
+        except PreSendError:
+            raise  # nothing was sent, so there is nothing to verify
         except (TimeoutError, ProtocolError) as e:
             raise UnackedWriteError(f"write not acked: {e}", table, record, word, payload) from e
         if r.kind != ReplyKind.ACK:

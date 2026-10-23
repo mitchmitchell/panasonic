@@ -15,13 +15,13 @@ from panasonic.sim import LoopbackTransport, SimPBX
 
 
 class FakeClock:
-    """Advances 128 ms per call, the observed busy cadence."""
+    """Advances 100 ms per call (a generic synthetic busy cadence)."""
 
     def __init__(self):
         self._t = itertools.count()
 
     def __call__(self):
-        return next(self._t) * 0.128
+        return next(self._t) * 0.1
 
 
 def connect():

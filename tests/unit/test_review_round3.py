@@ -16,6 +16,7 @@ from panasonic.kxtd1232.frame import (
 from panasonic.kxtd1232.session import MAX_LINE, Login, State
 from panasonic.kxtd1232.writeplan import Granularity, build_plan, field_patch
 from panasonic.sim import synthetic_db
+from panasonic.sim.engine import BANNER  # synthetic placeholder sign-on
 
 RW = Encoder(READ_ONLY_COMMANDS | WRITE_COMMANDS)
 H = bytes.fromhex
@@ -46,9 +47,6 @@ def test_write_range_and_even_payload(args):
         RW.write(*args)
 
 
-BANNER = b"Welcome To KX-TD1232  Ver 2.0 Panasonic CO.,LTD.\r\nEnter Password\r\n"
-
-
 def test_session_line_cap():
     s = Login("pw")
     s.feed(b"\x11")
@@ -58,7 +56,7 @@ def test_session_line_cap():
 
 def test_session_hands_over_binary_leftover():
     s = Login("pw")
-    s.feed(b"\x11" + BANNER + b"EIA Mode Start\r\nECS OF\r\nOK\r\n")
+    s.feed(b"\x11" + BANNER + b"<MODE_START>\r\nECS OF\r\nOK\r\n")
     s.feed(b"OK\r\n\x03\x08\x00\x0b")
     assert s.state is State.BINARY and s.leftover == H("0308000B")
 

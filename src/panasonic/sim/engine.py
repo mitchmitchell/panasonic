@@ -11,10 +11,13 @@ from collections import deque
 
 from panasonic.kxtd1232.fields import encode_cid_name, encode_cid_number, encode_ext_name
 from panasonic.kxtd1232.frame import BUSY_FRAME, Cmd, checksum, encode
+from panasonic.kxtd1232.signon import DEFAULT_SIGNON
 
 PLACEHOLDER_PASSWORD = "0000"
 PLACEHOLDER_ROM_ID = "-----PXXXXXXXXXX"
-BANNER = b"Welcome To KX-TD1232  Ver 2.0 Panasonic CO.,LTD.\r\nEnter Password\r\n"
+# Synthetic placeholders, not the PBX's real sign-on text (see kxtd1232/signon.py).
+_SO = DEFAULT_SIGNON
+BANNER = f"{_SO.banner}\r\n{_SO.password_prompt}\r\n".encode("ascii")
 
 
 def synthetic_db(cid_records: int = 500, ext_records: int = 128) -> dict[int, bytearray]:
@@ -86,8 +89,8 @@ class SimPBX:
         if m == "await_password":
             if line == self._password:
                 self.mode = "await_ecs"
-                return b"EIA Mode Start\r\n"
-            return b"Enter Password\r\n"  # guess, like the RE simulator (G5)
+                return f"{_SO.mode_start}\r\n".encode("ascii")
+            return f"{_SO.password_prompt}\r\n".encode("ascii")  # guess, like the RE simulator (G5)
         if m == "await_ecs" and line == b"ECS OF":
             self.mode = "await_prg"
             return b"ECS OF\r\nOK\r\n"
