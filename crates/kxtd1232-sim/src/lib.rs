@@ -182,6 +182,9 @@ pub struct SimPbx {
     pub silent_bye: bool,
     /// More busy frames to schedule after the first one in a malformed-frame lockup.
     pub(crate) lockup_busy_left: u32,
+    /// While true (until [`Self::lockup_end_ms`]), all host input is discarded without parsing.
+    pub(crate) lockup_discard: bool,
+    pub(crate) lockup_end_ms: u64,
     #[cfg(feature = "faults")]
     pub(crate) link_drop_partial: Option<usize>,
     #[cfg(feature = "faults")]
@@ -221,6 +224,8 @@ impl SimPbx {
             latency_ms: 30,
             silent_bye: false,
             lockup_busy_left: 0,
+            lockup_discard: false,
+            lockup_end_ms: 0,
             #[cfg(feature = "faults")]
             link_drop_partial: None,
             #[cfg(feature = "faults")]
@@ -264,10 +269,25 @@ impl SimPbx {
         self.buf.clear();
     }
 
-    pub fn feed(&mut self, data: &[u8]) -> Emits {
+    pub(crate) fn advance_lockup(&mut self, now_ms: u64) {
+        if self.lockup_discard && now_ms >= self.lockup_end_ms {
+            self.lockup_discard = false;
+            self.buf.clear();
+        }
+    }
+
+    pub fn feed(&mut self, data: &[u8], now_ms: u64) -> Emits {
+        self.advance_lockup(now_ms);
+        if self.lockup_discard {
+            return Emits::new();
+        }
         self.buf.extend_from_slice(data);
         let mut out = Vec::new();
         loop {
+            if self.lockup_discard {
+                self.buf.clear();
+                return out;
+            }
             if self.mode == Mode::Binary {
                 let Some(&len) = self.buf.first() else {
                     return out;
@@ -367,11 +387,19 @@ impl SimPbx {
 
     fn clear_busy_lockup(&mut self) {
         self.lockup_busy_left = 0;
+        self.lockup_discard = false;
+        self.lockup_end_ms = 0;
     }
 
-    /// PBX enters a busy lockup after a malformed frame; the first busy lands after latency.
-    fn malformed_frame(&mut self) -> Emits {
+    fn start_busy_lockup(&mut self) {
+        self.buf.clear();
+        self.lockup_discard = true;
         self.lockup_busy_left = self.config.busy_lockup_frames.saturating_sub(1);
+    }
+
+    /// PBX enters a busy lockup after malformed LEN / junk; the first busy lands after latency.
+    fn malformed_frame(&mut self) -> Emits {
+        self.start_busy_lockup();
         vec![(self.latency_ms, BUSY_FRAME.to_vec())]
     }
 
@@ -383,6 +411,7 @@ impl SimPbx {
             return self.malformed_frame();
         }
         if checksum(&raw[..raw.len() - 1]) != raw[raw.len() - 1] {
+            self.start_busy_lockup();
             return vec![(lat, Self::reply(cmd, &[0x01, 0x02]))];
         }
         self.clear_busy_lockup();
@@ -545,6 +574,9 @@ pub struct SimTransport {
     pub sent: Vec<u8>,
     /// When set, the link drops right after the next write frame reaches the simulator.
     pub drop_link_after_write: bool,
+    /// Next write send fails with `LinkDown` after this many bytes left the host (a
+    /// partial frame, or the whole frame when >= its length, which the PBX then stores).
+    pub fail_write_send_after: Option<usize>,
     link_down: bool,
     #[cfg(feature = "faults")]
     link_drop_pending: bool,
@@ -562,6 +594,7 @@ impl SimTransport {
             queue: q,
             sent: Vec::new(),
             drop_link_after_write: false,
+            fail_write_send_after: None,
             link_down: false,
             #[cfg(feature = "faults")]
             link_drop_pending: false,
@@ -572,12 +605,15 @@ impl SimTransport {
     pub fn reconnect(&mut self) {
         self.link_down = false;
         self.drop_link_after_write = false;
+        self.fail_write_send_after = None;
         #[cfg(feature = "faults")]
         {
             self.link_drop_pending = false;
         }
         self.queue.clear();
         self.sim.dtr_down();
+        self.sim.clear_busy_lockup();
+        self.sim.buf.clear();
         let first = self.sim.dtr_up();
         let now = self.now;
         self.schedule(now, first);
@@ -623,28 +659,71 @@ impl SimTransport {
             self.schedule(at, BUSY_FRAME.to_vec());
         }
     }
+
+    fn finish_lockup_train(&mut self, rx_done: u64) {
+        if !self.sim.lockup_discard {
+            return;
+        }
+        let busy_iv = self.sim.config.busy_lockup_interval_ms;
+        let frames = self.sim.lockup_busy_left;
+        self.sim.lockup_busy_left = 0;
+        if frames > 0 {
+            self.schedule_busy_cadence(rx_done + self.sim.latency_ms, frames, busy_iv);
+        }
+        let total_busy = u64::from(self.sim.config.busy_lockup_frames);
+        let train_ms = self.sim.latency_ms
+            + total_busy.saturating_mul(busy_iv)
+            + kxtd1232::Timing::default().tx_ms(BUSY_FRAME.len());
+        self.sim.lockup_end_ms = rx_done.saturating_add(train_ms);
+    }
 }
 
 impl Transport for SimTransport {
     fn send(&mut self, data: &[u8]) -> Result<(), TransportError> {
         if self.link_down {
-            return Err(TransportError::LinkDown(LinkDownError::nothing_written(
-                "sim: link dropped",
-            )));
+            return Err(TransportError::NothingWritten("sim: link dropped".into()));
         }
         let tline = kxtd1232::Timing::default();
+        if data.get(1) == Some(&Cmd::Write.byte()) {
+            if let Some(n) = self.fail_write_send_after.take() {
+                let n = n.min(data.len());
+                if n > 0 {
+                    self.sent.extend_from_slice(&data[..n]);
+                    let rx_done = self.now + tline.tx_ms(n);
+                    for (delay, bytes) in self.sim.feed(&data[..n], self.now) {
+                        let at = rx_done + delay + tline.tx_ms(bytes.len());
+                        self.schedule(at, bytes);
+                    }
+                }
+                self.link_down = true;
+                if n == 0 {
+                    return Err(TransportError::NothingWritten(
+                        "sim: link dropped mid-send".into(),
+                    ));
+                }
+                return Err(TransportError::LinkDown(LinkDownError {
+                    detail: "sim: link dropped mid-send".into(),
+                    bytes_sent: n,
+                }));
+            }
+        }
         #[cfg(feature = "faults")]
         if let Some(n) = self.sim.take_mid_send_fault(data) {
             let n = n.min(data.len());
             if n > 0 {
                 self.sent.extend_from_slice(&data[..n]);
                 let rx_done = self.now + tline.tx_ms(n);
-                for (delay, bytes) in self.sim.feed(&data[..n]) {
+                for (delay, bytes) in self.sim.feed(&data[..n], self.now) {
                     let at = rx_done + delay + tline.tx_ms(bytes.len());
                     self.schedule(at, bytes);
                 }
             }
             self.link_down = true;
+            if n == 0 {
+                return Err(TransportError::NothingWritten(
+                    "simulated serial link down mid-send".into(),
+                ));
+            }
             return Err(TransportError::LinkDown(LinkDownError {
                 detail: "simulated serial link down mid-send".into(),
                 bytes_sent: n,
@@ -652,14 +731,12 @@ impl Transport for SimTransport {
         }
         self.sent.extend_from_slice(data);
         if self.drop_link_after_write && data.get(1) == Some(&Cmd::Write.byte()) {
-            self.sim.feed(data);
+            self.sim.feed(data, self.now);
             self.link_down = true;
             return Ok(());
         }
-        // Model the 9600-baud line: the PBX acts once the request has been received, and
-        // each reply lands once it has been transmitted.
         let rx_done = self.now + tline.tx_ms(data.len());
-        for (delay, bytes) in self.sim.feed(data) {
+        for (delay, bytes) in self.sim.feed(data, self.now) {
             #[cfg(feature = "faults")]
             let bytes = {
                 let mut bytes = bytes;
@@ -675,28 +752,26 @@ impl Transport for SimTransport {
             let at = rx_done + delay + tline.tx_ms(bytes.len());
             self.schedule(at, bytes);
         }
-        let busy_iv = self.sim.config.busy_lockup_interval_ms;
         #[cfg(feature = "faults")]
         if let Some(frames) = self.sim.post_write_busy.take() {
+            let busy_iv = self.sim.config.busy_lockup_interval_ms;
             self.schedule_busy_cadence(rx_done + self.sim.latency_ms, frames, busy_iv);
         }
-        if self.sim.lockup_busy_left > 0 {
-            let frames = self.sim.lockup_busy_left;
-            self.sim.lockup_busy_left = 0;
-            self.schedule_busy_cadence(rx_done + self.sim.latency_ms, frames, busy_iv);
-        }
+        self.finish_lockup_train(rx_done);
         Ok(())
     }
 
     fn recv(&mut self, timeout_ms: u64) -> Result<Vec<u8>, TransportError> {
         if self.link_down {
-            return Err(TransportError::LinkDown(LinkDownError::nothing_written(
-                "sim: link dropped",
-            )));
+            return Err(TransportError::LinkDown(LinkDownError {
+                detail: "sim: link dropped".into(),
+                bytes_sent: 0,
+            }));
         }
         match self.queue.front() {
             Some(&(at, _)) if at <= self.now + timeout_ms => {
                 self.now = self.now.max(at);
+                self.sim.advance_lockup(self.now);
                 let mut out = Vec::new();
                 while let Some((t, _)) = self.queue.front() {
                     if *t > self.now {
@@ -715,6 +790,7 @@ impl Transport for SimTransport {
             }
             _ => {
                 self.now += timeout_ms;
+                self.sim.advance_lockup(self.now);
                 Err(TransportError::Timeout)
             }
         }

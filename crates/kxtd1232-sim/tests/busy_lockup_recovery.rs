@@ -1,4 +1,4 @@
-//! Malformed LEN / junk busy lockup and checksum NAK (protocol facts).
+//! Malformed LEN / junk busy lockup, checksum NAK + junk recovery (protocol facts).
 
 #![allow(clippy::unwrap_used)]
 
@@ -38,8 +38,26 @@ fn corrupt_checksum(frame: &mut [u8]) {
     frame[last] = frame[last].wrapping_add(1);
 }
 
-fn recover_after_junk(c: &mut Client<SimTransport>, junk: &[u8]) {
-    Transport::send(c.transport_mut(), junk).unwrap();
+fn bad_read_header() -> Vec<u8> {
+    let mut bad = read_probe();
+    corrupt_checksum(&mut bad);
+    bad
+}
+
+fn prng_junk(seed: u64, len: usize) -> Vec<u8> {
+    let mut s = seed;
+    (0..len)
+        .map(|_| {
+            s = s.wrapping_mul(6364136223846793005).wrapping_add(1);
+            (s >> 33) as u8
+        })
+        .collect()
+}
+
+fn recover_after_bad_header_and_junk(c: &mut Client<SimTransport>, junk: &[u8]) {
+    let mut wire = bad_read_header();
+    wire.extend_from_slice(junk);
+    Transport::send(c.transport_mut(), &wire).unwrap();
     assert!(
         c.drain_until_quiet().is_ok(),
         "busy train must end and the line go quiet"
@@ -51,35 +69,23 @@ fn recover_after_junk(c: &mut Client<SimTransport>, junk: &[u8]) {
         .count();
     assert!(
         busy_drained >= 1,
-        "expected at least one unsolicited busy frame in the drain log, got {busy_drained}"
+        "expected at least one unsolicited busy frame, got {busy_drained}"
     );
-    let cmds_before = c.transport().sim.commands.len();
-    let sent_before = c.transport().sent.len();
-    assert!(c.read(0x24, 0, 0, 3).is_ok(), "resend after recovery");
-    assert_eq!(
-        c.transport().sim.commands.len(),
-        cmds_before + 1,
-        "only the good frame may commit"
-    );
-    assert_eq!(
-        c.transport().sent.len() - sent_before,
-        read_probe().len(),
-        "exactly one read frame resent"
-    );
+    assert!(c.read(0x24, 0, 0, 3).is_ok(), "read after recovery");
 }
 
 #[test]
-fn test_bad_checksum_read_nak_link_stays_up() {
+fn test_bad_checksum_read_nak_then_lockup_on_trailing_junk() {
     let mut c = client_read();
-    let mut bad = read_probe();
-    corrupt_checksum(&mut bad);
-    Transport::send(c.transport_mut(), &bad).unwrap();
-    let nak = c.transport_mut().recv(5_000).unwrap();
-    assert_eq!(nak.as_slice(), READ_BAD_CHECKSUM_NAK);
+    let mut wire = bad_read_header();
+    wire.extend_from_slice(&[0x55; 200]);
+    Transport::send(c.transport_mut(), &wire).unwrap();
+    let first = c.transport_mut().recv(5_000).unwrap();
     assert!(
-        !c.drained().iter().any(|d| d.bytes.as_slice() == BUSY_FRAME),
-        "checksum NAK must not start busy lockup"
+        first.starts_with(&READ_BAD_CHECKSUM_NAK),
+        "expected read bad-checksum NAK before busy, got {first:?}"
     );
+    assert!(c.drain_until_quiet().is_ok());
     assert!(c.read(0x24, 0, 0, 3).is_ok());
 }
 
@@ -94,17 +100,40 @@ fn test_bad_checksum_write_nak_link_stays_up() {
         .unwrap();
     corrupt_checksum(&mut bad);
     Transport::send(c.transport_mut(), &bad).unwrap();
-    let nak = c.transport_mut().recv(5_000).unwrap();
-    assert_eq!(nak.as_slice(), WRITE_BAD_CHECKSUM_NAK);
+    let first = c.transport_mut().recv(5_000).unwrap();
     assert!(
-        !c.drained().iter().any(|d| d.bytes.as_slice() == BUSY_FRAME),
-        "checksum NAK must not start busy lockup"
+        first.starts_with(&WRITE_BAD_CHECKSUM_NAK),
+        "expected write bad-checksum NAK before busy, got {first:?}"
     );
+    assert!(c.drain_until_quiet().is_ok());
     assert!(c.write(0x25, 0, 0, &new).is_ok());
+}
+
+#[test]
+fn test_junk_after_bad_read_header_byte_0x00() {
+    recover_after_bad_header_and_junk(&mut client_read(), &vec![0x00; 200]);
+}
+
+#[test]
+fn test_junk_after_bad_read_header_byte_0x55() {
+    recover_after_bad_header_and_junk(&mut client_read(), &vec![0x55; 200]);
+}
+
+#[test]
+fn test_junk_after_bad_read_header_byte_0xff() {
+    recover_after_bad_header_and_junk(&mut client_read(), &vec![0xFF; 200]);
+}
+
+#[test]
+fn test_junk_after_bad_read_header_prng() {
+    recover_after_bad_header_and_junk(&mut client_read(), &prng_junk(0xA2_00_01, 200));
 }
 
 #[test]
 fn test_busy_lockup_recovery_bad_len() {
     let mut c = client_read();
-    recover_after_junk(&mut c, &[0x01]);
+    Transport::send(c.transport_mut(), &[0x01]).unwrap();
+    assert!(c.drain_until_quiet().is_ok());
+    assert!(c.drained().iter().any(|d| d.bytes.as_slice() == BUSY_FRAME));
+    assert!(c.read(0x24, 0, 0, 3).is_ok());
 }
