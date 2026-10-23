@@ -159,3 +159,26 @@ impl ApprovalBook {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use kxprov_api::{DiffHash, PlanId};
+
+    #[test]
+    fn same_approver_as_requester_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let book = ApprovalBook::new(dir.path());
+        let err = book
+            .submit(
+                PlanId("p".into()),
+                DiffHash("d".into()),
+                Profile::Sim,
+                &TokenId("writer".into()),
+                TokenId("writer".into()),
+                0,
+            )
+            .unwrap_err();
+        assert!(matches!(err, ApprovalError::SameApprover));
+    }
+}

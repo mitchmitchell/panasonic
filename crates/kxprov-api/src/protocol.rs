@@ -13,9 +13,6 @@ pub const APPROVAL_TTL_SECS: u32 = 600;
 pub const APPROVAL_SUBMIT_LIMIT_HOUR: u32 = 5;
 pub const APPROVAL_SUBMIT_LIMIT_DAY: u32 = 20;
 
-/// Canonical prefix for mode.json ed25519 signatures.
-pub const MODE_SIGN_PREFIX: &str = "kxprov-mode-v1";
-
 /// Server-side plan retention.
 pub const PLAN_EXPIRY_SECS: u32 = 1800;
 
@@ -30,3 +27,12 @@ pub const BUSY_LIMIT_DEFAULT_MS: u64 = 12_000;
 
 /// Verified `.DBH` backups retained on disk (v2.4 default).
 pub const DEFAULT_BACKUP_KEEP: usize = 20;
+
+/// Canonical prefix for mode nonce file bytes (v2.6 F1).
+pub const MODE_SIGN_PREFIX: &str = "kxprov-mode-v1";
+
+/// OpenSSH `ssh-keygen -Y sign` namespace for mode changes (ed25519-sk in production).
+pub const MODE_SSH_NAMESPACE: &str = "kxprov-mode";
+
+/// Production path to pinned mode signers (`ssh-keygen -Y verify -f`).
+pub const MODE_SIGNERS_PATH: &str = "/etc/kx-provision/mode-signers";

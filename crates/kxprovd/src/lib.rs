@@ -18,6 +18,7 @@ pub mod peer;
 pub mod plan_live;
 pub mod plan_store;
 pub mod queue;
+pub mod sshsig_verify;
 pub mod time;
 pub mod tokens;
 pub mod transport;
@@ -93,7 +94,7 @@ impl Daemon {
             approvals,
             locked,
             goliath,
-            mode: mode::ModeStore::new(&config.data_dir),
+            mode: mode::ModeStore::new(&config.data_dir, config.mode_signers_path.clone()),
         });
 
         let socket_path = config.socket_path.clone();

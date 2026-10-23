@@ -1,8 +1,8 @@
 //! Signed mode.json with fail-closed Production (v2.6 F1).
 
 use crate::audit::{alert_mode_failure, AuditEntry, AuditKind, AuditLog};
+use crate::sshsig_verify::{verify_mode_nonce, SshsigError};
 use crate::time::now_ms;
-use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use kxprov_api::mode_sign_message;
 use kxprov_api::{OperationalMode, Profile};
 use serde::{Deserialize, Serialize};
@@ -15,10 +15,8 @@ pub enum ModeError {
     Io(#[from] std::io::Error),
     #[error("json: {0}")]
     Json(#[from] serde_json::Error),
-    #[error("bad signature")]
-    BadSignature,
-    #[error("unknown signer")]
-    UnknownSigner,
+    #[error("bad signature: {0}")]
+    BadSignature(#[from] SshsigError),
     #[error("counter rollback")]
     CounterRollback,
     #[error("testing mode requires Test profile")]
@@ -29,18 +27,8 @@ pub enum ModeError {
 pub struct ModeFileBody {
     pub mode: OperationalMode,
     pub counter: u64,
+    /// PEM armored OpenSSH signature over the mode nonce (`ssh-keygen -Y sign`).
     pub signature: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ModeSignersFile {
-    pub signers: Vec<ModeSigner>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ModeSigner {
-    pub id: String,
-    pub public_key_hex: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,11 +44,11 @@ pub struct ModeStore {
 }
 
 impl ModeStore {
-    pub fn new(data_dir: &Path) -> Self {
+    pub fn new(data_dir: &Path, signers_path: PathBuf) -> Self {
         Self {
             mode_path: data_dir.join("mode.json"),
             counter_path: data_dir.join("mode.counter"),
-            signers_path: data_dir.join("mode-signers.json"),
+            signers_path,
             audit: AuditLog::new(data_dir),
         }
     }
@@ -82,33 +70,10 @@ impl ModeStore {
         Ok(())
     }
 
-    fn load_signers(&self) -> Result<ModeSignersFile, ModeError> {
-        if !self.signers_path.exists() {
-            return Ok(ModeSignersFile { signers: vec![] });
-        }
-        Ok(serde_json::from_slice(&std::fs::read(&self.signers_path)?)?)
-    }
-
     fn verify_signature(&self, body: &ModeFileBody) -> Result<(), ModeError> {
-        let sig_bytes = hex::decode(body.signature.trim()).map_err(|_| ModeError::BadSignature)?;
-        let signature = Signature::from_slice(&sig_bytes).map_err(|_| ModeError::BadSignature)?;
-        let msg = mode_sign_message(body.mode, body.counter);
-        let signers = self.load_signers()?;
-        for s in &signers.signers {
-            let pk_bytes =
-                hex::decode(s.public_key_hex.trim()).map_err(|_| ModeError::BadSignature)?;
-            let pk_array: [u8; 32] = pk_bytes
-                .as_slice()
-                .try_into()
-                .map_err(|_| ModeError::BadSignature)?;
-            let Ok(key) = VerifyingKey::from_bytes(&pk_array) else {
-                continue;
-            };
-            if key.verify(&msg, &signature).is_ok() {
-                return Ok(());
-            }
-        }
-        Err(ModeError::BadSignature)
+        let nonce = mode_sign_message(body.mode, body.counter);
+        verify_mode_nonce(&nonce, &body.signature, &self.signers_path)?;
+        Ok(())
     }
 
     fn fail_closed(&self, kind: AuditKind, detail: impl Into<String>) -> EffectiveMode {
@@ -188,10 +153,11 @@ impl ModeStore {
     }
 }
 
+/// Whether apply requires a prior approval for this profile/mode (v2.6 F1).
 pub fn write_approval_required(profile: Profile, operational: OperationalMode) -> bool {
     match profile {
         Profile::Prod => true,
         Profile::Test => operational == OperationalMode::Production,
-        Profile::Sim => true,
+        Profile::Sim => false,
     }
 }

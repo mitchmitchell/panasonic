@@ -6,9 +6,8 @@
 //! `kxprov: error: ...`, with no backtrace.
 
 use clap::{Parser, Subcommand, ValueEnum};
-use ed25519_dalek::{Signer, SigningKey};
 use kxprov_api::mode_sign_message;
-use kxprov_api::{OperationalMode, SetModeParams};
+use kxprov_api::{OperationalMode, SetModeParams, MODE_SSH_NAMESPACE};
 use kxtd1232::error::NotAllowed;
 use kxtd1232::{build_plan, field_patch, Client, Error, FieldKind, Granularity};
 use kxtd1232_sim::{SimPbx, SimTransport, PLACEHOLDER_PASSWORD};
@@ -71,15 +70,18 @@ enum Command {
 
 #[derive(Subcommand, Debug)]
 enum ModeCommand {
-    /// Install a signed mode.json via the daemon.
+    /// Write a nonce file for `ssh-keygen -Y sign` (ed25519-sk on operator workstation).
     Set {
         #[arg(long, value_enum)]
         mode: OperationalModeCli,
         #[arg(long)]
         counter: u64,
-        /// 32-byte ed25519 seed file (ed25519-sk material).
+        /// Path to write the nonce bytes (default: ./kxprov-mode.nonce).
+        #[arg(long, default_value = "kxprov-mode.nonce")]
+        nonce_out: std::path::PathBuf,
+        /// PEM OpenSSH signature from `ssh-keygen -Y sign` (submit to daemon).
         #[arg(long)]
-        signing_key: std::path::PathBuf,
+        signature: Option<std::path::PathBuf>,
     },
 }
 
@@ -237,17 +239,27 @@ fn mode_daemon(cli: &Cli) -> Result<(), CliError> {
     let ModeCommand::Set {
         mode,
         counter,
-        signing_key,
+        nonce_out,
+        signature,
     } = cmd;
-    let seed = std::fs::read(signing_key).map_err(|e| CliError::Usage(e.to_string()))?;
-    let seed: [u8; 32] = seed
-        .as_slice()
-        .try_into()
-        .map_err(|_| CliError::Usage("signing key must be 32 bytes".into()))?;
-    let key = SigningKey::from_bytes(&seed);
     let op: OperationalMode = (*mode).into();
-    let msg = mode_sign_message(op, *counter);
-    let sig = key.sign(&msg);
+    let nonce = mode_sign_message(op, *counter);
+    std::fs::write(nonce_out, &nonce).map_err(|e| CliError::Usage(e.to_string()))?;
+    let Some(sig_path) = signature else {
+        eprintln!("Wrote nonce to {}", nonce_out.display());
+        eprintln!(
+            "Sign on your workstation (ed25519-sk): ssh-keygen -Y sign -f ~/.ssh/kxprov-sk -n {MODE_SSH_NAMESPACE} {}",
+            nonce_out.display()
+        );
+        eprintln!(
+            "Then submit: kxprov mode set --mode {:?} --counter {counter} --signature {}.sig --nonce-out {}",
+            mode,
+            nonce_out.display(),
+            nonce_out.display()
+        );
+        return Ok(());
+    };
+    let pem = std::fs::read_to_string(sig_path).map_err(|e| CliError::Usage(e.to_string()))?;
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -260,7 +272,7 @@ fn mode_daemon(cli: &Cli) -> Result<(), CliError> {
             params: SetModeParams {
                 mode: op,
                 counter: *counter,
-                signature: hex::encode(sig.to_bytes()),
+                signature: pem,
             },
         })
         .await

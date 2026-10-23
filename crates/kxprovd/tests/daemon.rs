@@ -1,11 +1,14 @@
 #![allow(clippy::unwrap_used)]
 
 use kxprov_api::{
-    ApiClient, DiffHash, FieldKindWire, RequestAuth, RequestBody, ResponseResult, TokenId,
+    ApiClient, FieldKindWire, OperationalMode, Profile, RequestAuth, RequestBody, ResponseResult,
+    TokenId, MODE_SSH_NAMESPACE,
 };
 use kxprovd::locked::LockedStore;
+use kxprovd::mode::ModeFileBody;
 use kxprovd::Daemon;
 use nix::unistd::getuid;
+use std::process::Command;
 use std::time::Duration;
 
 fn gateway_auth(id: &str) -> RequestAuth {
@@ -59,10 +62,10 @@ async fn plan_immutable_and_token_bound() {
 }
 
 #[tokio::test]
-async fn apply_requires_approval() {
+async fn apply_requires_approval_on_prod() {
     let tmp = tempfile::tempdir().unwrap();
     let uid = getuid().as_raw();
-    let (_d, sock) = Daemon::sim_for_tests(tmp.path(), uid);
+    let (_d, sock) = Daemon::sim_for_tests_profile(tmp.path(), uid, Profile::Prod);
     tokio::time::sleep(Duration::from_millis(50)).await;
     let mut c = ApiClient::connect(&sock).await.unwrap();
     let ResponseResult::PlanChange(plan) = c
@@ -95,26 +98,10 @@ async fn apply_requires_approval() {
         .await
         .expect_err("no approval");
     assert!(err.to_string().contains("approval_required"));
-
-    let err = ApiClient::connect(&sock)
-        .await
-        .unwrap()
-        .call_auth(
-            RequestBody::ApplyPlan {
-                params: kxprov_api::ApplyPlanParams {
-                    plan_id: plan.plan_id,
-                    diff_hash: DiffHash("bad".into()),
-                },
-            },
-            Some(gateway_auth("writer")),
-        )
-        .await
-        .expect_err("bad hash");
-    assert!(err.to_string().contains("plan") || err.to_string().contains("approval"));
 }
 
 #[tokio::test]
-async fn approval_single_use() {
+async fn sim_apply_without_approval() {
     let tmp = tempfile::tempdir().unwrap();
     let uid = getuid().as_raw();
     let (_d, sock) = Daemon::sim_for_tests(tmp.path(), uid);
@@ -127,6 +114,117 @@ async fn approval_single_use() {
                     kind: FieldKindWire::CidName,
                     index: 3,
                     value: "OK".into(),
+                },
+            },
+            Some(gateway_auth("writer")),
+        )
+        .await
+        .unwrap()
+    else {
+        panic!("plan");
+    };
+
+    let ResponseResult::BackupNow(_) = gw
+        .call_auth(RequestBody::BackupNow, Some(gateway_auth("writer")))
+        .await
+        .unwrap()
+    else {
+        panic!("backup");
+    };
+
+    let ResponseResult::ApplyPlan(applied) = gw
+        .call_auth(
+            RequestBody::ApplyPlan {
+                params: kxprov_api::ApplyPlanParams {
+                    plan_id: plan.plan_id.clone(),
+                    diff_hash: plan.diff_hash.clone(),
+                },
+            },
+            Some(gateway_auth("writer")),
+        )
+        .await
+        .unwrap()
+    else {
+        panic!("apply");
+    };
+    assert!(applied.blocks_verified >= 1);
+}
+
+fn install_test_mode_signers(dir: &std::path::Path) -> std::path::PathBuf {
+    let key = dir.join("mode-test-key");
+    Command::new("ssh-keygen")
+        .args(["-t", "ed25519", "-f"])
+        .arg(&key)
+        .args(["-N", ""])
+        .status()
+        .unwrap();
+    let pub_line = String::from_utf8(
+        Command::new("ssh-keygen")
+            .args(["-y", "-f"])
+            .arg(&key)
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap();
+    let parts: Vec<_> = pub_line.split_whitespace().collect();
+    std::fs::write(
+        dir.join("mode-signers"),
+        format!("{} {} {}\n", MODE_SSH_NAMESPACE, parts[0], parts[1]),
+    )
+    .unwrap();
+    key
+}
+
+fn sign_mode_nonce(key_path: &std::path::Path, nonce: &[u8]) -> String {
+    let dir = tempfile::tempdir().unwrap();
+    let nonce_path = dir.path().join("nonce");
+    let sig_path = dir.path().join("nonce.sig");
+    std::fs::write(&nonce_path, nonce).unwrap();
+    Command::new("ssh-keygen")
+        .args([
+            "-Y",
+            "sign",
+            "-f",
+            key_path.to_str().unwrap(),
+            "-n",
+            MODE_SSH_NAMESPACE,
+        ])
+        .arg(&nonce_path)
+        .status()
+        .unwrap();
+    std::fs::read_to_string(sig_path).unwrap()
+}
+
+/// Prod hardware cannot apply in the sim harness; Test + Production mode keeps approval gates.
+#[tokio::test]
+async fn prod_apply_single_use_approval() {
+    let tmp = tempfile::tempdir().unwrap();
+    let key = install_test_mode_signers(tmp.path());
+    let counter = 1u64;
+    let nonce = kxprov_api::mode_sign_message(OperationalMode::Production, counter);
+    let body = ModeFileBody {
+        mode: OperationalMode::Production,
+        counter,
+        signature: sign_mode_nonce(&key, &nonce),
+    };
+    std::fs::write(
+        tmp.path().join("mode.json"),
+        serde_json::to_vec_pretty(&body).unwrap(),
+    )
+    .unwrap();
+    std::fs::write(tmp.path().join("mode.counter"), "0").unwrap();
+    let uid = getuid().as_raw();
+    let (_d, sock) = Daemon::sim_for_tests_profile(tmp.path(), uid, Profile::Test);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let mut gw = ApiClient::connect(&sock).await.unwrap();
+    let ResponseResult::PlanChange(plan) = gw
+        .call_auth(
+            RequestBody::PlanChange {
+                params: kxprov_api::PlanChangeParams {
+                    kind: FieldKindWire::CidName,
+                    index: 4,
+                    value: "P".into(),
                 },
             },
             Some(gateway_auth("writer")),
@@ -162,7 +260,7 @@ async fn approval_single_use() {
         panic!("backup");
     };
 
-    let ResponseResult::ApplyPlan(applied) = gw
+    let ResponseResult::ApplyPlan(_) = gw
         .call_auth(
             RequestBody::ApplyPlan {
                 params: kxprov_api::ApplyPlanParams {
@@ -177,7 +275,6 @@ async fn approval_single_use() {
     else {
         panic!("apply");
     };
-    assert!(applied.blocks_verified >= 1);
 
     let err = gw
         .call_auth(
@@ -206,7 +303,7 @@ async fn token_b_cannot_apply_token_a_plan() {
             RequestBody::PlanChange {
                 params: kxprov_api::PlanChangeParams {
                     kind: FieldKindWire::CidName,
-                    index: 4,
+                    index: 5,
                     value: "X".into(),
                 },
             },

@@ -124,7 +124,7 @@ pub struct SubmitApprovalResult {
 pub struct SetModeParams {
     pub mode: OperationalMode,
     pub counter: u64,
-    /// Hex-encoded ed25519 signature over the canonical mode message.
+    /// PEM armored OpenSSH signature (`ssh-keygen -Y sign`, ed25519-sk in production).
     pub signature: String,
 }
 
