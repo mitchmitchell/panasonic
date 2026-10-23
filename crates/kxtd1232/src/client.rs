@@ -71,7 +71,9 @@ pub enum SessionState {
     NeedsRollback(UnackedWrite),
     /// Rollback failed or the line never went quiet: read-only, end allowed.
     Locked,
-    /// `end_binary` acked.
+    /// End-binary acked and BYE sent, but OK not yet seen. `end_binary` re-sends BYE.
+    ByePending,
+    /// Logout confirmed (BYE answered OK).
     Closed,
     /// Link lost while in binary mode; [`Client::login`] after transport reconnect.
     Disconnected,
@@ -246,7 +248,10 @@ impl<T: Transport> Client<T> {
     /// failed request is never handed to the next one.
     fn request(&mut self, raw: &[u8], cmd: Cmd, timeout_ms: u64) -> Result<Reply, Error> {
         self.require_session()?;
-        if matches!(self.state, SessionState::Text | SessionState::Closed) {
+        if matches!(
+            self.state,
+            SessionState::Text | SessionState::Closed | SessionState::ByePending
+        ) {
             return Err(Error::BadState {
                 op: Op::Request,
                 state: self.state.clone(),
@@ -272,8 +277,11 @@ impl<T: Transport> Client<T> {
         }
         if r.is_err() {
             self.rx.clear();
-            if self.drain_until_quiet().is_err() {
-                self.needs_drain = true;
+            match self.drain_until_quiet() {
+                Ok(()) => {}
+                // The drain already recorded the disconnect; report the lost link.
+                Err(e @ Error::LinkDown(_)) => return Err(e),
+                Err(_) => self.needs_drain = true,
             }
         }
         r
@@ -525,6 +533,13 @@ impl<T: Transport> Client<T> {
                     }
                 }
                 Err(Error::Timeout) => return Ok(()),
+                Err(e @ Error::LinkDown(_)) => {
+                    // Save any pending verify/rollback as resume before Disconnected.
+                    if !matches!(self.state, SessionState::Text | SessionState::Closed) {
+                        self.note_link_down(None);
+                    }
+                    return Err(e);
+                }
                 Err(e) => return Err(e),
             }
         }
@@ -603,26 +618,40 @@ impl<T: Transport> Client<T> {
                 return Err(Error::NotPendingBlock);
             }
         }
+        let prior = self.state.clone();
         self.state = SessionState::Binary;
         match self.write(table, record, word, base) {
             Ok(()) | Err(Error::Unacked(_)) => {}
             // Disconnected; resumes in AwaitingVerify for this rollback after login.
             Err(e @ Error::LinkDown(_)) => return Err(e),
+            // Nothing was sent: the prior state stands. If the pre-send drain lost the
+            // link, the prior state is what resumes after login.
+            Err(e @ Error::PreSend(_)) => {
+                let lost = matches!(self.state, SessionState::Disconnected);
+                self.state = prior;
+                if lost {
+                    self.note_link_down(None);
+                }
+                return Err(e);
+            }
             Err(_) => {
                 self.state = SessionState::Locked;
                 self.needs_drain = true;
                 return Err(Error::Locked);
             }
         }
-        if matches!(
-            self.verify_block(table, record, word, base, base),
-            Ok(VerifyOutcome::Applied)
-        ) {
-            self.state = SessionState::Binary;
-            Ok(())
-        } else {
-            self.state = SessionState::Locked;
-            Err(Error::Locked)
+        match self.verify_block(table, record, word, base, base) {
+            Ok(VerifyOutcome::Applied) => {
+                self.state = SessionState::Binary;
+                Ok(())
+            }
+            // Link lost mid-verify: keep Disconnected and the saved resume.
+            Err(e) if matches!(self.state, SessionState::Disconnected) => Err(e),
+            _ => {
+                self.state = SessionState::Locked;
+                self.needs_drain = true;
+                Err(Error::Locked)
+            }
         }
     }
 
@@ -644,9 +673,14 @@ impl<T: Transport> Client<T> {
             }
             SessionState::Text | SessionState::Closed => return Ok(()),
             SessionState::Disconnected => return Err(Error::SessionLost),
+            SessionState::ByePending => return self.bye(),
         }
-        if self.needs_drain && self.drain_until_quiet().is_err() {
-            return Err(Error::EndBinaryHeld);
+        if self.needs_drain {
+            match self.drain_until_quiet() {
+                Ok(()) => {}
+                Err(e @ Error::LinkDown(_)) => return Err(e),
+                Err(_) => return Err(Error::EndBinaryHeld),
+            }
         }
         let raw = self.enc.end_binary();
         let r = self.request(&raw, Cmd::EndBinary, self.timing.reply_timeout_ms)?;
@@ -654,9 +688,15 @@ impl<T: Transport> Client<T> {
             ReplyKind::Ack => {}
             k => return Err(Error::UnexpectedReply(format!("end-binary: {k:?}"))),
         }
-        // Text logout (recorded exchange step 28): BYE, then wait for OK. The PBX may
-        // follow the OK with its sign-on prompt, which also confirms the logout.
-        self.state = SessionState::Text;
+        self.state = SessionState::ByePending;
+        self.bye()
+    }
+
+    /// Text logout (recorded exchange step 28): BYE, then wait for OK. The PBX may follow
+    /// the OK with its sign-on prompt, which also confirms the logout. Any failure leaves
+    /// `ByePending`, so the next `end_binary` sends BYE again.
+    fn bye(&mut self) -> Result<(), Error> {
+        self.rx.clear();
         self.send(b"BYE\r\n")?;
         let start = self.t.now_ms();
         let mut text = Vec::new();

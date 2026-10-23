@@ -403,6 +403,11 @@ impl SimTransport {
         self.schedule(now, first);
     }
 
+    /// Drop the link now: every later send/recv fails until [`Self::reconnect`].
+    pub fn drop_link_now(&mut self) {
+        self.link_down = true;
+    }
+
     /// Queue bytes as if they were already waiting in the receive buffer (a stale frame
     /// from an earlier exchange).
     pub fn inject_inbound(&mut self, bytes: Vec<u8>) {
