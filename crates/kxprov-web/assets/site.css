@@ -1,0 +1,58 @@
+:root {
+  color-scheme: light dark;
+  --page-bg: #f9fafb;
+  --header-bg: #f3f4f6;
+  --text: #111827;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --page-bg: #111;
+    --header-bg: #1f2937;
+    --text: #f9fafb;
+  }
+}
+
+body {
+  margin: 0;
+  font-family: system-ui, sans-serif;
+  background: var(--page-bg);
+  color: var(--text);
+}
+
+.site-header {
+  background: var(--header-bg);
+  padding: 0.75rem 1.25rem;
+}
+
+.site-header a {
+  display: inline-block;
+  line-height: 0;
+}
+
+.site-header img {
+  height: 40px;
+  width: auto;
+}
+
+.logo-light {
+  display: inline-block;
+}
+
+.logo-dark {
+  display: none;
+}
+
+@media (prefers-color-scheme: dark) {
+  .logo-light {
+    display: none;
+  }
+
+  .logo-dark {
+    display: inline-block;
+  }
+}
+
+main {
+  padding: 1rem 1.25rem 2rem;
+}

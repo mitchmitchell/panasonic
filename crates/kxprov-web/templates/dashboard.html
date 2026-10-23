@@ -1,41 +1,42 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="utf-8">
   <title>kx-provision</title>
-  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+  {% include "_head.html" %}
 </head>
 <body>
-  <img src="/static/logo.svg" alt="kx-provision" width="120" height="32">
-  {% if show_mode_banner %}
-  <p role="status"><strong>Mode: {{ mode_banner }}</strong></p>
-  {% endif %}
-  <h1>kx-provision <small>(SIM)</small></h1>
-  {% if show_status %}<p>Profile: {{ profile }} · Locked: {{ locked }} · Queue: {{ queue_depth }}</p>{% endif %}
-  <form method="post" action="/logout">
-    <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-    <button type="submit">Sign out</button>
-  </form>
-  <h2>Dry-run plan</h2>
-  <form method="post" action="/plan">
-    <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-    <label>Table (hex) <input name="table" value="24"></label>
-    <label>Record <input name="record" value="1"></label>
-    <label>Field <input name="field" value="name"></label>
-    <label>New value <input name="new_value" value="test"></label>
-    <button type="submit">Plan change</button>
-  </form>
-  {% if show_plan %}
-  <h3>Plan {{ plan_id_hex }}</h3>
-  <p>Diff hash: <code>{{ diff_hash_hex }}</code></p>
-  <p>{{ plan_summary }}</p>
-  <form method="post" action="/apply">
-    <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-    <input type="hidden" name="plan_id" value="{{ plan_id_hex }}">
-    <input type="hidden" name="diff_hash" value="{{ diff_hash_hex }}">
-    <button type="submit">Apply (admin)</button>
-  </form>
-  {% endif %}
-  {% if show_message %}<p><em>{{ message }}</em></p>{% endif %}
+  {% include "_header.html" %}
+  <main>
+    {% if show_mode_banner %}
+    <p role="status"><strong>Mode: {{ mode_banner }}</strong></p>
+    {% endif %}
+    <h1>kx-provision <small>(SIM)</small></h1>
+    {% if show_status %}<p>Profile: {{ profile }} · Locked: {{ locked }} · Queue: {{ queue_depth }}</p>{% endif %}
+    <form method="post" action="/logout">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <button type="submit">Sign out</button>
+    </form>
+    <h2>Dry-run plan</h2>
+    <form method="post" action="/plan">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <label>Table (hex) <input name="table" value="24"></label>
+      <label>Record <input name="record" value="1"></label>
+      <label>Field <input name="field" value="name"></label>
+      <label>New value <input name="new_value" value="test"></label>
+      <button type="submit">Plan change</button>
+    </form>
+    {% if show_plan %}
+    <h3>Plan {{ plan_id_hex }}</h3>
+    <p>Diff hash: <code>{{ diff_hash_hex }}</code></p>
+    <p>{{ plan_summary }}</p>
+    <form method="post" action="/apply">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <input type="hidden" name="plan_id" value="{{ plan_id_hex }}">
+      <input type="hidden" name="diff_hash" value="{{ diff_hash_hex }}">
+      <button type="submit">Apply (admin)</button>
+    </form>
+    {% endif %}
+    {% if show_message %}<p><em>{{ message }}</em></p>{% endif %}
+  </main>
 </body>
 </html>

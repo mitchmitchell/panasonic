@@ -9,8 +9,7 @@ use time::OffsetDateTime;
 use tokio::sync::RwLock;
 
 use crate::approval::{
-    plan_storage_ttl, Approval, ApprovalChallenge, APPROVAL_SUBMIT_LIMIT_PER_DAY,
-    APPROVAL_SUBMIT_LIMIT_PER_HOUR,
+    plan_storage_ttl, Approval, APPROVAL_SUBMIT_LIMIT_PER_DAY, APPROVAL_SUBMIT_LIMIT_PER_HOUR,
 };
 use crate::backend::DaemonBackend;
 use crate::error::ApiError;
@@ -19,7 +18,6 @@ use crate::mode::Mode;
 use crate::plan::{DiffHash, ImmutablePlan, PlanId};
 use crate::profile::Profile;
 use crate::scope::Scope;
-use crate::token_id::TokenId;
 use crate::types::{
     ApplyJob, BackupInfo, BackupList, DaemonStatus, FieldValue, JobId, JobState, PlanChangeRequest,
     PlanSummary, ReadFieldsRequest, ReadFieldsResponse, RequestedBy,
@@ -28,12 +26,6 @@ use crate::types::{
 struct StoredApproval {
     approval: Approval,
     consumed: bool,
-}
-
-struct PendingApproval {
-    challenge: ApprovalChallenge,
-    requester_token_id: TokenId,
-    summary: String,
 }
 
 struct SubmitRateState {
@@ -48,7 +40,6 @@ struct Inner {
     mode: Mode,
     plans: HashMap<String, ImmutablePlan>,
     plan_approvals: HashMap<String, StoredApproval>,
-    pending: HashMap<String, PendingApproval>,
     submit_rates: HashMap<String, SubmitRateState>,
     backups: Vec<BackupInfo>,
     next_job: u64,
@@ -86,7 +77,6 @@ impl MockDaemon {
                 mode,
                 plans: HashMap::new(),
                 plan_approvals: HashMap::new(),
-                pending: HashMap::new(),
                 submit_rates: HashMap::new(),
                 backups: vec![BackupInfo {
                     id: "sim-initial".into(),
@@ -120,8 +110,23 @@ impl MockDaemon {
         id.to_hex()
     }
 
-    fn pending_key(plan_id: &PlanId, diff_hash: &DiffHash) -> String {
-        format!("{}:{}", plan_id.to_hex(), diff_hash.to_hex())
+    fn resolve_plan_id(
+        plans: &HashMap<String, ImmutablePlan>,
+        plan_id_or_prefix: &str,
+    ) -> Result<PlanId, ApiError> {
+        let id = plan_id_or_prefix.trim();
+        if id.len() == 32 {
+            return PlanId::from_hex(id);
+        }
+        if id.len() == 8 {
+            let matches: Vec<&String> = plans.keys().filter(|k| k.starts_with(id)).collect();
+            return match matches.len() {
+                0 => Err(ApiError::PlanNotFound),
+                1 => PlanId::from_hex(matches[0]),
+                _ => Err(ApiError::AmbiguousPlanPrefix),
+            };
+        }
+        Err(ApiError::BadRequest("plan_id"))
     }
 
     fn validate_plan_approval(
@@ -280,20 +285,16 @@ impl DaemonBackend for MockDaemon {
     async fn submit_approval(
         &self,
         caller: &CallerIdentity,
-        plan_id: PlanId,
-        diff_hash: DiffHash,
-        challenge: ApprovalChallenge,
+        plan_id_or_prefix: &str,
     ) -> Result<Approval, ApiError> {
         Self::require_scope(caller, Scope::Approve)?;
         let approver = caller.token_id().cloned().ok_or(ApiError::ForbiddenScope)?;
         let mut inner = self.inner.write().await;
+        let plan_id = Self::resolve_plan_id(&inner.plans, plan_id_or_prefix)?;
         let plan = inner
             .plans
             .get(&Self::plan_key(&plan_id))
             .ok_or(ApiError::PlanNotFound)?;
-        if plan.diff_hash != diff_hash {
-            return Err(ApiError::InvalidApproval);
-        }
         if plan.is_expired(plan_storage_ttl()) {
             return Err(ApiError::PlanExpired);
         }
@@ -304,12 +305,7 @@ impl DaemonBackend for MockDaemon {
         if requester == approver {
             return Err(ApiError::ApproverMustDiffer);
         }
-        let key = Self::pending_key(&plan_id, &diff_hash);
-        let pending = inner.pending.get(&key).ok_or(ApiError::InvalidApproval)?;
-        if pending.challenge != challenge {
-            return Err(ApiError::InvalidApproval);
-        }
-        let _ = (&pending.requester_token_id, &pending.summary);
+        let diff_hash = plan.diff_hash.clone();
         let rate = inner
             .submit_rates
             .entry(approver.0.clone())
@@ -320,7 +316,6 @@ impl DaemonBackend for MockDaemon {
                 day_count: 0,
             });
         Self::check_submit_rate(rate)?;
-        inner.pending.remove(&key);
         let approval = Approval::new(plan_id, diff_hash, inner.profile.clone(), approver.clone());
         inner.plan_approvals.insert(
             approval.id.0.clone(),
@@ -343,7 +338,7 @@ impl DaemonBackend for MockDaemon {
         if inner.profile == Profile::prod() && !inner.live_writes_approved {
             return Err(ApiError::LiveWritesBlocked);
         }
-        let (summary_text, requester_token_id) = {
+        {
             let plan = inner
                 .plans
                 .get(&Self::plan_key(&plan_id))
@@ -351,13 +346,7 @@ impl DaemonBackend for MockDaemon {
             if plan.diff_hash != diff_hash {
                 return Err(ApiError::InvalidApproval);
             }
-            let summary_text = format!("{} → {}", plan.request.field, plan.request.new_value);
-            let requester = plan
-                .creator_token
-                .clone()
-                .unwrap_or_else(|| TokenId("unknown-requester".into()));
-            (summary_text, requester)
-        };
+        }
         let profile = inner.profile.clone();
         let mode = inner.mode;
 
@@ -367,20 +356,10 @@ impl DaemonBackend for MockDaemon {
                 Some(id.clone())
             });
             let Some(approval_key) = key else {
-                let challenge = ApprovalChallenge::fresh();
-                inner.pending.insert(
-                    Self::pending_key(&plan_id, &diff_hash),
-                    PendingApproval {
-                        challenge: challenge.clone(),
-                        requester_token_id,
-                        summary: summary_text.clone(),
-                    },
-                );
                 return Err(ApiError::ApprovalRequired {
                     plan_id,
                     diff_hash,
-                    summary: summary_text,
-                    challenge,
+                    status: "approval_required",
                 });
             };
             let stored = inner
@@ -412,5 +391,52 @@ impl DaemonBackend for MockDaemon {
 
     fn verify_admin_password(&self, password: &str) -> bool {
         Self::verify_password(&self.admin_hash, password)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::token_id::TokenId;
+
+    #[test]
+    fn ambiguous_plan_prefix_is_rejected() {
+        let mut plans = HashMap::new();
+        plans.insert(
+            "aabbccdd1111111111111111111111".into(),
+            ImmutablePlan::from_request(
+                Profile::test(),
+                PlanChangeRequest {
+                    table: 0x24,
+                    record: 1,
+                    field: "f".into(),
+                    new_value: "v".into(),
+                    base_bytes: vec![],
+                    new_bytes: vec![1],
+                },
+                Some(TokenId("r".into())),
+            )
+            .expect("plan"),
+        );
+        plans.insert(
+            "aabbccdd2222222222222222222222".into(),
+            ImmutablePlan::from_request(
+                Profile::test(),
+                PlanChangeRequest {
+                    table: 0x24,
+                    record: 2,
+                    field: "f".into(),
+                    new_value: "v".into(),
+                    base_bytes: vec![],
+                    new_bytes: vec![2],
+                },
+                Some(TokenId("r".into())),
+            )
+            .expect("plan"),
+        );
+        assert!(matches!(
+            MockDaemon::resolve_plan_id(&plans, "aabbccdd"),
+            Err(ApiError::AmbiguousPlanPrefix)
+        ));
     }
 }

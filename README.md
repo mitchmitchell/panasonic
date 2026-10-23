@@ -1,3 +1,5 @@
+<img src=".github/assets/readme-banner.png" alt="kx-provision" width="1200" />
+
 # panasonic — kx-provision
 
 Provisioning tool for a Panasonic KX-TD1232 PBX. The production app is Rust; see `docs/prototype.md`
@@ -22,3 +24,13 @@ cargo zigbuild --release --target aarch64-unknown-linux-gnu.2.36 -p kxprov
 ```
 
 All rights reserved; see LICENSE.
+
+## Brand assets
+
+Artisan deliverables land as `/workspace/kxart-*` and are installed with:
+
+```
+./scripts/install-kxart.sh
+```
+
+Web icons and logos are served from `/static/` (see `kxart-README.md` when present for link tags and colors).

@@ -13,8 +13,8 @@ mod token_id;
 mod types;
 
 pub use approval::{
-    approval_ttl, plan_storage_ttl, Approval, ApprovalChallenge, ApprovalId,
-    APPROVAL_SUBMIT_LIMIT_PER_DAY, APPROVAL_SUBMIT_LIMIT_PER_HOUR,
+    approval_ttl, plan_storage_ttl, Approval, ApprovalId, APPROVAL_SUBMIT_LIMIT_PER_DAY,
+    APPROVAL_SUBMIT_LIMIT_PER_HOUR,
 };
 pub use backend::DaemonBackend;
 pub use error::ApiError;

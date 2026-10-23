@@ -1,18 +1,19 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="utf-8">
   <title>kx-provision login</title>
-  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+  {% include "_head.html" %}
 </head>
 <body>
-  <img src="/static/logo.svg" alt="kx-provision" width="120" height="32">
-  <p><strong>{{ banner }}</strong></p>
-  {% if show_error %}<p style="color:darkred">{{ error }}</p>{% endif %}
-  <form method="post" action="/login">
-    <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-    <label>Password <input type="password" name="password" autocomplete="current-password"></label>
-    <button type="submit">Sign in</button>
-  </form>
+  {% include "_header.html" %}
+  <main>
+    <p><strong>{{ banner }}</strong></p>
+    {% if show_error %}<p style="color:darkred">{{ error }}</p>{% endif %}
+    <form method="post" action="/login">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <label>Password <input type="password" name="password" autocomplete="current-password"></label>
+      <button type="submit">Sign in</button>
+    </form>
+  </main>
 </body>
 </html>

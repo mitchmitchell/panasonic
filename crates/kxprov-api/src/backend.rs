@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 
-use crate::approval::{Approval, ApprovalChallenge};
+use crate::approval::Approval;
 use crate::error::ApiError;
 use crate::identity::CallerIdentity;
 use crate::plan::{DiffHash, PlanId};
@@ -31,13 +31,11 @@ pub trait DaemonBackend: Send + Sync {
         req: PlanChangeRequest,
     ) -> Result<PlanSummary, ApiError>;
 
-    /// MCP `submit_approval` (approve scope): records approval after challenge verification (F1).
+    /// MCP `submit_approval` (approve scope): full plan id or 8-hex prefix (F1 v2.7).
     async fn submit_approval(
         &self,
         caller: &CallerIdentity,
-        plan_id: PlanId,
-        diff_hash: DiffHash,
-        challenge: ApprovalChallenge,
+        plan_id_or_prefix: &str,
     ) -> Result<Approval, ApiError>;
 
     /// Consumes a live approval for `(plan_id, diff_hash, profile)` or returns `approval_required`.

@@ -2,8 +2,8 @@ use std::borrow::Cow;
 use std::sync::Arc;
 
 use kxprov_api::{
-    ApiError, ApprovalChallenge, CallerIdentity, DaemonBackend, DiffHash, JobId, PlanChangeRequest,
-    PlanId, ReadFieldsRequest,
+    ApiError, CallerIdentity, DaemonBackend, DiffHash, JobId, PlanChangeRequest, PlanId,
+    ReadFieldsRequest,
 };
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
@@ -70,8 +70,6 @@ struct ApplyPlanParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 struct SubmitApprovalParams {
     plan_id: String,
-    diff_hash: String,
-    challenge: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -159,15 +157,12 @@ impl KxMcpServer {
             Err(ApiError::ApprovalRequired {
                 plan_id,
                 diff_hash,
-                summary,
-                challenge,
+                status,
             }) => Ok(CallToolResult::success(vec![ContentBlock::text(
                 serde_json::json!({
-                    "error": "approval_required",
                     "plan_id": plan_id.to_hex(),
                     "diff_hash": diff_hash.to_hex(),
-                    "summary": summary,
-                    "challenge": challenge.0,
+                    "status": status,
                 })
                 .to_string(),
             )])),
@@ -175,24 +170,15 @@ impl KxMcpServer {
         }
     }
 
-    #[tool(
-        description = "Submit approval for a plan (approve scope; approver must differ from requester)"
-    )]
+    #[tool(description = "Submit approval for a plan (approve scope; full id or 8-hex prefix)")]
     async fn submit_approval(
         &self,
         Parameters(params): Parameters<SubmitApprovalParams>,
     ) -> Result<CallToolResult, ErrorData> {
         let caller = Self::caller()?;
-        let plan_id = PlanId::from_hex(&params.plan_id).map_err(api_err)?;
-        let diff_hash = DiffHash::from_hex(&params.diff_hash).map_err(api_err)?;
         let approval = self
             .backend
-            .submit_approval(
-                &caller,
-                plan_id,
-                diff_hash,
-                ApprovalChallenge(params.challenge),
-            )
+            .submit_approval(&caller, &params.plan_id)
             .await
             .map_err(api_err)?;
         Ok(text_json(approval))

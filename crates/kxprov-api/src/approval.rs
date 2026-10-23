@@ -1,4 +1,3 @@
-use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
@@ -19,18 +18,6 @@ impl Default for ApprovalId {
 impl ApprovalId {
     pub fn new() -> Self {
         Self(Uuid::new_v4().to_string())
-    }
-}
-
-/// Opaque challenge returned with `approval_required`; approver echoes it in `submit_approval`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ApprovalChallenge(pub String);
-
-impl ApprovalChallenge {
-    pub fn fresh() -> Self {
-        let mut bytes = [0u8; 32];
-        rand::thread_rng().fill_bytes(&mut bytes);
-        Self(hex::encode(bytes))
     }
 }
 

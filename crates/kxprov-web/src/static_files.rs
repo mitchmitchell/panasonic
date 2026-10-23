@@ -37,6 +37,14 @@ fn asset(path: &str) -> Option<Asset> {
             bytes: include_bytes!("../assets/logo-dark.svg"),
             content_type: "image/svg+xml",
         },
+        "logo-badge.svg" => Asset {
+            bytes: include_bytes!("../assets/logo-badge.svg"),
+            content_type: "image/svg+xml",
+        },
+        "site.css" => Asset {
+            bytes: include_bytes!("../assets/site.css"),
+            content_type: "text/css; charset=utf-8",
+        },
         _ => return None,
     })
 }

@@ -1,4 +1,3 @@
-use crate::approval::ApprovalChallenge;
 use crate::plan::{DiffHash, PlanId};
 
 use thiserror::Error;
@@ -15,8 +14,7 @@ pub enum ApiError {
     ApprovalRequired {
         plan_id: PlanId,
         diff_hash: DiffHash,
-        summary: String,
-        challenge: ApprovalChallenge,
+        status: &'static str,
     },
     #[error("rollback approval required")]
     RollbackApprovalRequired { job_id: String },
@@ -28,6 +26,8 @@ pub enum ApiError {
     ApprovalRateLimited,
     #[error("invalid scope combination")]
     InvalidScopeSet,
+    #[error("ambiguous plan id prefix")]
+    AmbiguousPlanPrefix,
     #[error("plan not found")]
     PlanNotFound,
     #[error("plan or approval window expired")]
