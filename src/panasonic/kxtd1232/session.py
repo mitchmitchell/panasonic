@@ -70,7 +70,7 @@ class Login:
             out += self._line(line.strip(b"\r\x00 ").decode("ascii", "replace"))
         if self.state is State.BINARY:
             self.leftover, self._buf = self._buf, b""
-        elif self.state is not State.FAILED and len(self._buf) > MAX_LINE:
+        elif self.state is not State.FAILED and len(self._buf.removesuffix(b"\r")) > MAX_LINE:
             self._fail(f"text line longer than {MAX_LINE} bytes")
         return out
 

@@ -50,3 +50,48 @@ def test_max_length_line_with_crlf_is_accepted():
     s = Login("0000")
     s.feed(bytes([XON]) + b"A" * MAX_LINE + b"\r\n")
     assert s.state is not State.FAILED
+
+
+def _signed_on():
+    from panasonic.kxtd1232.session import XON, Login
+
+    s = Login("0000")
+    s.feed(bytes([XON]))
+    return s
+
+
+def test_max_line_cr_and_lf_in_separate_reads_is_accepted():
+    from panasonic.kxtd1232.session import MAX_LINE, State
+
+    s = _signed_on()
+    s.feed(b"A" * MAX_LINE + b"\r")
+    s.feed(b"\n")
+    assert s.state is not State.FAILED
+
+
+def test_max_line_lone_cr_then_lf_later_is_accepted():
+    from panasonic.kxtd1232.session import MAX_LINE, State
+
+    s = _signed_on()
+    s.feed(b"A" * MAX_LINE)
+    s.feed(b"\r")
+    assert s.state is not State.FAILED
+    s.feed(b"\n")
+    assert s.state is not State.FAILED
+
+
+def test_max_line_crlf_fed_byte_by_byte_is_accepted():
+    from panasonic.kxtd1232.session import MAX_LINE, State
+
+    s = _signed_on()
+    for b in b"A" * MAX_LINE + b"\r\n":
+        s.feed(bytes([b]))
+        assert s.state is not State.FAILED
+
+
+def test_line_over_max_with_crlf_is_rejected():
+    from panasonic.kxtd1232.session import MAX_LINE, State
+
+    s = _signed_on()
+    s.feed(b"A" * (MAX_LINE + 1) + b"\r\n")
+    assert s.state is State.FAILED and "longer than" in (s.failure or "")
