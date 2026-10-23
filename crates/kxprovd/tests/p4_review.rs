@@ -255,8 +255,6 @@ async fn synthetic_root_read_during_token_store_outage() {
     let tmp = tempfile::tempdir().unwrap();
     let uid = nix::unistd::getuid().as_raw();
     let (_d, sock) = init_test_daemon(&tmp, uid, Profile::Sim);
-    tokio::time::sleep(Duration::from_millis(50)).await;
-
     let path = tmp.path().join("tokens.json");
     std::fs::write(&path, b"{ corrupt").unwrap();
 
@@ -274,7 +272,33 @@ async fn synthetic_root_read_during_token_store_outage() {
         )
         .await
         .expect("bearer may use grace snapshot during reload window");
-    tokio::time::sleep(Duration::from_millis(2100)).await;
+
+    let outage_deadline =
+        tokio::time::Instant::now() + Duration::from_secs(2) + Duration::from_millis(500);
+    loop {
+        let err = admin
+            .call_auth(
+                RequestBody::PlanChange {
+                    params: PlanChangeParams {
+                        kind: FieldKindWire::CidName,
+                        index: 0,
+                        value: "Z".into(),
+                    },
+                },
+                Some(bearer_auth(WRITER_SECRET)),
+            )
+            .await;
+        if let Err(e) = err {
+            if e.to_string().contains("token store unavailable") {
+                break;
+            }
+        }
+        assert!(
+            tokio::time::Instant::now() < outage_deadline,
+            "bearer auth did not fail closed after reload grace"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
 
     let err = admin
         .call_auth(

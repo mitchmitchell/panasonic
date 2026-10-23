@@ -129,11 +129,11 @@ impl ModeStore {
                 self.fail_closed_profile_rollback(body.counter, last);
                 Profile::Prod
             }
-            Some(body) if self.later_epoch_on_other_profile(body.profile, body.counter) => {
+            Some(body) if self.snapshot_below_highest_epoch(body.counter) => {
                 self.fail_closed(
                     AuditKind::ModeCounterRollback,
                     format!(
-                        "profile.json counter {} stale after switch to another profile epoch",
+                        "profile.json counter {} below highest epoch ever written",
                         body.counter
                     ),
                 );
@@ -169,27 +169,11 @@ impl ModeStore {
         Some(body.counter)
     }
 
-    /// Non-zero only when on-disk mode/profile files claim an epoch for `profile`.
-    fn cross_profile_epoch_peers(&self) -> &'static [Profile] {
-        match self.boot_profile {
-            Profile::Sim | Profile::Test => &[Profile::Sim, Profile::Test],
-            Profile::Prod => &[],
+    fn snapshot_below_highest_epoch(&self, counter: u64) -> bool {
+        match epoch_store::read_highest_epoch(&self.provision_root) {
+            Ok(highest) => highest > 0 && counter < highest,
+            Err(_) => false,
         }
-    }
-
-    fn later_epoch_on_other_profile(&self, profile: Profile, counter: u64) -> bool {
-        for &other in self.cross_profile_epoch_peers() {
-            if other == profile {
-                continue;
-            }
-            let Ok(epoch) = epoch_store::read_counter(&self.provision_root, other) else {
-                continue;
-            };
-            if epoch.is_some_and(|n| n > counter) {
-                return true;
-            }
-        }
-        false
     }
 
     fn stored_epoch_claim_for_profile(&self, profile: Profile) -> u64 {
@@ -271,11 +255,11 @@ impl ModeStore {
                 format!("mode.json counter {} < epoch {last}", body.counter),
             );
         }
-        if self.later_epoch_on_other_profile(profile, body.counter) {
+        if self.snapshot_below_highest_epoch(body.counter) {
             return self.fail_closed(
                 AuditKind::ModeCounterRollback,
                 format!(
-                    "mode.json counter {} stale after switch to another profile epoch",
+                    "mode.json counter {} below highest epoch ever written",
                     body.counter
                 ),
             );
@@ -477,6 +461,51 @@ mod tests {
         assert_eq!(restarted.load_profile(), Profile::Prod);
         assert_eq!(
             restarted.effective(Profile::Test).operational,
+            OperationalMode::Production
+        );
+    }
+
+    #[test]
+    fn test_daemon_restart_stays_test_when_sim_epoch_counter_higher() {
+        use crate::config::profile_epoch_counter_path;
+        let root = tempfile::tempdir().unwrap();
+        let data = root.path().join("test");
+        std::fs::create_dir_all(&data).unwrap();
+        let store = ModeStore::new_with_epoch_root(&data, root.path(), Profile::Test);
+        store
+            .set_operational(OperationalMode::Testing, Profile::Test, true)
+            .unwrap();
+        std::fs::write(
+            profile_epoch_counter_path(root.path(), Profile::Sim),
+            b"99\n",
+        )
+        .unwrap();
+        let restarted = ModeStore::new_with_epoch_root(&data, root.path(), Profile::Test);
+        assert_eq!(restarted.load_profile(), Profile::Test);
+        assert_eq!(
+            restarted.effective(Profile::Test).operational,
+            OperationalMode::Testing
+        );
+        let sim_path = profile_epoch_counter_path(root.path(), Profile::Sim);
+        assert!(sim_path.exists());
+    }
+
+    #[test]
+    fn test_to_sim_in_production_restart_stays_sim() {
+        let root = tempfile::tempdir().unwrap();
+        let data = root.path().join("test");
+        std::fs::create_dir_all(&data).unwrap();
+        let store = ModeStore::new_with_epoch_root(&data, root.path(), Profile::Test);
+        store
+            .set_operational(OperationalMode::Testing, Profile::Test, true)
+            .unwrap();
+        store
+            .set_operational(OperationalMode::Production, Profile::Sim, true)
+            .unwrap();
+        let restarted = ModeStore::new_with_epoch_root(&data, root.path(), Profile::Test);
+        assert_eq!(restarted.load_profile(), Profile::Sim);
+        assert_eq!(
+            restarted.effective(Profile::Sim).operational,
             OperationalMode::Production
         );
     }
