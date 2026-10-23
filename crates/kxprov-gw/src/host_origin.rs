@@ -46,5 +46,5 @@ pub async fn host_origin_middleware(
 }
 
 pub fn security_headers() -> HeaderValue {
-    HeaderValue::from_static("default-src 'self'; frame-ancestors 'none'")
+    HeaderValue::from_static("default-src 'self'; frame-ancestors 'none'; script-src 'self'")
 }

@@ -6,9 +6,7 @@
 </head>
 <body>
   <h1>kx-provision <small>(SIM)</small></h1>
-  {% if show_status %}
-  <p>Profile: {{ profile }} · Locked: {{ locked }} · Queue: {{ queue_depth }}</p>
-  {% endif %}
+  {% if show_status %}<p>Profile: {{ profile }} · Locked: {{ locked }} · Queue: {{ queue_depth }}</p>{% endif %}
   <form method="post" action="/logout">
     <input type="hidden" name="_csrf" value="{{ csrf_token }}">
     <button type="submit">Sign out</button>

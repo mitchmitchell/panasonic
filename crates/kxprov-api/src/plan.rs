@@ -1,6 +1,7 @@
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use time::OffsetDateTime;
 
 use crate::error::ApiError;
 use crate::profile::Profile;
@@ -57,8 +58,6 @@ impl DiffHash {
         }
         let mut out = [0u8; 32];
         out.copy_from_slice(&bytes);
-        let mut out = [0u8; 32];
-        out.copy_from_slice(&bytes);
         Ok(DiffHash(out))
     }
 }
@@ -98,6 +97,7 @@ pub struct ImmutablePlan {
     pub profile: Profile,
     pub request: PlanChangeRequest,
     pub creator_token: Option<crate::token_id::TokenId>,
+    pub stored_at: OffsetDateTime,
 }
 
 impl ImmutablePlan {
@@ -114,6 +114,11 @@ impl ImmutablePlan {
             profile,
             request,
             creator_token,
+            stored_at: OffsetDateTime::now_utc(),
         })
+    }
+
+    pub fn is_expired(&self, ttl: time::Duration) -> bool {
+        OffsetDateTime::now_utc() > self.stored_at + ttl
     }
 }

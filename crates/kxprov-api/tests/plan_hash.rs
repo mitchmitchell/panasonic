@@ -1,6 +1,4 @@
-use kxprov_api::{
-    canonical_plan_bytes, DiffHash, PlanChangeRequest, Profile,
-};
+use kxprov_api::{canonical_plan_bytes, DiffHash, PlanChangeRequest, Profile};
 
 #[test]
 fn diff_hash_is_stable_for_canonical_bytes() {

@@ -118,11 +118,38 @@ impl MockDaemon {
         }
         Ok(())
     }
+
+    /// Test helper: backdate a stored plan so the approval window appears expired.
+    pub async fn test_backdate_plan(&self, plan_id: PlanId, by: time::Duration) {
+        let mut inner = self.inner.write().await;
+        if let Some(plan) = inner.plans.get_mut(&Self::plan_key(&plan_id)) {
+            plan.stored_at -= by;
+        }
+    }
 }
 
 impl Default for MockDaemon {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+fn plan_summary_from(
+    plan_id: &PlanId,
+    diff_hash: &DiffHash,
+    summary_text: &str,
+    requested_by: &Option<RequestedBy>,
+    plan: &ImmutablePlan,
+) -> PlanSummary {
+    let expires_at = (plan.stored_at + plan_storage_ttl())
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_else(|_| "unknown".into());
+    PlanSummary {
+        plan_id: *plan_id,
+        diff_hash: diff_hash.clone(),
+        summary: summary_text.to_string(),
+        expires_at,
+        requested_by: requested_by.clone(),
     }
 }
 
@@ -196,20 +223,44 @@ impl DaemonBackend for MockDaemon {
             },
             token_id: id.clone(),
         });
-        let expires_at = (OffsetDateTime::now_utc() + plan_storage_ttl())
-            .format(&time::format_description::well_known::Rfc3339)
-            .unwrap_or_else(|_| "unknown".into());
         let plan_id = plan.id;
         let diff_hash = plan.diff_hash.clone();
+        let summary = plan_summary_from(&plan_id, &diff_hash, &summary_text, &requested_by, &plan);
         let mut inner = self.inner.write().await;
         inner.plans.insert(Self::plan_key(&plan_id), plan);
-        Ok(PlanSummary {
-            plan_id,
-            diff_hash,
-            summary: summary_text,
-            expires_at,
-            requested_by,
-        })
+        Ok(summary)
+    }
+
+    async fn get_plan(
+        &self,
+        caller: &CallerIdentity,
+        plan_id: PlanId,
+        diff_hash: DiffHash,
+    ) -> Result<PlanSummary, ApiError> {
+        Self::require_admin(caller)?;
+        let inner = self.inner.read().await;
+        let plan = inner
+            .plans
+            .get(&Self::plan_key(&plan_id))
+            .ok_or(ApiError::PlanNotFound)?;
+        if plan.diff_hash != diff_hash {
+            return Err(ApiError::InvalidApproval);
+        }
+        if plan.is_expired(plan_storage_ttl()) {
+            return Err(ApiError::PlanExpired);
+        }
+        let summary_text = format!("{} → {}", plan.request.field, plan.request.new_value);
+        let requested_by = plan.creator_token.as_ref().map(|id| RequestedBy {
+            agent: "agent".into(),
+            token_id: id.clone(),
+        });
+        Ok(plan_summary_from(
+            &plan_id,
+            &diff_hash,
+            &summary_text,
+            &requested_by,
+            plan,
+        ))
     }
 
     async fn mint_plan_approval(
@@ -230,6 +281,9 @@ impl DaemonBackend for MockDaemon {
             .ok_or(ApiError::PlanNotFound)?;
         if plan.diff_hash != diff_hash {
             return Err(ApiError::InvalidApproval);
+        }
+        if plan.is_expired(plan_storage_ttl()) {
+            return Err(ApiError::PlanExpired);
         }
         let approval = Approval::new(plan_id, diff_hash, inner.profile.clone());
         inner.plan_approvals.insert(

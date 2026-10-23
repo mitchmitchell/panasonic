@@ -7,6 +7,7 @@ pub struct LoginTemplate {
     pub show_error: bool,
     pub error: String,
     pub csrf_token: String,
+    pub next_path: String,
 }
 
 #[derive(Template)]
@@ -24,3 +25,19 @@ pub struct DashboardTemplate {
     pub message: String,
     pub csrf_token: String,
 }
+
+#[derive(Template)]
+#[template(path = "approve.html")]
+pub struct ApproveTemplate {
+    pub plan_id_hex: String,
+    pub diff_hash_hex: String,
+    pub plan_summary: String,
+    pub show_requested_by: bool,
+    pub requested_by_agent: String,
+    pub requested_by_token: String,
+    pub csrf_token: String,
+}
+
+#[derive(Template)]
+#[template(path = "approval_expired.html")]
+pub struct ApprovalExpiredTemplate {}

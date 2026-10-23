@@ -31,6 +31,14 @@ pub trait DaemonBackend: Send + Sync {
         req: PlanChangeRequest,
     ) -> Result<PlanSummary, ApiError>;
 
+    /// Load an immutable plan for the approval UI (admin only).
+    async fn get_plan(
+        &self,
+        caller: &CallerIdentity,
+        plan_id: PlanId,
+        diff_hash: DiffHash,
+    ) -> Result<PlanSummary, ApiError>;
+
     /// Admin re-auth proof forwarded by the gateway; only the daemon mints approvals (F2).
     async fn mint_plan_approval(
         &self,

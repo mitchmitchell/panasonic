@@ -25,6 +25,8 @@ pub enum ApiError {
     InvalidApproval,
     #[error("plan not found")]
     PlanNotFound,
+    #[error("plan or approval window expired")]
+    PlanExpired,
     #[error("live writes not approved")]
     LiveWritesBlocked,
     #[error("job not found")]
