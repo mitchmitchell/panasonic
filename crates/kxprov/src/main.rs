@@ -7,6 +7,7 @@
 
 use clap::{Parser, Subcommand, ValueEnum};
 use kxprov_api::{OperationalMode, Profile, SetModeParams};
+use kxprov_api::{DAEMON_SOCKET, DATA_DIR, TOKENS_JSON};
 use kxtd1232::error::NotAllowed;
 use kxtd1232::{build_plan, field_patch, Client, Error, FieldKind, Granularity};
 use kxtd1232_sim::{SimPbx, SimTransport, PLACEHOLDER_PASSWORD};
@@ -24,7 +25,7 @@ struct Cli {
     #[arg(long, value_enum, default_value_t = TransportKind::Sim)]
     transport: TransportKind,
     /// Daemon Unix socket (admin commands only).
-    #[arg(long, default_value = "/run/kx-provision/kxprovd.sock")]
+    #[arg(long, default_value = DAEMON_SOCKET)]
     socket: std::path::PathBuf,
     #[command(subcommand)]
     cmd: Command,
@@ -84,7 +85,7 @@ enum TokenCommand {
     Rotate {
         #[arg(long)]
         id: String,
-        #[arg(long, default_value = "/var/lib/kxprov/tokens.json")]
+        #[arg(long, default_value = TOKENS_JSON)]
         tokens_path: PathBuf,
     },
 }
@@ -103,12 +104,12 @@ enum ModeCommand {
 enum SimMarkCommand {
     /// Run simulator crate tests and write sim-mark.json on success.
     Write {
-        #[arg(long, default_value = "/var/lib/kx-provision")]
+        #[arg(long, default_value = DATA_DIR)]
         data_dir: PathBuf,
     },
     /// Show whether the current build hash is marked.
     Status {
-        #[arg(long, default_value = "/var/lib/kx-provision")]
+        #[arg(long, default_value = DATA_DIR)]
         data_dir: PathBuf,
     },
 }

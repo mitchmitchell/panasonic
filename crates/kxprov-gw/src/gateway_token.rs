@@ -81,7 +81,7 @@ fn validate_gateway_scopes(whoami: &kxprov_api::WhoamiResult) -> Result<(), Gate
 
 pub fn default_paths() -> (PathBuf, PathBuf) {
     (
-        PathBuf::from("/var/lib/kxprov/tokens.json"),
+        PathBuf::from(kxprov_api::TOKENS_JSON),
         PathBuf::from("/etc/kx-provision/secrets/gateway-daemon.bearer"),
     )
 }

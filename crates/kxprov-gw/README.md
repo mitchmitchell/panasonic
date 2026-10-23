@@ -23,4 +23,4 @@ If `lan_ip` is unset and `--bind` / `bind` is not overriding addresses, the gate
 
 Override all HTTPS bind addresses (for example in tests): `--bind 127.0.0.1:8443` or config key `bind`.
 
-Other useful environment variables: `KXPROV_CONFIG`, `KXPROV_BIND`, `KXPROV_MCP_TOKENS`, `KXPROV_DAEMON_SOCKET` (default `/run/kx-provision/kxprovd.sock`).
+Other useful environment variables: `KXPROV_CONFIG`, `KXPROV_BIND`, `KXPROV_MCP_TOKENS`, `KXPROV_DAEMON_SOCKET` (default `/run/kx-provision/kxprovd.sock`), `KXPROV_DAEMON_TOKENS` (default `/var/lib/kx-provision/tokens.json`).

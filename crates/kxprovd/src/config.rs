@@ -1,6 +1,7 @@
 use crate::gates::GateConfig;
 use crate::peer::PeerPolicy;
 use kxprov_api::Profile;
+use kxprov_api::{DAEMON_ETC_CONFIG, DAEMON_SOCKET, DATA_DIR, GOLIATH_DIR, TOKENS_JSON};
 use kxtd1232::{Timing, TimingConfigError};
 use kxtd1232_sim::SimPbx;
 use serde::Deserialize;
@@ -8,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use thiserror::Error;
 
-pub const ETC_CONFIG: &str = "/etc/kxprov/kxprovd.json";
+pub const ETC_CONFIG: &str = DAEMON_ETC_CONFIG;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TransportKind {
@@ -38,6 +39,7 @@ pub struct Config {
 
 #[derive(Debug, Deserialize)]
 struct EtcConfigFile {
+    #[serde(default = "default_data_dir")]
     data_dir: PathBuf,
     #[serde(default = "default_socket")]
     socket_path: PathBuf,
@@ -76,15 +78,37 @@ enum TransportKindWire {
 }
 
 fn default_socket() -> PathBuf {
-    PathBuf::from("/var/lib/kxprov/kxprovd.sock")
+    PathBuf::from(DAEMON_SOCKET)
+}
+
+fn default_data_dir() -> PathBuf {
+    PathBuf::from(DATA_DIR)
 }
 
 fn default_tokens_path() -> PathBuf {
-    PathBuf::from("/var/lib/kxprov/tokens.json")
+    PathBuf::from(TOKENS_JSON)
 }
 
 fn default_goliath() -> PathBuf {
-    PathBuf::from("/var/lib/kxprov/goliath")
+    PathBuf::from(GOLIATH_DIR)
+}
+
+/// Production path defaults (serde defaults and package layout).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProductionPathDefaults {
+    pub socket_path: PathBuf,
+    pub data_dir: PathBuf,
+    pub tokens_path: PathBuf,
+    pub goliath_target: PathBuf,
+}
+
+pub fn production_path_defaults() -> ProductionPathDefaults {
+    ProductionPathDefaults {
+        socket_path: default_socket(),
+        data_dir: default_data_dir(),
+        tokens_path: default_tokens_path(),
+        goliath_target: default_goliath(),
+    }
 }
 
 fn default_serial() -> PathBuf {

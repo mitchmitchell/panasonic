@@ -1,6 +1,7 @@
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 
+use kxprov_api::{DAEMON_SOCKET, TOKENS_JSON};
 use serde::Deserialize;
 
 /// Rejects unspecified addresses (`0.0.0.0` / `::`). Used in unit tests for the error text.
@@ -80,10 +81,10 @@ impl Default for GatewayConfig {
             mcp_tailnet_bind: "127.0.0.1:8081".into(),
             mcp_public_bind: "127.0.0.1:8444".into(),
             mcp_tokens_path: "/etc/kx-provision/secrets/mcp-tokens.toml".into(),
-            daemon_tokens_path: "/var/lib/kxprov/tokens.json".into(),
+            daemon_tokens_path: TOKENS_JSON.into(),
             gateway_bearer_path: "/etc/kx-provision/secrets/gateway-daemon.bearer".into(),
             admin_password_path: "/etc/kx-provision/secrets/admin-password.hash".into(),
-            daemon_socket_path: "/run/kx-provision/kxprovd.sock".into(),
+            daemon_socket_path: DAEMON_SOCKET.into(),
             tls_cert_path: "/etc/kx-provision/tls/lan.crt".into(),
             tls_key_path: "/etc/kx-provision/tls/lan.key".into(),
             session_ttl_secs: 900,

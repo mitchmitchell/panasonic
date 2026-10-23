@@ -5,6 +5,7 @@
 
 mod client;
 mod ids;
+mod paths;
 mod plan_hash;
 mod protocol;
 mod surface;
@@ -13,6 +14,7 @@ mod types;
 
 pub use client::{ApiClient, ApiError};
 pub use ids::{Approval, DiffHash, PlanId, Profile, TokenId};
+pub use paths::{DAEMON_ETC_CONFIG, DAEMON_SOCKET, DATA_DIR, GOLIATH_DIR, TOKENS_JSON};
 pub use plan_hash::{diff_hash, CanonicalPlan, CanonicalWrite};
 pub use protocol::*;
 pub use surface::*;
