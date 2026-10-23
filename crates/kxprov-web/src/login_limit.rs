@@ -4,10 +4,18 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::Mutex;
 
+const MAX_ACCOUNT_WAITERS: u32 = 2;
+const MAX_ACCOUNT_QUEUE_WAIT: Duration = Duration::from_secs(2);
+const MAX_SOFT_PACE: Duration = Duration::from_secs(2);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LoginGateError {
     /// Hard 429 + Retry-After: this IP (or peer|xff bucket) has failure backoff.
     IpRateLimited(Duration),
+    /// Too many concurrent login attempts queued for this account (not an auth failure).
+    AccountQueueFull,
+    /// Waited too long for the account verify slot (not an auth failure).
+    AccountQueueTimeout,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -22,7 +30,8 @@ pub struct LoginRateLimiter {
     max_account_backoff: Duration,
     max_ip_backoff: Duration,
     by_key: Arc<Mutex<HashMap<String, Entry>>>,
-    account_serial: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
+    account_verify: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
+    account_waiters: Arc<Mutex<HashMap<String, u32>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -42,7 +51,8 @@ impl LoginRateLimiter {
             max_account_backoff,
             max_ip_backoff,
             by_key: Arc::new(Mutex::new(HashMap::new())),
-            account_serial: Arc::new(Mutex::new(HashMap::new())),
+            account_verify: Arc::new(Mutex::new(HashMap::new())),
+            account_waiters: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -55,7 +65,7 @@ impl LoginRateLimiter {
         LoginPrecheck::Ready
     }
 
-    /// Serializes login attempts per account: reserves soft pacing before sleeping, then runs `attempt`.
+    /// Serializes login attempts per account with bounded waiters and max wait.
     pub async fn enter_account_login<T, F, Fut>(
         &self,
         account_key: &str,
@@ -70,25 +80,51 @@ impl LoginRateLimiter {
         if ip_delay > Duration::ZERO {
             return Err(LoginGateError::IpRateLimited(ip_delay));
         }
-        let serial = self.account_serial_gate(account_key).await;
-        let _guard = serial.lock().await;
+        let ip_clean = !self.key_has_failure_history(ip_key).await;
+        let bypass_waiter_cap = ip_clean;
+        let verify = self.account_verify_lock(account_key).await;
+
+        if !bypass_waiter_cap {
+            let mut waiters = self.account_waiters.lock().await;
+            let n = waiters.entry(account_key.to_string()).or_insert(0);
+            if *n >= MAX_ACCOUNT_WAITERS {
+                return Err(LoginGateError::AccountQueueFull);
+            }
+            *n += 1;
+        }
+
+        let lock_result = tokio::time::timeout(MAX_ACCOUNT_QUEUE_WAIT, verify.lock()).await;
+
+        if !bypass_waiter_cap {
+            let mut waiters = self.account_waiters.lock().await;
+            if let Some(n) = waiters.get_mut(account_key) {
+                *n = n.saturating_sub(1);
+                if *n == 0 {
+                    waiters.remove(account_key);
+                }
+            }
+        }
+
+        let _verify_guard = match lock_result {
+            Err(_) => return Err(LoginGateError::AccountQueueTimeout),
+            Ok(guard) => guard,
+        };
+
         let soft = self.reserve_account_soft_delay(account_key).await;
         if soft > Duration::ZERO {
-            tokio::time::sleep(soft).await;
+            tokio::time::sleep(soft.min(MAX_SOFT_PACE)).await;
         }
         Ok(attempt().await)
     }
 
-    async fn account_serial_gate(&self, account_key: &str) -> Arc<Mutex<()>> {
-        let mut map = self.account_serial.lock().await;
+    async fn account_verify_lock(&self, account_key: &str) -> Arc<Mutex<()>> {
+        let mut map = self.account_verify.lock().await;
         map.entry(account_key.to_string())
             .or_insert_with(|| Arc::new(Mutex::new(())))
             .clone()
     }
 
-    /// Atomically reserve the next soft pacing slot for this account (max 2s sleep).
     async fn reserve_account_soft_delay(&self, account_key: &str) -> Duration {
-        const MAX_SOFT: Duration = Duration::from_secs(2);
         const SLOT_TAIL: Duration = Duration::from_millis(1);
         let mut map = self.by_key.lock().await;
         let now = Instant::now();
@@ -98,11 +134,10 @@ impl LoginRateLimiter {
         });
         let scheduled = now.max(entry.next_allowed);
         let mut wait = scheduled.saturating_duration_since(now);
-        if wait > MAX_SOFT {
-            wait = MAX_SOFT;
+        if wait > MAX_SOFT_PACE {
+            wait = MAX_SOFT_PACE;
         }
-        let release = scheduled + wait + SLOT_TAIL;
-        entry.next_allowed = release;
+        entry.next_allowed = scheduled + wait + SLOT_TAIL;
         wait
     }
 
@@ -122,6 +157,11 @@ impl LoginRateLimiter {
         };
         let map = self.by_key.lock().await;
         wait_for_key(map.get(key), Instant::now(), cap)
+    }
+
+    async fn key_has_failure_history(&self, key: &str) -> bool {
+        let map = self.by_key.lock().await;
+        map.get(key).is_some_and(|entry| entry.failures > 0)
     }
 
     pub async fn record_failure(&self, account_key: &str, ip_key: &str) {
@@ -261,6 +301,80 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn excess_concurrent_waiters_rejected_without_account_failure() {
+        let limiter = Arc::new(LoginRateLimiter::new(
+            Duration::from_millis(200),
+            Duration::from_secs(30),
+            Duration::from_secs(300),
+        ));
+        limiter.record_failure("acct:admin", "ip:dirty").await;
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        let barrier = Arc::new(tokio::sync::Barrier::new(4));
+        let mut handles = Vec::new();
+        for _ in 0..4 {
+            let limiter = Arc::clone(&limiter);
+            let barrier = Arc::clone(&barrier);
+            handles.push(tokio::spawn(async move {
+                barrier.wait().await;
+                limiter
+                    .enter_account_login("acct:admin", "ip:dirty", || async {
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                    })
+                    .await
+            }));
+        }
+        let mut full = 0;
+        for h in handles {
+            match h.await.unwrap() {
+                Err(LoginGateError::AccountQueueFull)
+                | Err(LoginGateError::AccountQueueTimeout) => {
+                    full += 1;
+                }
+                Ok(()) => {}
+                Err(_) => {}
+            }
+        }
+        assert!(full >= 1, "expected at least one immediate queue rejection");
+    }
+
+    #[tokio::test]
+    async fn clean_admin_login_under_ten_concurrent_attackers_completes_within_three_seconds() {
+        let limiter = Arc::new(LoginRateLimiter::new(
+            Duration::from_millis(150),
+            Duration::from_secs(30),
+            Duration::from_secs(300),
+        ));
+        limiter.record_failure("acct:admin", "ip:attacker").await;
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        let n_attackers = 10;
+        let barrier = Arc::new(tokio::sync::Barrier::new(n_attackers + 1));
+        for _ in 0..n_attackers {
+            let limiter = Arc::clone(&limiter);
+            let barrier = Arc::clone(&barrier);
+            tokio::spawn(async move {
+                barrier.wait().await;
+                let _ = limiter
+                    .enter_account_login("acct:admin", "ip:attacker", || async {
+                        tokio::time::sleep(Duration::from_millis(80)).await;
+                        "bad"
+                    })
+                    .await;
+            });
+        }
+        let started = Instant::now();
+        barrier.wait().await;
+        limiter
+            .enter_account_login("acct:admin", "ip:admin-clean", || async { "ok" })
+            .await
+            .expect("admin login succeeds");
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "admin waited {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[tokio::test]
     async fn parallel_login_attempts_serialize_account_pacing() {
         let limiter = Arc::new(LoginRateLimiter::new(
             Duration::from_millis(80),
@@ -268,7 +382,7 @@ mod tests {
             Duration::from_secs(300),
         ));
         limiter.record_failure("acct:admin", "ip:attacker").await;
-        let n = 5;
+        let n = 3;
         let barrier = Arc::new(tokio::sync::Barrier::new(n));
         let order = Arc::new(AtomicU32::new(0));
         let mut handles = Vec::new();

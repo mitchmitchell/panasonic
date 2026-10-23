@@ -1,4 +1,17 @@
 #[test]
+fn gateway_server_wires_tailnet_serve_peer_from_config() {
+    let server_rs = include_str!("../src/server.rs");
+    assert!(
+        server_rs.contains("tailnet_serve_trust"),
+        "production startup must build ServeTrustConfig from gateway config"
+    );
+    assert!(
+        server_rs.contains("install_tailnet_serve_trust") && server_rs.contains("TailnetConnect"),
+        "tailnet listener must inject WebConnectInfo via SO_PEERCRED Connected type"
+    );
+}
+
+#[test]
 fn production_binary_uses_daemon_client_not_mock() {
     let main_rs = include_str!("../src/main.rs");
     assert!(
@@ -23,6 +36,10 @@ fn run_a4_script_starts_real_kxprovd_and_gateway() {
     assert!(
         script.contains("[web_tailnet]") && script.contains("trust_x_forwarded_for = true"),
         "run-a4 must trust XFF only on Serve-fronted tailnet HTTP"
+    );
+    assert!(
+        script.contains("serve_peer_uid"),
+        "run-a4 must wire SO_PEERCRED serve peer uid for tailnet XFF trust"
     );
     assert!(
         !script.contains("[web_https]"),

@@ -75,6 +75,7 @@ tls_key_path = "$tls_dir/lan.key"
 
 [web_tailnet]
 trust_x_forwarded_for = true
+serve_peer_uid = $uid
 TOML
 
 chmod 600 "$data_dir/tokens.json" 2>/dev/null || true

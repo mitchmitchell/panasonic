@@ -80,6 +80,7 @@ subtle.workspace = true
 time.workspace = true
 tokio.workspace = true
 tower.workspace = true
+nix = { version = "0.29", features = ["user", "socket"] }
 tower-http = { workspace = true, features = ["set-header"] }
 tower-sessions.workspace = true
 tracing.workspace = true

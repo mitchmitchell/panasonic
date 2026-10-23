@@ -327,6 +327,11 @@ async fn login_submit(
             "Too many login attempts from this address. Try again later.",
             delay,
         ),
+        Err(LoginGateError::AccountQueueFull | LoginGateError::AccountQueueTimeout) => (
+            StatusCode::TOO_MANY_REQUESTS,
+            "Too many login attempts. Try again shortly.",
+        )
+            .into_response(),
     }
 }
 

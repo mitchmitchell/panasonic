@@ -50,6 +50,8 @@ pub fn ensure_mcp_loopback_bind(field: &str, bind: &str) -> anyhow::Result<()> {
 pub struct WebListenerSettings {
     /// When true, login rate limits use the first `X-Forwarded-For` hop (Tailscale Serve).
     pub trust_x_forwarded_for: bool,
+    /// Linux SO_PEERCRED uid required to trust XFF on loopback (defaults to `tailscale` user).
+    pub serve_peer_uid: Option<u32>,
     /// When non-empty, overrides global `allowed_hosts` for this listener only.
     pub allowed_hosts: Vec<String>,
     /// When non-empty, overrides global `allowed_origins` for this listener only.
@@ -371,6 +373,18 @@ impl GatewayConfig {
         Ok(())
     }
 
+    /// Serve-fronted tailnet HTTP: trust XFF only when SO_PEERCRED matches [`WebListenerSettings::serve_peer_uid`].
+    pub fn tailnet_serve_trust(&self) -> crate::serve_peer::ServeTrustConfig {
+        crate::serve_peer::ServeTrustConfig {
+            trust_x_forwarded_for: self.web_tailnet.trust_x_forwarded_for,
+            expected_peer_uid: self
+                .web_tailnet
+                .serve_peer_uid
+                .or_else(crate::serve_peer::resolve_tailscaled_uid)
+                .unwrap_or(0),
+        }
+    }
+
     pub fn validate_mcp_loopback_binds(&self) -> anyhow::Result<()> {
         ensure_mcp_loopback_bind("mcp_tailnet_bind", &self.mcp_tailnet_bind)?;
         Ok(())
@@ -466,6 +480,7 @@ impl GatewayConfig {
 #[derive(Debug, Deserialize)]
 struct ListenerFileConfig {
     trust_x_forwarded_for: Option<bool>,
+    serve_peer_uid: Option<u32>,
     allowed_hosts: Option<Vec<String>>,
     allowed_origins: Option<Vec<String>>,
 }
@@ -492,6 +507,9 @@ struct FileConfig {
 fn merge_listener_settings(dst: &mut WebListenerSettings, file: ListenerFileConfig) {
     if let Some(v) = file.trust_x_forwarded_for {
         dst.trust_x_forwarded_for = v;
+    }
+    if let Some(v) = file.serve_peer_uid {
+        dst.serve_peer_uid = Some(v);
     }
     if let Some(v) = file.allowed_hosts {
         dst.allowed_hosts = v;

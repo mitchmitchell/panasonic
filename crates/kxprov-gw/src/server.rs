@@ -6,6 +6,7 @@ use std::time::Duration;
 use axum::body::Body;
 use axum::extract::Request;
 use axum::http::{header, HeaderMap, StatusCode};
+use axum::middleware::from_fn;
 use axum::response::{IntoResponse, Response};
 use axum::routing::any;
 use axum::Router;
@@ -25,6 +26,7 @@ use crate::auth::{AdminPassword, McpTokenStore};
 use crate::config::GatewayConfig;
 use crate::host_origin::HostOriginConfig;
 use crate::ratelimit::RateLimiter;
+use crate::serve_peer;
 use crate::web_stack::production_web_router;
 pub struct GatewayHandles {
     pub web_tailnet: SocketAddr,
@@ -80,7 +82,8 @@ pub async fn serve(
         config.session_ttl_secs,
         config.session_absolute_secs,
         rate_limiter.clone(),
-    );
+    )
+    .layer(from_fn(serve_peer::inject_web_connect));
     let web_app_https = production_web_router(
         web_state,
         HostOriginConfig {
@@ -141,13 +144,22 @@ pub async fn serve(
     let tls = load_tls_config(&config.tls_cert_path, &config.tls_key_path).await?;
     let mut bound_web_lan: Option<SocketAddr> = None;
 
+    let tailnet_serve_trust = config.tailnet_serve_trust();
+    if config.web_tailnet.trust_x_forwarded_for {
+        tracing::info!(
+            expected_peer_uid = tailnet_serve_trust.expected_peer_uid,
+            "tailnet login XFF trust requires Serve peer SO_PEERCRED uid"
+        );
+    }
+
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
     let (shutdown_tx_mcp, shutdown_rx_mcp) = oneshot::channel::<()>();
 
+    serve_peer::install_tailnet_serve_trust(tailnet_serve_trust);
     tokio::spawn(async move {
         if let Err(e) = axum::serve(
             web_tailnet_listener,
-            web_app_tailnet.into_make_service_with_connect_info::<SocketAddr>(),
+            web_app_tailnet.into_make_service_with_connect_info::<serve_peer::TailnetConnect>(),
         )
         .with_graceful_shutdown(async {
             let _ = shutdown_rx.await;

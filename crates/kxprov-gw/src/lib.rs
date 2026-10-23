@@ -6,6 +6,7 @@ pub mod host_match;
 pub mod host_origin;
 pub mod post_origin;
 pub mod ratelimit;
+pub mod serve_peer;
 pub mod server;
 pub mod web_stack;
 
