@@ -1,8 +1,7 @@
-//! SO_PEERCRED on Unix sockets (v2.3: daemon enforces identity, never trusts the gateway).
+//! SO_PEERCRED on Unix sockets (v2.3 §5b F2: daemon enforces identity, never trusts gateway).
 
 use kxprov_api::Scope;
 use nix::sys::socket::{getsockopt, sockopt::PeerCredentials};
-use std::collections::HashMap;
 use thiserror::Error;
 use tokio::net::UnixStream;
 
@@ -13,14 +12,28 @@ pub struct PeerCred {
     pub pid: i32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PeerRole {
+    /// Root / admin CLI: mint approvals, unlock, token admin.
+    Admin,
+    /// `kxprov-gw`: forwards token id; daemon re-checks scopes.
+    Gateway,
+    /// Direct read/dry-run only (no token forwarding path).
+    ReadOnly,
+}
+
 #[derive(Debug, Error)]
 pub enum PeerError {
     #[error("peer credentials unavailable: {0}")]
     Nix(#[from] nix::Error),
     #[error("peer uid {uid} is not configured")]
     UnknownPeer { uid: u32 },
-    #[error("scope {need:?} not granted to uid {uid}")]
-    Denied { uid: u32, need: Scope },
+    #[error("scope {need:?} not granted")]
+    Denied { need: Scope },
+    #[error("admin role required")]
+    AdminRequired,
+    #[error("gateway token required")]
+    TokenRequired,
 }
 
 pub fn peer_cred(stream: &UnixStream) -> Result<PeerCred, PeerError> {
@@ -32,38 +45,31 @@ pub fn peer_cred(stream: &UnixStream) -> Result<PeerCred, PeerError> {
     })
 }
 
-/// Map uid → allowed scopes. Configured locally in `kxprovd`; the gateway cannot override.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct PeerPolicy {
-    by_uid: HashMap<u32, Vec<Scope>>,
+    gateway_uid: u32,
+    admin_uid: u32,
 }
 
 impl PeerPolicy {
-    pub fn new(entries: impl IntoIterator<Item = (u32, Vec<Scope>)>) -> Self {
+    pub fn new(gateway_uid: u32, admin_uid: u32) -> Self {
         Self {
-            by_uid: entries.into_iter().collect(),
+            gateway_uid,
+            admin_uid,
         }
     }
 
-    pub fn scopes_for(&self, uid: u32) -> Option<&[Scope]> {
-        self.by_uid.get(&uid).map(|v| v.as_slice())
-    }
-
-    pub fn require(&self, cred: PeerCred, need: Scope) -> Result<(), PeerError> {
-        let scopes = self
-            .scopes_for(cred.uid)
-            .ok_or(PeerError::UnknownPeer { uid: cred.uid })?;
-        if scopes.contains(&need) {
-            Ok(())
+    pub fn role(&self, cred: PeerCred) -> PeerRole {
+        if cred.uid == self.admin_uid {
+            PeerRole::Admin
+        } else if cred.uid == self.gateway_uid {
+            PeerRole::Gateway
         } else {
-            Err(PeerError::Denied {
-                uid: cred.uid,
-                need,
-            })
+            PeerRole::ReadOnly
         }
     }
 
-    pub fn has(&self, cred: PeerCred, need: Scope) -> bool {
-        self.require(cred, need).is_ok()
+    pub fn is_admin(&self, cred: PeerCred) -> bool {
+        self.role(cred) == PeerRole::Admin
     }
 }

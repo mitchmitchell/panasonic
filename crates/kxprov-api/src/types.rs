@@ -1,13 +1,7 @@
+use crate::ids::{Approval, DiffHash, PlanId, TokenId};
 use serde::{Deserialize, Serialize};
 
-/// Profile banner shown in status (SIM / TEST / PROD).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Profile {
-    Sim,
-    Test,
-    Prod,
-}
+pub use crate::ids::Profile;
 
 /// Daemon operating mode (design §4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -18,30 +12,19 @@ pub enum DaemonMode {
     Simulator,
 }
 
-/// Caller capability enforced in `kxprovd` from SO_PEERCRED (v2.3: never trust the gateway).
+/// Caller capability enforced in `kxprovd` from SO_PEERCRED + token store (v2.3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Scope {
     Read,
     Plan,
     Write,
-    /// Bind a single-use arm to one plan id + diff hash (Mitch re-auth at the gateway; daemon verifies peer).
-    Arm,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GateFlags {
     pub live_writes_approved: bool,
-    /// True when an unused, unexpired arm matches a plan (detail in `arm` when present).
-    pub armed: bool,
     pub locked: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ArmStatus {
-    pub plan_id: String,
-    pub diff_hash: String,
-    pub expires_at_ms: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -50,9 +33,6 @@ pub struct StatusResponse {
     pub mode: DaemonMode,
     pub transport: String,
     pub gates: GateFlags,
-    /// Active single-use arm, if any.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub arm: Option<ArmStatus>,
     pub queue_depth: u32,
     pub active_job: Option<String>,
 }
@@ -90,27 +70,35 @@ pub struct PlanChangeParams {
     pub value: String,
 }
 
-/// Immutable plan reference (content-addressed id + diff hash for arming).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlanChangeResult {
-    pub plan_id: String,
-    pub diff_hash: String,
+    pub plan_id: PlanId,
+    pub diff_hash: DiffHash,
     pub table: u8,
     pub writes: u32,
     pub diff: Vec<String>,
+    pub expires_at_ms: u64,
+}
+
+/// Gateway forwards the MCP token id; daemon validates against its token store.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RequestAuth {
+    pub token_id: TokenId,
+}
+
+/// Admin-only: daemon mints an approval after verifying re-auth proof (A4 supplies real proof).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MintApprovalParams {
+    pub plan_id: PlanId,
+    pub diff_hash: DiffHash,
+    pub profile: Profile,
+    /// Placeholder in A3; replaced by argon2 re-auth verification in A4.
+    pub admin_reauth_proof: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ArmPlanParams {
-    pub plan_id: String,
-    pub diff_hash: String,
-    /// Wall-clock expiry chosen by the approver; daemon clamps to configured max TTL.
-    pub ttl_secs: u32,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ArmPlanResult {
-    pub arm: ArmStatus,
+pub struct MintApprovalResult {
+    pub approval: Approval,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -142,9 +130,19 @@ pub struct BackupNowResult {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ApplyPlanParams {
-    pub plan_id: String,
-    pub diff_hash: String,
-    pub confirm: bool,
+    pub plan_id: PlanId,
+    pub diff_hash: DiffHash,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnlockParams {
+    pub job_id: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnlockResult {
+    pub unlocked: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -153,15 +151,18 @@ pub enum RequestBody {
     Status,
     ReadFields { params: ReadFieldsParams },
     PlanChange { params: PlanChangeParams },
-    ArmPlan { params: ArmPlanParams },
+    MintApproval { params: MintApprovalParams },
     BackupNow,
     ListBackups,
     ApplyPlan { params: ApplyPlanParams },
+    Unlock { params: UnlockParams },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RequestEnvelope {
     pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auth: Option<RequestAuth>,
     #[serde(flatten)]
     pub body: RequestBody,
 }
@@ -172,11 +173,12 @@ pub enum ResponseResult {
     Status(StatusResponse),
     ReadFields(ReadFieldsResult),
     PlanChange(PlanChangeResult),
-    ArmPlan(ArmPlanResult),
+    MintApproval(MintApprovalResult),
     ListBackups(ListBackupsResult),
     BackupNow(BackupNowResult),
     Job(JobRef),
     ApplyDeferred(ApplyDeferredResult),
+    Unlock(UnlockResult),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -193,6 +195,8 @@ pub struct ApplyDeferredResult {
 pub struct ApiErrorBody {
     pub code: String,
     pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub approval_url: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -211,11 +215,13 @@ impl Response {
             self.result.ok_or(ApiErrorBody {
                 code: "internal".into(),
                 message: "missing result".into(),
+                approval_url: None,
             })
         } else {
             Err(self.error.unwrap_or(ApiErrorBody {
                 code: "unknown".into(),
                 message: "request failed".into(),
+                approval_url: None,
             }))
         }
     }

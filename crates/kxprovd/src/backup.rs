@@ -1,6 +1,6 @@
-use crate::arm::now_ms;
 use crate::dbh::{self, parse_size};
 use crate::goliath::GoliathQueue;
+use crate::time::now_ms;
 use kxprov_api::GoliathCopyStatus;
 use kxtd1232::tables::TABLES;
 use kxtd1232::{Client, Transport};

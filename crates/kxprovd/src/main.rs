@@ -1,4 +1,4 @@
-use kxprov_api::{DaemonMode, Profile};
+use kxprov_api::Profile;
 use kxprovd::config::{Config, TransportKind};
 use kxprovd::Daemon;
 use std::path::PathBuf;
@@ -18,7 +18,6 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut cfg = Config::sim_test(PathBuf::from(&data), PathBuf::from(socket), uid);
     cfg.transport = transport;
     cfg.profile = Profile::Sim;
-    cfg.mode = DaemonMode::Simulator;
 
     let _daemon = Daemon::start(cfg)?;
     tracing::info!("kxprovd running (sim); ctrl-c to exit");

@@ -1,6 +1,4 @@
-use kxprov_api::{
-    ApplyPlanParams, ArmPlanParams, FieldKindWire, PlanChangeParams, ReadFieldsParams, Scope,
-};
+use kxprov_api::{FieldKindWire, PlanChangeParams, ReadFieldsParams, TokenId};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::{mpsc, oneshot, Mutex};
@@ -21,17 +19,19 @@ pub enum JobState {
 
 #[derive(Debug)]
 pub enum JobKind {
-    ReadFields { params: ReadFieldsParams },
-    PlanChange { params: PlanChangeParams },
-    ArmPlan { params: ArmPlanParams },
+    ReadFields {
+        params: ReadFieldsParams,
+    },
+    PlanChange {
+        params: PlanChangeParams,
+        token_id: TokenId,
+    },
     BackupNow,
-    ApplyPlan { params: ApplyPlanParams },
 }
 
 pub struct JobRequest {
     pub id: String,
     pub kind: JobKind,
-    pub need: Scope,
     pub reply: oneshot::Sender<JobOutcome>,
 }
 
@@ -39,7 +39,6 @@ pub struct JobRequest {
 pub enum JobOutcome {
     ReadFields(kxprov_api::ReadFieldsResult),
     PlanChange(kxprov_api::PlanChangeResult),
-    ArmPlan(kxprov_api::ArmPlanResult),
     BackupNow(kxprov_api::BackupNowResult),
     ApplyDeferred(kxprov_api::ApplyDeferredResult),
     Err { code: String, message: String },
@@ -60,7 +59,6 @@ impl JobQueue {
 
     pub async fn enqueue(
         &self,
-        need: Scope,
         kind: JobKind,
     ) -> Result<(String, oneshot::Receiver<JobOutcome>), ()> {
         let id = next_job_id();
@@ -70,7 +68,6 @@ impl JobQueue {
             .send(JobRequest {
                 id: id.clone(),
                 kind,
-                need,
                 reply: reply_tx,
             })
             .await

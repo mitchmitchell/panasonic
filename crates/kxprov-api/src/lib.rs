@@ -1,13 +1,16 @@
 //! Unix-socket API types and client for [`kxprovd`](../../kxprovd/README.md).
 //!
-//! Newline-delimited JSON: one [`RequestEnvelope`] per line, one [`Response`] per line.
-//!
-//! v2.3 (threat model): plans are immutable and content-addressed; arming binds one plan id
-//! and diff hash (single-use, TTL); the daemon enforces [`Scope`] from SO_PEERCRED and does
-//! not trust the gateway to skip checks.
+//! v2.3: per-plan [`Approval`] (no daemon-wide arm), immutable plans tied to [`TokenId`],
+//! [`PlanId`] + [`DiffHash`] + [`Profile`]; daemon enforces scope from SO_PEERCRED.
 
 mod client;
+mod ids;
+mod plan_hash;
+mod protocol;
 mod types;
 
 pub use client::{ApiClient, ApiError};
+pub use ids::{Approval, DiffHash, PlanId, Profile, TokenId};
+pub use plan_hash::{diff_hash, CanonicalPlan, CanonicalWrite};
+pub use protocol::*;
 pub use types::*;

@@ -34,10 +34,19 @@ impl ApiClient {
     }
 
     pub async fn call(&mut self, body: RequestBody) -> Result<ResponseResult, ApiError> {
+        self.call_auth(body, None).await
+    }
+
+    pub async fn call_auth(
+        &mut self,
+        body: RequestBody,
+        auth: Option<crate::RequestAuth>,
+    ) -> Result<ResponseResult, ApiError> {
         let id = format!("{}", self.next_id);
         self.next_id += 1;
         let env = RequestEnvelope {
             id: id.clone(),
+            auth,
             body,
         };
         let line = serde_json::to_string(&env)?;

@@ -21,6 +21,9 @@ struct Cli {
     /// Transport. Only the in-process simulator exists in Phase A.
     #[arg(long, value_enum, default_value_t = TransportKind::Sim)]
     transport: TransportKind,
+    /// Daemon Unix socket (admin commands only).
+    #[arg(long, default_value = "/run/kx-provision/kxprovd.sock")]
+    socket: std::path::PathBuf,
     #[command(subcommand)]
     cmd: Command,
 }
@@ -48,6 +51,13 @@ enum Command {
         kind: FieldKind,
         index: u16,
         value: String,
+    },
+    /// Clear persisted LOCKED state (root admin, after verified backup).
+    Unlock {
+        #[arg(long)]
+        job: String,
+        #[arg(long)]
+        reason: String,
     },
 }
 
@@ -111,6 +121,9 @@ fn check_ranges(cmd: &Command) -> Result<(), CliError> {
 }
 
 fn run(cli: &Cli) -> Result<(), CliError> {
+    if matches!(cli.cmd, Command::Unlock { .. }) {
+        return unlock_daemon(cli);
+    }
     check_ranges(&cli.cmd)?;
     let TransportKind::Sim = cli.transport;
     let mut c = Client::new(SimTransport::new(SimPbx::default()));
@@ -158,6 +171,7 @@ fn command(c: &mut Client<SimTransport>, cmd: &Command) -> Result<(), CliError> 
                 println!("{}\t{v}", u32::from(*first) + i as u32);
             }
         }
+        Command::Unlock { .. } => unreachable!("handled in unlock_daemon"),
         Command::Plan { kind, index, value } => {
             let patch = field_patch(*kind, *index, value)?;
             kxtd1232::tables::check_writable_table(kind.table()).map_err(Error::from)?;
@@ -173,6 +187,30 @@ fn command(c: &mut Client<SimTransport>, cmd: &Command) -> Result<(), CliError> 
         }
     }
     Ok(())
+}
+
+fn unlock_daemon(cli: &Cli) -> Result<(), CliError> {
+    let Command::Unlock { job, reason } = &cli.cmd else {
+        return Err(CliError::Usage("unlock".into()));
+    };
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| CliError::Usage(e.to_string()))?;
+    rt.block_on(async {
+        let mut c = kxprov_api::ApiClient::connect(&cli.socket)
+            .await
+            .map_err(|e| CliError::Usage(e.to_string()))?;
+        c.call(kxprov_api::RequestBody::Unlock {
+            params: kxprov_api::UnlockParams {
+                job_id: job.clone(),
+                reason: reason.clone(),
+            },
+        })
+        .await
+        .map_err(|e| CliError::Usage(e.to_string()))?;
+        Ok(())
+    })
 }
 
 fn main() -> ExitCode {

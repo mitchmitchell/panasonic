@@ -1,7 +1,7 @@
-//! `kxprovd`: single serial owner, one-worker queue, backups, journal, gates (A3).
+//! `kxprovd`: single serial owner, one-worker queue, backups, journal, gates (A3/v2.3).
 
 pub mod api;
-pub mod arm;
+pub mod approval;
 pub mod backup;
 pub mod config;
 pub mod dbh;
@@ -9,20 +9,26 @@ pub mod gates;
 pub mod goliath;
 pub mod journal;
 pub mod lock;
+pub mod locked;
 pub mod peer;
 pub mod plan_store;
 pub mod queue;
+pub mod time;
+pub mod tokens;
 pub mod transport;
 pub mod worker;
 
 use api::ApiState;
+use approval::ApprovalBook;
 use backup::BackupStore;
 use config::{Config, TransportKind};
 use gates::GateState;
 use goliath::GoliathQueue;
 use journal::Journal;
+use locked::LockedStore;
 use plan_store::PlanStore;
 use std::sync::Arc;
+use tokens::TokenStore;
 use tokio::net::UnixListener;
 use tokio::sync::{mpsc, RwLock};
 
@@ -44,13 +50,13 @@ impl Daemon {
         let plans = PlanStore::new(config.data_dir.join("plans"))?;
         let backups = BackupStore::new(config.data_dir.join("backups"))?;
         let goliath = GoliathQueue::new(config.goliath_target.clone())?;
+        let approvals = ApprovalBook::new(&config.data_dir);
+        let locked = LockedStore::new(&config.data_dir);
 
         let (job_tx, job_rx) = mpsc::channel(32);
         let queue = Arc::new(queue::JobQueue::new(job_tx));
         let gates = Arc::new(RwLock::new(GateState {
             config: config.gates,
-            locked: false,
-            arm: None,
         }));
 
         let transport_label = match config.transport {
@@ -60,7 +66,6 @@ impl Daemon {
 
         let worker_ctx = Arc::new(worker::WorkerCtx {
             config: config.clone(),
-            gates: Arc::clone(&gates),
             plans: PlanStore::new(config.data_dir.join("plans"))?,
             backups: BackupStore::new(config.data_dir.join("backups"))?,
             journal: Journal::new(&config.data_dir),
@@ -70,14 +75,17 @@ impl Daemon {
         let q = Arc::clone(&queue);
         let api_state = Arc::new(ApiState {
             profile: config.profile,
-            mode: config.mode,
             transport_label,
             gates,
             peer_policy: config.peer_policy.clone(),
+            tokens: TokenStore::with_test_defaults(),
             queue,
             backups,
             plans,
+            approvals,
+            locked,
             goliath,
+            approval_url_base: config.approval_url_base.clone(),
         });
 
         let socket_path = config.socket_path.clone();
@@ -126,7 +134,8 @@ impl Daemon {
     ) -> (Self, std::path::PathBuf) {
         let data_dir = data_dir.as_ref().to_path_buf();
         let socket = data_dir.join("kxprovd.sock");
-        let cfg = Config::sim_test(data_dir, socket.clone(), peer_uid);
+        let mut cfg = Config::sim_test(data_dir, socket.clone(), peer_uid);
+        cfg.gates.live_writes_approved = true;
         let daemon = Self::start(cfg).expect("daemon starts");
         (daemon, socket)
     }

@@ -13,8 +13,8 @@ use std::collections::{HashMap, VecDeque};
 
 pub const PLACEHOLDER_PASSWORD: &str = "0000";
 pub const PLACEHOLDER_ROM_ID: &str = "-----PXXXXXXXXXX";
-pub const BANNER: &[u8] = b"Welcome To KX-TD1232  Ver 2.0 Panasonic CO.,LTD.\r\nEnter Password\r\n";
-/// Busy-frame cadence observed on the real unit.
+pub const BANNER: &[u8] = b"SIM PBX PLACEHOLDER BANNER\r\nEnter Password\r\n";
+/// Default busy cadence (sim parameter; matches `kxprov_api::BUSY_CADENCE_DEFAULT_MS`).
 pub const BUSY_CADENCE_MS: u64 = 128;
 
 /// Injected faults, consumed in order.

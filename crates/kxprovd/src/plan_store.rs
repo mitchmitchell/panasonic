@@ -1,15 +1,39 @@
-//! Immutable, content-addressed write plans (v2.3).
+//! Immutable server-side plans (v2.3 §5b F7): random PlanId, canonical DiffHash, token-bound.
 
+use kxprov_api::{diff_hash, CanonicalPlan, CanonicalWrite, PLAN_EXPIRY_SECS};
+use kxprov_api::{DiffHash, PlanId, Profile, TokenId};
 use kxtd1232::plan::{ChunkWrite, WritePlan};
 use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub enum PlanError {
+    #[error("io: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("json: {0}")]
+    Json(#[from] serde_json::Error),
+    #[error("plan not found")]
+    NotFound,
+    #[error("plan expired")]
+    Expired,
+    #[error("plan id mismatch")]
+    IdMismatch,
+    #[error("diff hash mismatch")]
+    DiffMismatch,
+    #[error("token mismatch")]
+    TokenMismatch,
+    #[error("random plan id")]
+    Random,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StoredWrite {
-    table: u8,
-    record: u16,
-    word: u16,
-    base: Vec<u8>,
-    new: Vec<u8>,
+    pub table: u8,
+    pub record: u16,
+    pub word: u16,
+    pub base: Vec<u8>,
+    pub new: Vec<u8>,
 }
 
 impl From<&ChunkWrite> for StoredWrite {
@@ -23,26 +47,107 @@ impl From<&ChunkWrite> for StoredWrite {
         }
     }
 }
-use sha2::{Digest, Sha256};
-use std::path::{Path, PathBuf};
-use thiserror::Error;
 
-#[derive(Debug, Error)]
-pub enum PlanError {
-    #[error("io: {0}")]
-    Io(#[from] std::io::Error),
-    #[error("json: {0}")]
-    Json(#[from] serde_json::Error),
-    #[error("plan id mismatch")]
-    IdMismatch,
-    #[error("plan not found")]
-    NotFound,
-    #[error("plan already exists with different content")]
-    AlreadyExists,
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlanRecord {
+    pub id: PlanId,
+    pub diff_hash: DiffHash,
+    pub profile: Profile,
+    pub creator_token: TokenId,
+    pub created_at_ms: u64,
+    pub expires_at_ms: u64,
+    pub table: u8,
+    pub record_size: usize,
+    pub writes: Vec<StoredWrite>,
+    pub diff: Vec<String>,
 }
 
-/// On-disk snapshot; bytes are fixed at creation time.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlanStore {
+    dir: PathBuf,
+}
+
+impl PlanStore {
+    pub fn new(dir: PathBuf) -> std::io::Result<Self> {
+        std::fs::create_dir_all(&dir)?;
+        Ok(Self { dir })
+    }
+
+    fn path(&self, id: &PlanId) -> PathBuf {
+        self.dir.join(format!("{}.json", id.as_str()))
+    }
+
+    pub fn put(
+        &self,
+        profile: Profile,
+        creator: &TokenId,
+        snap: &PlanSnapshot,
+        now_ms: u64,
+    ) -> Result<PlanRecord, PlanError> {
+        let id = PlanId::new_random().map_err(|_| PlanError::Random)?;
+        let dh = compute_diff_hash(profile, snap);
+        let rec = PlanRecord {
+            id: id.clone(),
+            diff_hash: dh,
+            profile,
+            creator_token: creator.clone(),
+            created_at_ms: now_ms,
+            expires_at_ms: now_ms + u64::from(PLAN_EXPIRY_SECS) * 1000,
+            table: snap.table,
+            record_size: snap.record_size,
+            writes: snap.writes.clone(),
+            diff: snap.diff.clone(),
+        };
+        let data = serde_json::to_vec_pretty(&rec)?;
+        std::fs::write(self.path(&id), data)?;
+        Ok(rec)
+    }
+
+    pub fn get(&self, id: &PlanId) -> Result<PlanRecord, PlanError> {
+        let path = self.path(id);
+        if !path.exists() {
+            return Err(PlanError::NotFound);
+        }
+        let rec: PlanRecord = serde_json::from_slice(&std::fs::read(path)?)?;
+        if rec.id != *id {
+            return Err(PlanError::IdMismatch);
+        }
+        Ok(rec)
+    }
+
+    pub fn verify_for_apply(
+        &self,
+        id: &PlanId,
+        expected: &DiffHash,
+        profile: Profile,
+        token: &TokenId,
+        now_ms: u64,
+    ) -> Result<PlanRecord, PlanError> {
+        let rec = self.get(id)?;
+        if now_ms >= rec.expires_at_ms {
+            return Err(PlanError::Expired);
+        }
+        if rec.diff_hash != *expected {
+            return Err(PlanError::DiffMismatch);
+        }
+        if rec.profile != profile {
+            return Err(PlanError::IdMismatch);
+        }
+        if rec.creator_token != *token {
+            return Err(PlanError::TokenMismatch);
+        }
+        let recomputed = compute_diff_hash(profile, &PlanSnapshot::from_record(&rec));
+        if recomputed != rec.diff_hash {
+            return Err(PlanError::DiffMismatch);
+        }
+        Ok(rec)
+    }
+
+    pub fn dir(&self) -> &Path {
+        &self.dir
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlanSnapshot {
     pub table: u8,
     pub record_size: usize,
@@ -61,92 +166,33 @@ impl From<&WritePlan> for PlanSnapshot {
     }
 }
 
-pub fn diff_hash(diff: &[String]) -> String {
-    let mut h = Sha256::new();
-    for line in diff {
-        h.update(line.as_bytes());
-        h.update([0u8]);
-    }
-    hex::encode(h.finalize())
-}
-
-pub fn plan_id(snapshot: &PlanSnapshot) -> String {
-    let canonical = serde_json::to_vec(snapshot).expect("plan snapshot serializes");
-    hex::encode(Sha256::digest(canonical))
-}
-
-pub struct PlanStore {
-    dir: PathBuf,
-}
-
-impl PlanStore {
-    pub fn new(dir: PathBuf) -> std::io::Result<Self> {
-        std::fs::create_dir_all(&dir)?;
-        Ok(Self { dir })
-    }
-
-    fn path(&self, id: &str) -> PathBuf {
-        self.dir.join(format!("{id}.json"))
-    }
-
-    /// Store once; refuse to overwrite with different content.
-    pub fn put(&self, snapshot: &PlanSnapshot) -> Result<(String, String), PlanError> {
-        let id = plan_id(snapshot);
-        let dh = diff_hash(&snapshot.diff);
-        let path = self.path(&id);
-        if path.exists() {
-            let existing = self.get(&id)?;
-            if existing != *snapshot {
-                return Err(PlanError::AlreadyExists);
-            }
-            return Ok((id, dh));
+impl PlanSnapshot {
+    fn from_record(rec: &PlanRecord) -> Self {
+        Self {
+            table: rec.table,
+            record_size: rec.record_size,
+            writes: rec.writes.clone(),
+            diff: rec.diff.clone(),
         }
-        let data = serde_json::to_vec_pretty(snapshot)?;
-        std::fs::write(&path, data)?;
-        Ok((id, dh))
-    }
-
-    pub fn get(&self, id: &str) -> Result<PlanSnapshot, PlanError> {
-        let path = self.path(id);
-        if !path.exists() {
-            return Err(PlanError::NotFound);
-        }
-        let data = std::fs::read(path)?;
-        let snap: PlanSnapshot = serde_json::from_slice(&data)?;
-        if plan_id(&snap) != id {
-            return Err(PlanError::IdMismatch);
-        }
-        Ok(snap)
-    }
-
-    pub fn verify_diff_hash(&self, id: &str, expected_diff_hash: &str) -> Result<(), PlanError> {
-        let snap = self.get(id)?;
-        if diff_hash(&snap.diff) != expected_diff_hash {
-            return Err(PlanError::IdMismatch);
-        }
-        Ok(())
-    }
-
-    pub fn dir(&self) -> &Path {
-        &self.dir
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn content_address_stable() {
-        let snap = PlanSnapshot {
-            table: 0x24,
-            record_size: 6,
-            writes: vec![],
-            diff: vec!["T24 +0x0000: 00 -> 01".into()],
-        };
-        let a = plan_id(&snap);
-        let b = plan_id(&snap);
-        assert_eq!(a, b);
-        assert_eq!(a.len(), 64);
-    }
+pub fn compute_diff_hash(profile: Profile, snap: &PlanSnapshot) -> DiffHash {
+    let writes: Vec<CanonicalWrite<'_>> = snap
+        .writes
+        .iter()
+        .map(|w| CanonicalWrite {
+            table: w.table,
+            record: w.record,
+            word: w.word,
+            base: &w.base,
+            new: &w.new,
+        })
+        .collect();
+    diff_hash(&CanonicalPlan {
+        profile,
+        table: snap.table,
+        record_size: snap.record_size,
+        writes,
+    })
 }
