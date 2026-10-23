@@ -21,3 +21,7 @@ def test_plan_dry_run(capsys):
 
 def test_plan_rejects_bad_value(capsys):
     assert main(["plan", "cid_number", "0", "abc"]) == 2
+
+
+def test_plan_refuses_ext_name_until_g6(capsys):
+    assert main(["plan", "ext_name", "0", "X"]) == 2

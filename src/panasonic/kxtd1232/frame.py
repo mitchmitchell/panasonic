@@ -10,6 +10,8 @@ from dataclasses import dataclass
 from enum import IntEnum
 
 MAX_WRITE_PAYLOAD = 200
+# A data reply is LEN CMD 00 <2n> SUM, so LEN = 3 + 2n must fit in one byte.
+MAX_READ_WORDS = 126
 
 
 class Cmd(IntEnum):
@@ -105,8 +107,8 @@ class Encoder:
         self._check(Cmd.READ)
         if not (0 <= table <= 0xFF and 0 <= record <= 0xFFFF and 0 <= word <= 0xFFFF):
             raise FrameError("read address out of range")
-        if not 1 <= nwords <= 0xFF:
-            raise FrameError("nwords must be 1..255")
+        if not 1 <= nwords <= MAX_READ_WORDS:
+            raise FrameError(f"nwords must be 1..{MAX_READ_WORDS}")
         body = bytes([table]) + record.to_bytes(2, "big") + word.to_bytes(2, "big")
         return encode(Cmd.READ, body + bytes([nwords]))
 
@@ -138,7 +140,7 @@ def classify(raw: bytes, request_cmd: int) -> Reply:
     f = decode(raw)
     if raw == BUSY_FRAME:
         return Reply("busy", 0xFF)
-    if f.cmd == Cmd.PROBE and f.body[:1] == b"\x01":
+    if f.cmd == Cmd.PROBE and f.body == b"\x01\x03":
         return Reply("status", f.cmd, data=f.body[1:])  # meaning of the value: UNKNOWN
     if len(f.body) == 2 and f.body[0] == 0x01:
         code = f.body[1]

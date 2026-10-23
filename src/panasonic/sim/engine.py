@@ -46,7 +46,7 @@ class SimPBX:
         self.requests = 0
 
     def inject(self, fault: str) -> None:
-        if fault not in {"nak", "silent_write", "busy"}:
+        if fault not in _FAULTS:
             raise ValueError(f"unknown fault {fault}")
         self.faults.append(fault)
 
@@ -104,10 +104,18 @@ class SimPBX:
         cmd = raw[1] if len(raw) > 1 else 0xFF
         if len(raw) < 3 or checksum(raw[:-1]) != raw[-1]:
             return encode(cmd, b"\x01\x02")
-        fault = self.faults.popleft() if self.faults else None
+        fault = None
+        if self.faults and (cmd == Cmd.WRITE or self.faults[0] not in _WRITE_FAULTS):
+            fault = self.faults.popleft()
         if fault == "nak":
             return encode(cmd, b"\x01\x02")
         busy = BUSY_FRAME * 3 if fault == "busy" else b""
+        if fault == "busy_forever":
+            return BUSY_FRAME * 200  # longer than any bound the client is given in tests
+        if fault in ("no_ack_applied", "no_ack_dropped"):
+            if fault == "no_ack_applied":
+                self._write(raw[2:-1], silent=False)
+            return b""
         body = raw[2:-1]
         if cmd == Cmd.PROBE and body == b"\x00":
             return busy + encode(cmd, b"\x00" + self.rom_id)
@@ -150,4 +158,6 @@ class SimPBX:
         return encode(Cmd.WRITE, b"\x00")
 
 
+_WRITE_FAULTS = {"silent_write", "no_ack_applied", "no_ack_dropped"}
+_FAULTS = {"nak", "busy", "busy_forever"} | _WRITE_FAULTS
 _RECORD_SIZES = {0x24: 6, 0x25: 16, 0x05: 10}

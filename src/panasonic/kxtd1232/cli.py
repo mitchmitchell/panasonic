@@ -10,6 +10,7 @@ from panasonic.sim import LoopbackTransport, SimPBX
 
 from .client import Client
 from .fields import FIELDS
+from .frame import NotAllowedError
 from .writeplan import build_plan, field_patch
 
 
@@ -52,7 +53,11 @@ def main(argv: list[str] | None = None) -> int:
         except ValueError as e:
             print(f"error: {e}", file=sys.stderr)
             return 2
-        plan = build_plan(table, size, base, [patch])
+        try:
+            plan = build_plan(table, size, base, [patch])
+        except NotAllowedError as e:
+            print(f"error: {e}", file=sys.stderr)
+            return 2
         print(json.dumps({"table": table, "writes": len(plan.writes), "diff": plan.diff()}))
     c.end_binary()
     return 0

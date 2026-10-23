@@ -81,6 +81,17 @@ def test_classify_replies(raw, kind, code):
     assert r.kind == kind and r.code == code
 
 
+def test_read_word_limit_fits_one_frame():
+    assert Encoder().read(0x24, 0, 0, 126)
+    with pytest.raises(FrameError):
+        Encoder().read(0x24, 0, 0, 127)
+
+
+def test_probe_nak_is_not_status():
+    r = classify(H("040801020F"), Cmd.PROBE)
+    assert r.kind == "nak" and r.code == 2
+
+
 def test_read_reply_data():
     raw = H("15010031 23FFFFFFFF0FFFFFFFFFFF0FFFFFFFFFFF7A".replace(" ", ""))
     r = classify(raw, Cmd.READ)

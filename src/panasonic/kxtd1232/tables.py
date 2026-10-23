@@ -24,9 +24,10 @@ UPLOAD_TABLES = _ranges(
 # Tables >= 0x40 exist only in their first half on a single-cabinet unit.
 HALF_TABLE_THRESHOLD = 0x40
 
-# Phase A: standalone writes allowed only to tables proven or ranked safe (handoff §5).
-# G6 must close before anything beyond 0x24/0x25 is used live; the daemon enforces that.
-EDITABLE_TABLES = frozenset({0x24, 0x25, 0x05, 0x02, 0x07})
+# Writes are allowed only to the caller-ID tables, the only ones written standalone on
+# real hardware. Widening this (tag 5 extension names first) needs gate G6 closed by
+# hardware test H8 (design §3a, handoff §3). Reads and decodes of every table stay allowed.
+EDITABLE_TABLES = frozenset({0x24, 0x25})
 
 CID_NUMBERS = 0x24
 CID_NAMES = 0x25
@@ -36,5 +37,9 @@ EXT_NAMES = 0x05
 def check_writable(table: int) -> None:
     if table in NEVER_WRITTEN:
         raise NotAllowedError(f"table {table:#04x} is never written")
+    if table >= HALF_TABLE_THRESHOLD:
+        # Only the first half of tables >= 0x40 exists on a single-cabinet unit; the
+        # second half must never be written. Neither half is editable before G6.
+        raise NotAllowedError(f"table {table:#04x} >= 0x40 is not writable (half-table rule)")
     if table not in EDITABLE_TABLES:
         raise NotAllowedError(f"table {table:#04x} is not on the editable list")
