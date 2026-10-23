@@ -1,7 +1,7 @@
 //! Production filesystem layout (daemon, gateway, CLI, sim-mark).
 //!
 //! Layout (v2.12): repository root [`DATA_DIR`]; per-profile trees under
-//! `{DATA_DIR}/<profile>/` (each with its own `mode.counter`); [`SIM_PASSED_JSON`] at the root.
+//! `{DATA_DIR}/<profile>/`; profile epoch counters under [`EPOCH_DIR_NAME`]; [`SIM_PASSED_JSON`] at the root.
 
 use std::path::{Path, PathBuf};
 
@@ -16,8 +16,11 @@ pub const DATA_DIR: &str = "/var/lib/kx-provision";
 /// Daemon bearer token store (root-owned, mode 0600).
 pub const TOKENS_JSON: &str = "/var/lib/kx-provision/tokens.json";
 
-/// Production Sim profile mode counter (each profile has its own file).
-pub const MODE_COUNTER: &str = "/var/lib/kx-provision/sim/mode.counter";
+/// Subdirectory under [`DATA_DIR`] for monotonic profile epoch counters (P4-R10).
+pub const EPOCH_DIR_NAME: &str = ".epoch";
+
+/// Production Sim profile epoch counter (`{DATA_DIR}/.epoch/sim.counter`).
+pub const MODE_COUNTER: &str = "/var/lib/kx-provision/.epoch/sim.counter";
 
 /// Simulator pass marker for the current build (global, root-owned in production).
 pub const SIM_PASSED_JSON: &str = "/var/lib/kx-provision/sim-passed.json";
@@ -67,9 +70,24 @@ pub fn sim_passed_path(base: &Path) -> PathBuf {
     }
 }
 
-/// Per-profile `mode.counter` under the configured data root.
+/// Per-profile epoch counter under `{base}/.epoch/<profile>.counter` (or production default).
+pub fn profile_epoch_counter_path(base: &Path, profile: Profile) -> PathBuf {
+    if production_layout(base) {
+        PathBuf::from(format!(
+            "{}/{}/{}.counter",
+            DATA_DIR,
+            EPOCH_DIR_NAME,
+            profile_dir_name(profile)
+        ))
+    } else {
+        base.join(EPOCH_DIR_NAME)
+            .join(format!("{}.counter", profile_dir_name(profile)))
+    }
+}
+
+/// Alias for [`profile_epoch_counter_path`] (daemon mode / v2.12 tests).
 pub fn mode_counter_path(base: &Path, profile: Profile) -> PathBuf {
-    resolve_profile_data_dir(base, profile).join("mode.counter")
+    profile_epoch_counter_path(base, profile)
 }
 
 #[cfg(test)]

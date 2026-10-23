@@ -8,7 +8,7 @@ data_dir="$run_dir/data"
 etc_dir="$run_dir/etc"
 secrets_dir="$run_dir/secrets"
 tls_dir="$run_dir/tls"
-mkdir -p "$data_dir"/{plans,backups,goliath} "$etc_dir" "$secrets_dir" "$tls_dir"
+mkdir -p "$data_dir"/{plans,backups,goliath,.epoch} "$etc_dir" "$secrets_dir" "$tls_dir"
 
 uid="$(id -u)"
 gid="$(id -g)"

@@ -14,6 +14,8 @@ use thiserror::Error;
 
 pub const ETC_CONFIG: &str = DAEMON_ETC_CONFIG;
 
+pub use kxprov_api::{profile_epoch_counter_path, EPOCH_DIR_NAME};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TransportKind {
     Sim,

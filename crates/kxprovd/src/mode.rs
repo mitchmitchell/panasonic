@@ -2,7 +2,7 @@
 
 use crate::audit::{alert_mode_failure, AuditEntry, AuditKind, AuditLog};
 use crate::time::now_ms;
-use kxprov_api::{resolve_profile_data_dir, OperationalMode, Profile};
+use kxprov_api::{profile_epoch_counter_path, resolve_profile_data_dir, OperationalMode, Profile};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
@@ -46,24 +46,37 @@ pub struct EffectiveMode {
 pub struct ModeStore {
     mode_path: PathBuf,
     profile_path: PathBuf,
-    /// Per profile data directory (`…/sim|test|prod/mode.counter`), not shared across profiles (v2.12).
-    counter_path: PathBuf,
+    provision_root: PathBuf,
     audit: AuditLog,
     boot_profile: Profile,
 }
 
 impl ModeStore {
-    /// `state_base` is the daemon data root; profile-scoped files live under
-    /// [`resolve_profile_data_dir`] (including per-profile `mode.counter`).
+    /// `state_base` is the daemon data root; profile payload under [`resolve_profile_data_dir`].
     pub fn new(state_base: &Path, boot_profile: Profile) -> Self {
-        let profile_root = resolve_profile_data_dir(state_base, boot_profile);
+        Self::new_with_epoch_root(
+            &resolve_profile_data_dir(state_base, boot_profile),
+            state_base,
+            boot_profile,
+        )
+    }
+
+    pub fn new_with_epoch_root(
+        profile_data_dir: &Path,
+        provision_root: &Path,
+        boot_profile: Profile,
+    ) -> Self {
         Self {
-            mode_path: profile_root.join("mode.json"),
-            profile_path: profile_root.join("profile.json"),
-            counter_path: profile_root.join("mode.counter"),
-            audit: AuditLog::new(&profile_root),
+            mode_path: profile_data_dir.join("mode.json"),
+            profile_path: profile_data_dir.join("profile.json"),
+            provision_root: provision_root.to_path_buf(),
+            audit: AuditLog::new(profile_data_dir),
             boot_profile,
         }
+    }
+
+    fn epoch_counter_path(&self, profile: Profile) -> PathBuf {
+        profile_epoch_counter_path(&self.provision_root, profile)
     }
 
     pub fn read_stored_mode(&self) -> Option<OperationalMode> {
@@ -74,7 +87,12 @@ impl ModeStore {
     }
 
     pub fn load_profile(&self) -> Profile {
-        let last = match self.last_counter() {
+        let stored_profile = std::fs::read_to_string(&self.profile_path)
+            .ok()
+            .and_then(|raw| serde_json::from_str::<ProfileFileBody>(&raw).ok())
+            .map(|b| b.profile);
+        let epoch_profile = stored_profile.unwrap_or(self.boot_profile);
+        let last = match self.last_counter(epoch_profile) {
             Ok(n) => n,
             Err(e) => {
                 self.fail_closed(AuditKind::ModeCorrupt, format!("mode.counter: {e}"));
@@ -149,14 +167,15 @@ impl ModeStore {
         mode_c > 0 || prof_c > 0
     }
 
-    fn last_counter(&self) -> Result<u64, ModeError> {
-        if !self.counter_path.exists() {
+    fn last_counter(&self, profile: Profile) -> Result<u64, ModeError> {
+        let counter_path = self.epoch_counter_path(profile);
+        if !counter_path.exists() {
             if self.missing_counter_with_stored_epoch() {
                 return Err(ModeError::CounterCorrupt);
             }
             return Ok(0);
         }
-        let s = std::fs::read_to_string(&self.counter_path)?;
+        let s = std::fs::read_to_string(&counter_path)?;
         let trimmed = s.trim();
         if trimmed.is_empty() {
             return Err(ModeError::CounterCorrupt);
@@ -164,8 +183,12 @@ impl ModeStore {
         trimmed.parse().map_err(|_| ModeError::CounterCorrupt)
     }
 
-    fn save_counter(&self, counter: u64) -> Result<(), ModeError> {
-        std::fs::write(&self.counter_path, counter.to_string())?;
+    fn save_counter(&self, profile: Profile, counter: u64) -> Result<(), ModeError> {
+        let counter_path = self.epoch_counter_path(profile);
+        if let Some(parent) = counter_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(counter_path, counter.to_string())?;
         Ok(())
     }
 
@@ -198,7 +221,7 @@ impl ModeStore {
                 return self.fail_closed(AuditKind::ModeCorrupt, e.to_string());
             }
         };
-        let last = match self.last_counter() {
+        let last = match self.last_counter(profile) {
             Ok(n) => n,
             Err(e) => {
                 return self.fail_closed(AuditKind::ModeCorrupt, format!("mode.counter: {e}"));
@@ -253,7 +276,7 @@ impl ModeStore {
         if mode == OperationalMode::Testing && profile != Profile::Test {
             return Err(ModeError::TestingProfile);
         }
-        let last = self.last_counter()?;
+        let last = self.last_counter(profile)?;
         let counter = last.saturating_add(1);
         if counter <= last {
             return Err(ModeError::CounterRollback);
@@ -264,7 +287,7 @@ impl ModeStore {
             &self.profile_path,
             serde_json::to_vec_pretty(&ProfileFileBody { profile, counter })?,
         )?;
-        self.save_counter(counter)?;
+        self.save_counter(profile, counter)?;
         let _ = self.audit.append(&AuditEntry {
             at_ms: now_ms(),
             kind: AuditKind::ModeSet,

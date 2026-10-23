@@ -327,8 +327,10 @@ fn token_error_to_api(e: TokenError) -> ApiErrorBody {
             api_err("unauthorized", "invalid bearer")
         }
         TokenError::ScopeDenied => api_err("forbidden", "token scope denied"),
-        TokenError::Invalid(msg) => api_err("token", &msg),
-        TokenError::InsecurePermissions => api_err("token", "insecure tokens file permissions"),
+        TokenError::StoreUnavailable => api_err("token", "token store unavailable"),
+        TokenError::InsecurePermissions | TokenError::Invalid(_) => {
+            api_err("token", "invalid tokens configuration")
+        }
         TokenError::Io(err) => api_err("token", &err.to_string()),
         TokenError::Json(err) => api_err("token", &err.to_string()),
     }

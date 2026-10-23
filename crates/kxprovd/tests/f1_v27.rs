@@ -70,7 +70,7 @@ async fn mode_set_via_root_socket_increments_counter() {
     assert_eq!(r.counter, 1);
     assert_eq!(r.mode, OperationalMode::Testing);
     assert_eq!(r.profile, Profile::Test);
-    assert!(tmp.path().join("mode.counter").exists());
+    assert!(kxprovd::config::profile_epoch_counter_path(tmp.path(), Profile::Test).exists());
     let raw = std::fs::read_to_string(tmp.path().join("mode.json")).unwrap();
     assert!(raw.contains("counter"));
 }
