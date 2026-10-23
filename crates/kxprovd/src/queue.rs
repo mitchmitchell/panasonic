@@ -1,6 +1,6 @@
 use crate::rate_limit::{RateLimitError, TokenRateState};
 use kxprov_api::{DiffHash, FieldKindWire, PlanChangeParams, PlanId, ReadFieldsParams, TokenId};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex as StdMutex;
 use tokio::sync::{mpsc, oneshot, Mutex};
@@ -42,6 +42,8 @@ pub struct JobRequest {
     pub id: String,
     pub kind: JobKind,
     pub token_id: Option<TokenId>,
+    /// Snapshot of per-token job epoch at enqueue; stale jobs fail after revoke/rotate.
+    pub token_epoch: u64,
     pub reply: oneshot::Sender<JobOutcome>,
 }
 
@@ -64,8 +66,8 @@ pub struct JobQueue {
     tx: mpsc::Sender<JobRequest>,
     pub jobs: Mutex<HashMap<String, JobState>>,
     token_rates: Mutex<HashMap<String, TokenRateState>>,
-    /// Tokens revoked on disk; queued jobs for these ids fail without running.
-    revoked_tokens: StdMutex<HashSet<String>>,
+    /// Bumped when a token is revoked or reactivated (rotate); jobs with older epochs fail.
+    token_epochs: StdMutex<HashMap<String, u64>>,
 }
 
 impl JobQueue {
@@ -74,29 +76,22 @@ impl JobQueue {
             tx,
             jobs: Mutex::new(HashMap::new()),
             token_rates: Mutex::new(HashMap::new()),
-            revoked_tokens: StdMutex::new(HashSet::new()),
+            token_epochs: StdMutex::new(HashMap::new()),
         }
     }
 
-    pub fn mark_token_revoked(&self, token_id: &TokenId) {
-        self.revoked_tokens
-            .lock()
-            .expect("revoked tokens lock")
-            .insert(token_id.as_str().to_string());
+    pub fn bump_token_epoch(&self, token_id: &TokenId) {
+        let mut epochs = self.token_epochs.lock().expect("token epochs lock");
+        *epochs.entry(token_id.as_str().to_string()).or_insert(0) += 1;
     }
 
-    pub fn is_token_revoked(&self, token_id: &TokenId) -> bool {
-        self.revoked_tokens
+    pub fn token_epoch(&self, token_id: &TokenId) -> u64 {
+        self.token_epochs
             .lock()
-            .expect("revoked tokens lock")
-            .contains(token_id.as_str())
-    }
-
-    pub fn clear_token_revoked(&self, token_id: &TokenId) {
-        self.revoked_tokens
-            .lock()
-            .expect("revoked tokens lock")
-            .remove(token_id.as_str());
+            .expect("token epochs lock")
+            .get(token_id.as_str())
+            .copied()
+            .unwrap_or(0)
     }
 
     pub async fn enqueue(
@@ -107,6 +102,7 @@ impl JobQueue {
     ) -> Result<(String, oneshot::Receiver<JobOutcome>), QueueError> {
         let id = next_job_id();
         let (reply_tx, reply_rx) = oneshot::channel();
+        let token_epoch = token_id.as_ref().map(|t| self.token_epoch(t)).unwrap_or(0);
         if let Some(ref tid) = token_id {
             let mut rates = self.token_rates.lock().await;
             let st = rates.entry(tid.as_str().to_string()).or_default();
@@ -121,6 +117,7 @@ impl JobQueue {
                 id: id.clone(),
                 kind,
                 token_id: token_id.clone(),
+                token_epoch,
                 reply: reply_tx,
             })
             .await

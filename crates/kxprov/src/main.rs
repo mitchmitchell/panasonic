@@ -11,8 +11,11 @@ use kxprov_api::{OperationalMode, Profile, SetModeParams};
 use kxtd1232::error::NotAllowed;
 use kxtd1232::{build_plan, field_patch, Client, Error, FieldKind, Granularity};
 use kxtd1232_sim::{SimPbx, SimTransport, PLACEHOLDER_PASSWORD};
+mod token_atomic;
+
 use std::path::PathBuf;
 use std::process::ExitCode;
+use token_atomic::atomic_write_tokens;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -427,34 +430,6 @@ fn sim_mark(cli: &Cli) -> Result<(), CliError> {
             Ok(())
         }
     }
-}
-
-fn atomic_write_tokens(path: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
-    use std::fs::{File, OpenOptions};
-    use std::io::Write;
-    let dir = path.parent().unwrap_or_else(|| std::path::Path::new("."));
-    std::fs::create_dir_all(dir)?;
-    let tmp = dir.join(format!(
-        ".{}.tmp.{}",
-        path.file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("tokens"),
-        std::process::id()
-    ));
-    {
-        let mut f = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(&tmp)?;
-        f.write_all(data)?;
-        f.sync_all()?;
-    }
-    std::fs::rename(&tmp, path)?;
-    if let Ok(dirf) = File::open(dir) {
-        let _ = dirf.sync_all();
-    }
-    Ok(())
 }
 
 fn token_admin(cli: &Cli) -> Result<(), CliError> {

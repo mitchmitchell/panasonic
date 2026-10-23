@@ -14,7 +14,29 @@ use kxprov_api::{
 use kxprovd::config::{Config, ConfigError};
 use kxprovd::mode::ModeFileBody;
 use kxprovd::transition::TransitionBlockStore;
+use std::path::PathBuf;
+use std::process::Command;
 use std::time::Duration;
+
+fn kxprov_binary() -> PathBuf {
+    PathBuf::from(
+        std::env::var("CARGO_BIN_EXE_kxprov").unwrap_or_else(|_| {
+            format!("{}/../../target/debug/kxprov", env!("CARGO_MANIFEST_DIR"))
+        }),
+    )
+}
+
+fn ensure_kxprov_built() -> PathBuf {
+    let bin = kxprov_binary();
+    if !bin.is_file() {
+        let status = Command::new("cargo")
+            .args(["build", "-p", "kxprov", "-q"])
+            .status()
+            .expect("cargo build kxprov");
+        assert!(status.success(), "failed to build kxprov for rotate test");
+    }
+    bin
+}
 
 /// B2: stale backup from another mode — only latest **Production** backup counts.
 #[tokio::test]
@@ -135,6 +157,77 @@ async fn b7_revocation_takes_effect_without_restart() {
         err.to_string().contains("unauthorized") || err.to_string().contains("invalid bearer"),
         "{err}"
     );
+}
+
+/// Revoke on disk, `kxprov token rotate` clears `revoked` and new jobs succeed without restart.
+#[tokio::test]
+async fn rotate_revoked_token_jobs_accepted_without_restart() {
+    let tmp = tempfile::tempdir().unwrap();
+    let uid = nix::unistd::getuid().as_raw();
+    let (_d, sock) = init_test_daemon(&tmp, uid, Profile::Sim);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let path = tmp.path().join("tokens.json");
+    let mut file: TokensFile =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).expect("tokens file");
+    for t in &mut file.tokens {
+        if t.id.as_str() == "writer" {
+            t.revoked = true;
+        }
+    }
+    std::fs::write(&path, serde_json::to_vec_pretty(&file).unwrap()).unwrap();
+
+    let mut c = ApiClient::connect(&sock).await.unwrap();
+    c.call_auth(
+        RequestBody::PlanChange {
+            params: PlanChangeParams {
+                kind: kxprov_api::FieldKindWire::CidName,
+                index: 0,
+                value: "REVOKED".into(),
+            },
+        },
+        Some(bearer_auth(WRITER_SECRET)),
+    )
+    .await
+    .expect_err("revoked writer");
+
+    let kxprov = ensure_kxprov_built();
+    let out = Command::new(&kxprov)
+        .args(["token", "rotate", "--id", "writer"])
+        .arg("--tokens-path")
+        .arg(&path)
+        .output()
+        .expect("kxprov token rotate");
+    assert!(
+        out.status.success(),
+        "rotate failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let new_bearer = stdout
+        .lines()
+        .map(str::trim)
+        .find(|line| line.len() == 64 && line.chars().all(|c| c.is_ascii_hexdigit()))
+        .expect("hex bearer in rotate output");
+
+    let mut c = ApiClient::connect(&sock).await.unwrap();
+    let ResponseResult::PlanChange(plan) = c
+        .call_auth(
+            RequestBody::PlanChange {
+                params: PlanChangeParams {
+                    kind: kxprov_api::FieldKindWire::CidName,
+                    index: 1,
+                    value: "ROTATED".into(),
+                },
+            },
+            Some(bearer_auth(new_bearer)),
+        )
+        .await
+        .expect("plan after rotate")
+    else {
+        panic!("expected PlanChange after rotate");
+    };
+    assert!(plan.plan_id.as_str().len() >= 8);
 }
 
 /// B9: a token revoked (or removed) while its job is queued fails without running.

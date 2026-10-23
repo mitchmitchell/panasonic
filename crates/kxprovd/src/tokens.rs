@@ -131,11 +131,17 @@ impl TokenStore {
             return;
         };
         for id in newly_revoked {
-            q.mark_token_revoked(id);
+            q.bump_token_epoch(id);
         }
         for id in reactivated {
-            q.clear_token_revoked(id);
+            q.bump_token_epoch(id);
         }
+    }
+
+    /// Unix-socket principals that are not rows in `tokens.json` (admin read, read-only peer).
+    pub fn is_synthetic_job_principal(token_id: &TokenId) -> bool {
+        let s = token_id.as_str();
+        s == "root" || s == "local" || s.starts_with("local:")
     }
 
     fn read_state(path: &Path) -> Result<TokenState, TokenError> {
@@ -206,7 +212,8 @@ impl TokenStore {
                 reactivated: Vec::new(),
             });
         }
-        if state.enforce_secure_reload {
+        let enforce_secure = state.enforce_secure_reload;
+        if enforce_secure {
             Self::check_secure(&state.path)?;
         }
         let prev_ids: HashSet<String> = state
@@ -243,6 +250,7 @@ impl TokenStore {
             .map(|t| t.id.clone())
             .collect();
         *state = fresh;
+        state.enforce_secure_reload = enforce_secure;
         Ok(TokenRefreshDelta {
             newly_revoked,
             reactivated,
@@ -353,6 +361,9 @@ impl TokenStore {
     }
 
     pub fn is_revoked(&self, token_id: &TokenId) -> Result<bool, TokenError> {
+        if Self::is_synthetic_job_principal(token_id) {
+            return Ok(false);
+        }
         let mut state = self.inner.lock().expect("token store lock");
         let delta = Self::refresh_if_modified(&mut state)?;
         drop(state);

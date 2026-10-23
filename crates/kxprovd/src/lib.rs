@@ -222,11 +222,32 @@ impl Daemon {
         peer_uid: u32,
         profile: kxprov_api::Profile,
     ) -> (Self, std::path::PathBuf) {
+        Self::sim_for_tests_profile_peers(
+            data_dir,
+            peer_uid,
+            profile,
+            peer_uid.wrapping_add(1),
+            peer_uid,
+        )
+    }
+
+    /// Same as [`sim_for_tests_profile`], but `peer_uid` is the connecting UID while admin/gateway differ.
+    #[cfg(feature = "test-util")]
+    pub fn sim_for_tests_profile_peers(
+        data_dir: impl AsRef<std::path::Path>,
+        peer_uid: u32,
+        profile: kxprov_api::Profile,
+        gateway_uid: u32,
+        admin_uid: u32,
+    ) -> (Self, std::path::PathBuf) {
         let data_dir = data_dir.as_ref().to_path_buf();
         test_util::write_integration_tokens(&data_dir.join("tokens.json"));
         let socket = data_dir.join("kxprovd.sock");
         let mut cfg = Config::sim_test(data_dir, socket.clone(), peer_uid);
         cfg.profile = profile;
+        cfg.gateway_uid = gateway_uid;
+        cfg.admin_uid = admin_uid;
+        cfg.peer_policy = peer::PeerPolicy::new(gateway_uid, admin_uid);
         if profile == Profile::Prod {
             cfg.gates.live_writes_approved = true;
         }
