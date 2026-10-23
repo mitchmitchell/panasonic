@@ -43,5 +43,9 @@ pub trait DaemonBackend: Send + Sync {
         diff_hash: DiffHash,
     ) -> Result<ApplyJob, BackendError>;
 
-    async fn rollback(&self, caller: &CallerIdentity, job_id: JobId) -> Result<ApplyJob, BackendError>;
+    async fn rollback(
+        &self,
+        caller: &CallerIdentity,
+        job_id: JobId,
+    ) -> Result<ApplyJob, BackendError>;
 }

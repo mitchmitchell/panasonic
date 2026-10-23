@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use askama::Template;
 use axum::extract::{Form, FromRef, Path, State};
-use axum::http::HeaderMap;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use axum::Router;
@@ -23,9 +23,9 @@ use serde::Deserialize;
 use templates::{DashboardTemplate, ReadFieldRow};
 use tower_sessions::Session;
 
-pub use static_files::serve_static;
-pub use session::{reject_authenticated_login, require_web_session, SESSION_AUTH_KEY};
 pub use login_limit::LoginRateLimiter;
+pub use session::{reject_authenticated_login, require_web_session, SESSION_AUTH_KEY};
+pub use static_files::serve_static;
 
 pub trait PasswordVerifier: Send + Sync {
     fn verify(&self, password: &str) -> bool;
@@ -45,15 +45,30 @@ impl FromRef<WebState> for CsrfConfig {
     }
 }
 
+pub fn sign_in_page_title() -> &'static str {
+    "Sign in"
+}
+
 pub fn router(state: WebState) -> Router {
     Router::new()
         .route("/static/{file}", get(static_file))
         .route("/login", get(login_form).post(login_submit))
         .route("/logout", post(logout))
         .route("/", get(dashboard))
+        .route("/status", get(dashboard))
         .route("/read", post(read_record))
         .route("/plan", post(plan_change))
+        .route("/api/plan", post(plan_change))
+        .route("/api/apply", post(approval_via_mcp_only))
+        .route("/api/approval/submit", post(approval_via_mcp_only))
         .with_state(state)
+}
+
+async fn approval_via_mcp_only() -> impl IntoResponse {
+    (
+        StatusCode::FORBIDDEN,
+        "This action is only available through MCP (submit_approval or apply_plan).",
+    )
 }
 
 async fn static_file(Path(file): Path<String>) -> impl IntoResponse {
@@ -75,7 +90,12 @@ pub fn operational_mode_banner_class(mode: OperationalMode) -> &'static str {
 }
 
 fn default_plan_form() -> (String, String, String, String) {
-    ("36".into(), "1".into(), "cid_number".into(), "5550100".into())
+    (
+        "36".into(),
+        "1".into(),
+        "cid_number".into(),
+        "5550100".into(),
+    )
 }
 
 fn empty_dashboard(csrf: &str) -> DashboardTemplate {
@@ -212,6 +232,7 @@ async fn login_form(csrf_token: CsrfToken) -> impl IntoResponse {
         csrf_token,
         Html(
             templates::LoginTemplate {
+                page_title: sign_in_page_title().into(),
                 show_error: false,
                 error: String::new(),
                 csrf_token: token,
@@ -248,10 +269,7 @@ async fn login_submit(
         return login_error_html("", "Too many attempts. Try again later.").into_response();
     }
     if !state.admin.verify(&form.password) {
-        state
-            .login_limiter
-            .record_failure(&acct_key, &ip_key)
-            .await;
+        state.login_limiter.record_failure(&acct_key, &ip_key).await;
         return Redirect::to("/login?error=1").into_response();
     }
     state.login_limiter.reset(&acct_key, &ip_key).await;
@@ -263,6 +281,7 @@ async fn login_submit(
 fn login_error_html(csrf: &str, message: &str) -> Html<String> {
     Html(
         templates::LoginTemplate {
+            page_title: sign_in_page_title().into(),
             show_error: true,
             error: message.into(),
             csrf_token: csrf.to_string(),
@@ -327,10 +346,7 @@ async fn read_record(
 
     match state
         .backend
-        .read_fields(
-            &caller,
-            ReadFieldsRequest { table, record },
-        )
+        .read_fields(&caller, ReadFieldsRequest { table, record })
         .await
     {
         Ok(resp) => {
@@ -403,12 +419,16 @@ async fn plan_change(
     tpl.new_value_value = form.new_value.clone();
     fill_dashboard_from_status(&mut tpl, &state, &caller).await;
 
-    let mode = state
-        .backend
-        .status(&caller)
-        .await
-        .map(|s| s.operational_mode)
-        .unwrap_or(OperationalMode::Testing);
+    let mode = match state.backend.status(&caller).await {
+        Ok(status) => status.operational_mode,
+        Err(_) => {
+            tpl.show_plan_form_error = true;
+            tpl.plan_form_error =
+                "Could not read daemon status. Planning is unavailable until status succeeds."
+                    .into();
+            return Html(tpl.render().unwrap_or_default());
+        }
+    };
 
     let request = match parse_plan_form(&form) {
         Ok(req) => req,

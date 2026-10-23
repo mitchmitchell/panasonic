@@ -9,6 +9,7 @@ members = [
     "crates/kxprov-web",
     "crates/kxprov-mcp",
     "crates/kxprov-gw",
+    "crates/kxprov-h5",
 ]
 # Later: crates/kxprovd
 
@@ -76,4 +77,5 @@ kxprov-api = { path = "crates/kxprov-api" }
 kxprov-mock = { path = "crates/kxprov-mock" }
 kxprov-web = { path = "crates/kxprov-web" }
 kxprov-mcp = { path = "crates/kxprov-mcp" }
+kxprov-gw = { path = "crates/kxprov-gw" }
 kxtd1232 = { path = "crates/kxtd1232" }

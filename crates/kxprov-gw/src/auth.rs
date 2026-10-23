@@ -15,6 +15,7 @@ pub struct McpTokenRecord {
     pub token_id: String,
     pub agent_name: String,
     pub scopes: ScopeSet,
+    expires_at_ms: Option<u64>,
 }
 
 pub struct AdminPassword {
@@ -87,6 +88,7 @@ impl McpTokenStore {
                     token_id: entry.id,
                     agent_name: entry.name,
                     scopes,
+                    expires_at_ms: entry.expires_at_ms,
                 },
             );
         }
@@ -97,8 +99,14 @@ impl McpTokenStore {
         let digest = Sha256::digest(bearer.as_bytes());
         let mut key = [0u8; 32];
         key.copy_from_slice(&digest);
+        let now_ms = OffsetDateTime::now_utc().unix_timestamp() as u64 * 1000;
         for (stored_hash, record) in &self.by_hash {
             if bool::from(key.ct_eq(stored_hash)) {
+                if let Some(exp) = record.expires_at_ms {
+                    if now_ms >= exp {
+                        return None;
+                    }
+                }
                 return Some(record.clone());
             }
         }
@@ -106,8 +114,38 @@ impl McpTokenStore {
     }
 }
 
+#[cfg(test)]
+mod verify_tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    #[test]
+    fn verify_bearer_rejects_expired_token_after_load() {
+        let bearer = "test-bearer-secret";
+        let digest = Sha256::digest(bearer.as_bytes());
+        let mut key = [0u8; 32];
+        key.copy_from_slice(&digest);
+        let mut by_hash = HashMap::new();
+        by_hash.insert(
+            key,
+            McpTokenRecord {
+                token_id: "t1".into(),
+                agent_name: "T".into(),
+                scopes: scopes_for_role("approver"),
+                expires_at_ms: Some(1),
+            },
+        );
+        let store = McpTokenStore { by_hash };
+        assert!(store.verify_bearer(bearer).is_none());
+    }
+}
+
 pub fn validate_secret_file(path: &Path, label: &str) -> anyhow::Result<()> {
-    if std::env::var("KXPROV_SKIP_SECRET_FILE_CHECKS").ok().as_deref() == Some("1") {
+    if std::env::var("KXPROV_SKIP_SECRET_FILE_CHECKS")
+        .ok()
+        .as_deref()
+        == Some("1")
+    {
         return Ok(());
     }
     #[cfg(unix)]

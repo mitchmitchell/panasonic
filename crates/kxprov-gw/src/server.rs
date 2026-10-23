@@ -4,36 +4,29 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::body::Body;
-use axum::extract::{Request, State};
+use axum::extract::Request;
 use axum::http::{header, HeaderMap, StatusCode};
-use axum::middleware::{from_fn, from_fn_with_state};
 use axum::response::{IntoResponse, Response};
 use axum::routing::any;
 use axum::Router;
-use axum_csrf::{CsrfConfig, CsrfLayer};
+use axum_csrf::CsrfConfig;
 use axum_server::tls_rustls::RustlsConfig;
 use kxprov_api::TokenId;
-use kxprov_mock::{CallerIdentity, DaemonBackend, McpTokenIdentity, MockDaemon};
 use kxprov_mcp::{KxMcpServer, MCP_CALLER};
-use kxprov_web::{
-    reject_authenticated_login, require_web_session, LoginRateLimiter, PasswordVerifier, WebState,
-};
+use kxprov_mock::{CallerIdentity, DaemonBackend, McpTokenIdentity, MockDaemon};
+use kxprov_web::{LoginRateLimiter, PasswordVerifier, WebState};
 use rmcp::transport::streamable_http_server::{
     session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
 };
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
-use tower_http::set_header::SetResponseHeaderLayer;
 use tower_service::Service;
-use tower_sessions::cookie::SameSite;
-use tower_sessions::cookie::time::Duration as CookieDuration;
-use tower_sessions::{Expiry, MemoryStore, SessionManagerLayer};
 
 use crate::auth::{AdminPassword, McpTokenStore};
 use crate::config::GatewayConfig;
-use crate::host_origin::{host_origin_middleware, security_headers, HostOriginConfig};
-use crate::post_origin::post_origin_middleware;
-use crate::ratelimit::{rate_limit_middleware, RateLimitState, RateLimiter};
+use crate::host_origin::HostOriginConfig;
+use crate::ratelimit::RateLimiter;
+use crate::web_stack::production_web_router;
 pub struct GatewayHandles {
     pub web_tailnet: SocketAddr,
     pub web_lan: SocketAddr,
@@ -51,9 +44,7 @@ impl PasswordVerifier for AdminVerifier {
 
 fn ensure_rustls_provider() {
     if rustls::crypto::CryptoProvider::get_default().is_none() {
-        rustls::crypto::ring::default_provider()
-            .install_default()
-            .expect("install rustls ring crypto provider");
+        let _ = rustls::crypto::ring::default_provider().install_default();
     }
 }
 
@@ -80,43 +71,13 @@ pub async fn serve(
     };
 
     let rate_limiter = RateLimiter::new(config.rate_limit_per_minute);
-    let web_rate = RateLimitState {
-        limiter: rate_limiter.clone(),
-        key_from_request: Arc::new(|req: &Request<Body>| {
-            req.extensions()
-                .get::<String>()
-                .cloned()
-                .or_else(|| Some("web-anonymous".into()))
-        }),
-    };
-
-    let session_layer = SessionManagerLayer::new(MemoryStore::default())
-        .with_name("__Host-kxprov.sid")
-        .with_secure(true)
-        .with_http_only(true)
-        .with_same_site(SameSite::Strict)
-        .with_expiry(Expiry::OnInactivity(CookieDuration::seconds(
-            config.session_ttl_secs as i64,
-        )));
-
-    let web_app = kxprov_web::router(web_state)
-        .layer(from_fn(require_web_session))
-        .layer(from_fn(reject_authenticated_login))
-        .layer(CsrfLayer::new(csrf_config))
-        .layer(session_layer)
-        .layer(from_fn_with_state(
-            web_rate.clone(),
-            web_identity_rate_limit,
-        ))
-        .layer(from_fn_with_state(
-            host_origin.clone(),
-            post_origin_middleware,
-        ))
-        .layer(from_fn_with_state(host_origin.clone(), host_origin_layer))
-        .layer(SetResponseHeaderLayer::overriding(
-            header::CONTENT_SECURITY_POLICY,
-            security_headers(),
-        ));
+    let web_app = production_web_router(
+        web_state,
+        host_origin.clone(),
+        csrf_config,
+        config.session_ttl_secs,
+        rate_limiter.clone(),
+    );
 
     let mcp_backend = backend.clone();
     let mut mcp_http_config = StreamableHttpServerConfig::default();
@@ -144,18 +105,21 @@ pub async fn serve(
     );
 
     let web_tailnet_addr: SocketAddr = config.web_tailnet_bind.parse()?;
-    let web_lan_addr: SocketAddr = config.web_lan_bind().parse()?;
     let mcp_addr: SocketAddr = config.mcp_public_bind.parse()?;
+    let web_lan_addrs: Vec<SocketAddr> = config
+        .web_lan_bind_addresses()
+        .iter()
+        .map(|s| s.parse())
+        .collect::<Result<Vec<_>, _>>()?;
 
     let web_tailnet_listener = TcpListener::bind(web_tailnet_addr).await?;
-    let web_lan_listener = TcpListener::bind(web_lan_addr).await?;
     let mcp_listener = TcpListener::bind(mcp_addr).await?;
 
     let bound_web_tailnet = web_tailnet_listener.local_addr()?;
-    let bound_web_lan = web_lan_listener.local_addr()?;
     let bound_mcp = mcp_listener.local_addr()?;
 
     let tls = load_tls_config(&config.tls_cert_path, &config.tls_key_path).await?;
+    let mut bound_web_lan: Option<SocketAddr> = None;
 
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
     let (shutdown_tx_mcp, shutdown_rx_mcp) = oneshot::channel::<()>();
@@ -170,12 +134,20 @@ pub async fn serve(
             .ok();
     });
 
-    let web_app_lan = web_app;
-    tokio::spawn(async move {
-        let _ = axum_server::from_tcp_rustls(web_lan_listener.into_std().expect("tcp"), tls)
-            .serve(web_app_lan.into_make_service())
-            .await;
-    });
+    for lan_addr in web_lan_addrs {
+        let listener = TcpListener::bind(lan_addr).await?;
+        let local = listener.local_addr()?;
+        if bound_web_lan.is_none() || local.ip().is_loopback() {
+            bound_web_lan = Some(local);
+        }
+        let tls_cfg = tls.clone();
+        let web_app_lan = web_app.clone();
+        tokio::spawn(async move {
+            let _ = axum_server::from_tcp_rustls(listener.into_std().expect("tcp"), tls_cfg)
+                .serve(web_app_lan.into_make_service())
+                .await;
+        });
+    }
 
     tokio::spawn(async move {
         axum::serve(mcp_listener, mcp_router)
@@ -188,7 +160,7 @@ pub async fn serve(
 
     Ok(GatewayHandles {
         web_tailnet: bound_web_tailnet,
-        web_lan: bound_web_lan,
+        web_lan: bound_web_lan.ok_or_else(|| anyhow::anyhow!("no web LAN HTTPS bind addresses"))?,
         mcp: bound_mcp,
         shutdown: GatewayShutdown {
             web_tailnet: shutdown_tx,
@@ -222,15 +194,13 @@ async fn load_tls_config(cert: &Path, key: &Path) -> anyhow::Result<RustlsConfig
             key.display()
         );
     }
-    RustlsConfig::from_pem_file(cert, key)
-        .await
-        .map_err(|e| {
-            anyhow::anyhow!(
-                "failed to load TLS certificate from {} and key from {}: {e}",
-                cert.display(),
-                key.display()
-            )
-        })
+    RustlsConfig::from_pem_file(cert, key).await.map_err(|e| {
+        anyhow::anyhow!(
+            "failed to load TLS certificate from {} and key from {}: {e}",
+            cert.display(),
+            key.display()
+        )
+    })
 }
 
 async fn handle_mcp(
@@ -261,30 +231,6 @@ async fn handle_mcp(
             }
         })
         .await
-}
-
-async fn web_identity_rate_limit(
-    State(rate): State<RateLimitState>,
-    mut req: Request<Body>,
-    next: axum::middleware::Next,
-) -> Result<Response, StatusCode> {
-    if let Some(session_key) = req
-        .extensions()
-        .get::<String>()
-        .cloned()
-        .or_else(|| Some("web-anonymous".into()))
-    {
-        req.extensions_mut().insert(session_key);
-    }
-    rate_limit_middleware(State(rate), req, next).await
-}
-
-async fn host_origin_layer(
-    State(cfg): State<HostOriginConfig>,
-    req: Request<Body>,
-    next: axum::middleware::Next,
-) -> Response {
-    host_origin_middleware(cfg, req, next).await
 }
 
 fn bearer_token(headers: &HeaderMap) -> Option<&str> {

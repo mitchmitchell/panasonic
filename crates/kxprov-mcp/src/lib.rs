@@ -169,11 +169,13 @@ impl KxMcpServer {
             Ok(job) => Ok(text_json(JobRef {
                 job_id: job.job_id.0,
             })),
-            Err(BackendError::ApprovalRequired(body)) => Ok(text_json(ApplyApprovalRequiredResult {
-                plan_id: body.plan_id,
-                diff_hash: body.diff_hash,
-                status: body.status,
-            })),
+            Err(BackendError::ApprovalRequired(body)) => {
+                Ok(text_json(ApplyApprovalRequiredResult {
+                    plan_id: body.plan_id,
+                    diff_hash: body.diff_hash,
+                    status: body.status,
+                }))
+            }
             Err(e) => Err(api_err(e)),
         }
     }

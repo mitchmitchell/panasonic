@@ -21,7 +21,11 @@ pub async fn require_web_session(session: Session, req: Request<Body>, next: Nex
     }
 }
 
-pub async fn reject_authenticated_login(session: Session, req: Request<Body>, next: Next) -> Response {
+pub async fn reject_authenticated_login(
+    session: Session,
+    req: Request<Body>,
+    next: Next,
+) -> Response {
     if req.uri().path() != "/login" || req.method() != axum::http::Method::GET {
         return next.run(req).await;
     }

@@ -16,8 +16,8 @@ use crate::error::BackendError;
 use crate::identity::CallerIdentity;
 use crate::plan::{approval_ttl, plan_id_from_hex, plan_storage_ttl, ImmutablePlan};
 use crate::types::{
-    ApplyJob, BackupInfo, BackupList, DaemonStatus, FieldValue, JobId, JobState,
-    PlanChangeRequest, PlanSummary, ReadFieldsRequest, ReadFieldsResponse,
+    ApplyJob, BackupInfo, BackupList, DaemonStatus, FieldValue, JobId, JobState, PlanChangeRequest,
+    PlanSummary, ReadFieldsRequest, ReadFieldsResponse,
 };
 use crate::write_gates::prod_profile_write_gates_active;
 
@@ -303,7 +303,10 @@ impl DaemonBackend for MockDaemon {
         profile: Profile,
     ) -> Result<Approval, BackendError> {
         Self::require_scope(caller, Scope::Approve)?;
-        let approver = caller.token_id().cloned().ok_or(BackendError::ForbiddenScope)?;
+        let approver = caller
+            .token_id()
+            .cloned()
+            .ok_or(BackendError::ForbiddenScope)?;
         let mut inner = self.inner.write().await;
         let plan_id = Self::resolve_plan_id(&inner.plans, plan_id_or_prefix)?;
         let plan = inner
@@ -344,9 +347,12 @@ impl DaemonBackend for MockDaemon {
             expires_at_ms: expires_at_ms_from_ttl(approval_ttl()),
             consumed: false,
         };
-        inner
-            .plan_approvals
-            .insert(approval.plan_id.0.clone(), StoredApproval { approval: approval.clone() });
+        inner.plan_approvals.insert(
+            approval.plan_id.0.clone(),
+            StoredApproval {
+                approval: approval.clone(),
+            },
+        );
         Ok(approval)
     }
 
@@ -374,7 +380,8 @@ impl DaemonBackend for MockDaemon {
         if prod_profile_write_gates_active(active_profile) {
             let now = now_ms();
             let key = inner.plan_approvals.iter().find_map(|(id, stored)| {
-                Self::validate_plan_approval(stored, &plan_id, &diff_hash, active_profile, now).ok()?;
+                Self::validate_plan_approval(stored, &plan_id, &diff_hash, active_profile, now)
+                    .ok()?;
                 Some(id.clone())
             });
             let Some(approval_key) = key else {
@@ -401,7 +408,11 @@ impl DaemonBackend for MockDaemon {
         })
     }
 
-    async fn rollback(&self, caller: &CallerIdentity, job_id: JobId) -> Result<ApplyJob, BackendError> {
+    async fn rollback(
+        &self,
+        caller: &CallerIdentity,
+        job_id: JobId,
+    ) -> Result<ApplyJob, BackendError> {
         Self::require_scope(caller, Scope::Write)?;
         if job_id.0.is_empty() {
             return Err(BackendError::JobNotFound);

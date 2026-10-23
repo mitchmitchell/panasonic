@@ -1344,6 +1344,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "kxprov-h5"
+version = "0.1.0"
+
+[[package]]
 name = "kxprov-mcp"
 version = "0.1.0"
 dependencies = [
@@ -1393,6 +1397,8 @@ dependencies = [
  "hex",
  "http-body-util",
  "kxprov-api",
+ "kxprov-gw",
+ "kxprov-mcp",
  "kxprov-mock",
  "kxtd1232",
  "serde",

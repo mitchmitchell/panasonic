@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
-use kxprov_mock::MockDaemon;
 use kxprov_gw::config::GatewayConfig;
 use kxprov_gw::server::serve;
+use kxprov_mock::MockDaemon;
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
@@ -11,7 +11,7 @@ async fn main() -> anyhow::Result<()> {
         .with_env_filter(EnvFilter::from_default_env())
         .init();
 
-    let config = GatewayConfig::from_env_and_args();
+    let config = GatewayConfig::from_env_and_args()?;
     let backend = Arc::new(MockDaemon::new());
     let handles = serve(config, Some(backend)).await?;
     tracing::info!(

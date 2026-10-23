@@ -12,7 +12,7 @@ pub async fn post_origin_middleware(
     req: Request<Body>,
     next: Next,
 ) -> Response {
-    if req.method() != Method::POST {
+    if !state_changing_method(req.method()) {
         return next.run(req).await;
     }
     let path = req.uri().path();
@@ -23,6 +23,13 @@ pub async fn post_origin_middleware(
         return next.run(req).await;
     }
     (StatusCode::FORBIDDEN, "origin not allowed").into_response()
+}
+
+fn state_changing_method(method: &Method) -> bool {
+    matches!(
+        method,
+        &Method::POST | &Method::PUT | &Method::PATCH | &Method::DELETE
+    )
 }
 
 fn origin_allowed(cfg: &HostOriginConfig, headers: &axum::http::HeaderMap) -> bool {

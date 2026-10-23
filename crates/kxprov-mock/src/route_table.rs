@@ -26,14 +26,33 @@ pub const WEB_ROUTES: &[HttpRoute] = &[
         path: "/",
     },
     HttpRoute {
-        method: "POST",
-        path: "/plan",
+        method: "GET",
+        path: "/status",
     },
     HttpRoute {
         method: "POST",
         path: "/read",
     },
+    HttpRoute {
+        method: "POST",
+        path: "/plan",
+    },
+    HttpRoute {
+        method: "POST",
+        path: "/api/plan",
+    },
+    HttpRoute {
+        method: "POST",
+        path: "/api/apply",
+    },
+    HttpRoute {
+        method: "POST",
+        path: "/api/approval/submit",
+    },
 ];
+
+/// MCP tools on the approval/apply path (N1 surface).
+pub const MCP_APPROVAL_TOOLS: &[&str] = &["submit_approval", "apply_plan"];
 
 pub const FORBIDDEN_MODE_PROFILE_PATHS: &[&str] = &[
     "/mode",

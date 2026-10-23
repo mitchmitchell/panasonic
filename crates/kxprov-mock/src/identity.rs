@@ -30,9 +30,7 @@ impl CallerIdentity {
 
     pub fn scopes(&self) -> ScopeSet {
         match self {
-            Self::Web(_) => ScopeSet::empty()
-                .with(Scope::Read)
-                .with(Scope::Plan),
+            Self::Web(_) => ScopeSet::empty().with(Scope::Read).with(Scope::Plan),
             Self::Mcp(t) => t.scopes.clone(),
         }
     }

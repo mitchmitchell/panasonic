@@ -13,8 +13,8 @@ use kxprov_mock::MockDaemon;
 use kxprov_web::require_web_session;
 use support::{test_router, test_web_state};
 use tower::ServiceExt;
-use tower_sessions::cookie::SameSite;
 use tower_sessions::cookie::time::Duration as CookieDuration;
+use tower_sessions::cookie::SameSite;
 use tower_sessions::{Expiry, MemoryStore, SessionManagerLayer};
 
 async fn body_string(resp: axum::response::Response) -> String {
@@ -24,7 +24,10 @@ async fn body_string(resp: axum::response::Response) -> String {
 
 fn app_with_mode(mode: OperationalMode) -> axum::Router {
     let mut state = test_web_state();
-    state.backend = Arc::new(MockDaemon::with_mode_and_password(mode, "test-admin-password"));
+    state.backend = Arc::new(MockDaemon::with_mode_and_password(
+        mode,
+        "test-admin-password",
+    ));
     let session = SessionManagerLayer::new(MemoryStore::default())
         .with_secure(true)
         .with_http_only(true)
@@ -39,10 +42,21 @@ fn app_with_mode(mode: OperationalMode) -> axum::Router {
 async fn login_cookie(app: &axum::Router) -> (String, String) {
     let get = app
         .clone()
-        .oneshot(Request::builder().uri("/login").body(Body::empty()).unwrap())
+        .oneshot(
+            Request::builder()
+                .uri("/login")
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
-    let cookie = get.headers().get(header::SET_COOKIE).unwrap().to_str().unwrap().to_string();
+    let cookie = get
+        .headers()
+        .get(header::SET_COOKIE)
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
     let html = body_string(get).await;
     let csrf = html
         .split("name=\"_csrf\" value=\"")

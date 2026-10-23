@@ -3,6 +3,7 @@ use askama::Template;
 #[derive(Template)]
 #[template(path = "login.html")]
 pub struct LoginTemplate {
+    pub page_title: String,
     pub show_error: bool,
     pub error: String,
     pub csrf_token: String,

@@ -1,6 +1,6 @@
-use kxprov_api::{diff_hash, CanonicalPlan, CanonicalWrite};
 use kxprov_api::Profile;
-use kxprov_mock::{PlanChangeRequest, canonical_diff_hash};
+use kxprov_api::{diff_hash, CanonicalPlan, CanonicalWrite};
+use kxprov_mock::{canonical_diff_hash, PlanChangeRequest};
 
 #[test]
 fn diff_hash_is_stable_for_canonical_bytes() {

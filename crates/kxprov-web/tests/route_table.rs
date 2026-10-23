@@ -1,26 +1,47 @@
-use axum::body::Body;
-use axum::http::{Method, Request, StatusCode};
-use kxprov_mock::{FORBIDDEN_MODE_PROFILE_PATHS, WEB_ROUTES};
-use kxprov_web::router;
-
 mod support;
-use support::test_web_state;
-use tower::ServiceExt;
 
-fn app() -> axum::Router {
-    router(test_web_state())
+use std::sync::Arc;
+use std::time::Duration;
+
+use axum::body::Body;
+use axum::http::{header, Method, Request, StatusCode};
+use axum_csrf::CsrfConfig;
+use kxprov_gw::{production_web_router, HostOriginConfig, RateLimiter};
+use kxprov_mcp::KxMcpServer;
+use kxprov_mock::{MCP_APPROVAL_TOOLS, MCP_TOOLS, WEB_ROUTES};
+use kxprov_web::LoginRateLimiter;
+use support::{test_web_state, TestVerifier};
+use tower::ServiceExt;
+fn production_like_app() -> axum::Router {
+    let mut state = test_web_state();
+    state.login_limiter = Arc::new(LoginRateLimiter::new(20, Duration::from_secs(60)));
+    state.admin = Arc::new(TestVerifier);
+    production_web_router(
+        state,
+        HostOriginConfig {
+            allowed_hosts: vec!["127.0.0.1".into(), "localhost".into()],
+            allowed_origins: vec!["http://127.0.0.1".into(), "http://localhost".into()],
+        },
+        CsrfConfig::default(),
+        900,
+        RateLimiter::new(120),
+    )
 }
 
 fn allowed_status(status: StatusCode) -> bool {
     matches!(
         status,
-        StatusCode::NOT_FOUND | StatusCode::METHOD_NOT_ALLOWED
+        StatusCode::NOT_FOUND
+            | StatusCode::METHOD_NOT_ALLOWED
+            | StatusCode::SEE_OTHER
+            | StatusCode::FORBIDDEN
     )
 }
 
 #[tokio::test]
-async fn forbidden_mode_profile_paths_return_404_or_405() {
-    let app = app();
+async fn n1_forbidden_mode_profile_paths_return_404_or_405() {
+    use kxprov_mock::FORBIDDEN_MODE_PROFILE_PATHS;
+    let app = production_like_app();
     for path in FORBIDDEN_MODE_PROFILE_PATHS {
         for method in [Method::GET, Method::POST, Method::PUT, Method::DELETE] {
             let resp = app
@@ -46,26 +67,73 @@ async fn forbidden_mode_profile_paths_return_404_or_405() {
 }
 
 #[tokio::test]
-async fn registered_get_routes_are_not_404() {
-    let app = app();
+async fn n1_registered_routes_exist_on_production_router() {
+    let app = production_like_app();
     for route in WEB_ROUTES {
-        if route.method != "GET" {
-            continue;
-        }
-        let uri = if route.path == "/static/{file}" {
-            "/static/logo.svg"
-        } else {
-            route.path
+        let uri = match route.path {
+            "/static/{file}" => "/static/logo.svg",
+            other => other,
         };
+        let method = match route.method {
+            "GET" => Method::GET,
+            "POST" => Method::POST,
+            _ => continue,
+        };
+        let mut builder = Request::builder().method(method).uri(uri);
+        if route.method == "POST" {
+            builder = builder
+                .header(header::ORIGIN, "http://127.0.0.1")
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded");
+        }
         let resp = app
             .clone()
-            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .oneshot(builder.body(Body::from("_csrf=x")).unwrap())
             .await
             .unwrap();
         assert_ne!(
             resp.status(),
             StatusCode::NOT_FOUND,
-            "registered GET {uri} should exist"
+            "{} {} should be registered",
+            route.method,
+            uri
         );
+    }
+}
+
+#[tokio::test]
+async fn n1_approval_http_paths_are_registered_and_fail_closed_without_session() {
+    let app = production_like_app();
+    for path in ["/api/apply", "/api/approval/submit"] {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri(path)
+                    .header(header::ORIGIN, "http://127.0.0.1")
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .body(Body::from("_csrf=x"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_ne!(resp.status(), StatusCode::NOT_FOUND, "{path} must exist");
+        assert!(
+            resp.status() == StatusCode::SEE_OTHER || resp.status() == StatusCode::FORBIDDEN,
+            "{path} returned {}",
+            resp.status()
+        );
+    }
+}
+
+#[test]
+fn n1_mcp_approval_tools_are_registered() {
+    let server = KxMcpServer::new(Arc::new(kxprov_mock::MockDaemon::new()));
+    let names = server.registered_tool_names();
+    for tool in MCP_APPROVAL_TOOLS {
+        assert!(names.iter().any(|n| n == tool), "missing MCP tool {tool}");
+    }
+    for tool in MCP_TOOLS {
+        assert!(names.iter().any(|n| n == tool), "missing MCP tool {tool}");
     }
 }

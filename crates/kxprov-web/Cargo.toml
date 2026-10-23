@@ -26,6 +26,8 @@ tokio = { workspace = true, features = ["sync"] }
 axum = { workspace = true }
 http-body-util = { workspace = true }
 kxprov-api = { workspace = true }
+kxprov-gw = { workspace = true }
+kxprov-mcp = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 tower = { workspace = true, features = ["util"] }
 

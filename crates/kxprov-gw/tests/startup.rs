@@ -37,7 +37,9 @@ token_sha256_hex = "020202020202020202020202020202020202020202020202020202020202
 fn write_tls_pair(dir: &TempDir) -> (PathBuf, PathBuf) {
     let key_pair = KeyPair::generate().expect("key");
     let mut params = CertificateParams::new(["localhost".into()]).expect("params");
-    params.distinguished_name.push(rcgen::DnType::CommonName, "kxprov-test");
+    params
+        .distinguished_name
+        .push(rcgen::DnType::CommonName, "kxprov-test");
     let cert = params.self_signed(&key_pair).expect("cert");
     let cert_path = dir.path().join("lan.crt");
     let key_path = dir.path().join("lan.key");
@@ -53,7 +55,9 @@ fn sample_config(dir: &TempDir) -> GatewayConfig {
     write_admin_hash(&admin_path);
     write_tokens(&tokens_path);
     GatewayConfig {
-        bind: "127.0.0.1:0".into(),
+        bind: Some("127.0.0.1:0".into()),
+        lan_ip: "127.0.0.1".parse().unwrap(),
+        web_https_port: 8443,
         web_tailnet_bind: "127.0.0.1:0".into(),
         mcp_tailnet_bind: "127.0.0.1:8081".into(),
         mcp_public_bind: "127.0.0.1:0".into(),
@@ -74,7 +78,9 @@ async fn gateway_starts_from_sample_config() {
     let dir = tempfile::tempdir().unwrap();
     let config = sample_config(&dir);
     let backend = Arc::new(MockDaemon::new());
-    let handles = serve(config, Some(backend)).await.expect("gateway should start");
+    let handles = serve(config, Some(backend))
+        .await
+        .expect("gateway should start");
     assert!(handles.web_tailnet.port() > 0);
     assert!(handles.web_lan.port() > 0);
     assert!(handles.mcp.port() > 0);

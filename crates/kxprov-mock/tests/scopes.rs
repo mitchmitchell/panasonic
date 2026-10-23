@@ -148,12 +148,7 @@ async fn submit_approval_accepts_eight_hex_prefix() {
         .await;
     let prefix = &plan.plan_id.0[..8];
     daemon
-        .submit_approval(
-            &approver(),
-            prefix,
-            plan.diff_hash.clone(),
-            Profile::Prod,
-        )
+        .submit_approval(&approver(), prefix, plan.diff_hash.clone(), Profile::Prod)
         .await
         .expect("prefix submit");
 }
@@ -300,24 +295,14 @@ async fn submit_approval_rate_limit() {
             .apply_plan(&comms(), plan.plan_id.clone(), plan.diff_hash.clone())
             .await;
         daemon
-            .submit_approval(
-                &approver(),
-                &plan.plan_id.0,
-                plan.diff_hash,
-                Profile::Prod,
-            )
+            .submit_approval(&approver(), &plan.plan_id.0, plan.diff_hash, Profile::Prod)
             .await
             .expect("submit");
     }
     let plan = sample_plan(&daemon).await;
     assert!(matches!(
         daemon
-            .submit_approval(
-                &approver(),
-                &plan.plan_id.0,
-                plan.diff_hash,
-                Profile::Prod,
-            )
+            .submit_approval(&approver(), &plan.plan_id.0, plan.diff_hash, Profile::Prod,)
             .await,
         Err(BackendError::ApprovalRateLimited)
     ));
