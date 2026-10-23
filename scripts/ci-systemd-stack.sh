@@ -177,9 +177,9 @@ systemctl is-active --quiet kxprov-gw.service
 
 GW_PID="$(systemctl show -p MainPID --value kxprov-gw.service)"
 [[ "$GW_PID" != "0" ]] || { log "no kxprov-gw MainPID"; exit 1; }
-sudo tr '\0' '\n' < "/proc/${GW_PID}/environ" | grep -q '^CREDENTIALS_DIRECTORY=' \
+sudo cat "/proc/${GW_PID}/environ" | tr '\0' '\n' | grep -q '^CREDENTIALS_DIRECTORY=' \
   || { log "LoadCredential did not set CREDENTIALS_DIRECTORY"; exit 1; }
-CRED_DIR="$(sudo tr '\0' '\n' < "/proc/${GW_PID}/environ" | sed -n 's/^CREDENTIALS_DIRECTORY=//p')"
+CRED_DIR="$(sudo cat "/proc/${GW_PID}/environ" | tr '\0' '\n' | sed -n 's/^CREDENTIALS_DIRECTORY=//p')"
 sudo test -r "${CRED_DIR}/gateway-daemon.bearer" -a -r "${CRED_DIR}/lan.key" \
   || { log "credential files missing under $CRED_DIR"; exit 1; }
 cred_key_mode="$(sudo stat -c '%a' "${CRED_DIR}/lan.key")"
