@@ -8,6 +8,7 @@ use crate::queue::{field_kind_wire, JobKind, JobOutcome, JobRequest, JobState};
 use crate::time::now_ms;
 use crate::transport::{open, AnyTransport};
 use kxprov_api::{BackupInfo, FieldRow, PlanChangeResult, Profile, TokenId};
+use kxtd1232::frame::Access;
 use kxtd1232::{build_plan, field_patch, Client, Granularity};
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -58,16 +59,19 @@ async fn execute_job(ctx: &WorkerCtx, job_id: &str, kind: JobKind) -> JobOutcome
     }
 }
 
+fn open_client(ctx: &WorkerCtx, access: Access) -> Result<Client<AnyTransport>, JobOutcome> {
+    let transport = open(&ctx.config).map_err(|e| JobOutcome::Err {
+        code: "transport".into(),
+        message: e,
+    })?;
+    Ok(Client::with(transport, access, ctx.config.timing))
+}
+
 fn with_client<T>(
     ctx: &WorkerCtx,
     f: impl FnOnce(&mut Client<AnyTransport>) -> Result<T, kxtd1232::Error>,
 ) -> Result<T, JobOutcome> {
-    let transport =
-        open(ctx.config.transport, &ctx.config.serial_device).map_err(|e| JobOutcome::Err {
-            code: "transport".into(),
-            message: e,
-        })?;
-    let mut client = Client::new(transport);
+    let mut client = open_client(ctx, Access::ReadOnly)?;
     f(&mut client).map_err(|e| JobOutcome::Err {
         code: "protocol".into(),
         message: e.to_string(),
@@ -176,7 +180,7 @@ async fn run_backup(ctx: &WorkerCtx) -> JobOutcome {
         temp_path: temp.display().to_string(),
     });
     let pwd = ctx.config.password.clone();
-    let transport = match open(ctx.config.transport, &ctx.config.serial_device) {
+    let transport = match open(&ctx.config) {
         Ok(t) => t,
         Err(e) => {
             return JobOutcome::Err {
@@ -194,7 +198,7 @@ async fn run_backup(ctx: &WorkerCtx) -> JobOutcome {
             };
         }
     };
-    let mut client = Client::new(transport);
+    let mut client = Client::with(transport, Access::ReadOnly, ctx.config.timing);
     let wire = match BackupStore::read_full_backup(&mut client, &pwd) {
         Ok(w) => w,
         Err(e) => {

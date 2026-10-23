@@ -6,7 +6,7 @@ use std::path::Path;
 pub struct TokioSerialTransport;
 
 impl TokioSerialTransport {
-    pub fn open(_path: &Path) -> Result<Self, String> {
+    pub fn open(_path: &Path, _baud: u32) -> Result<Self, String> {
         Err("serial transport requires Linux".into())
     }
 }

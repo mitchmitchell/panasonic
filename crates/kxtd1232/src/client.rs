@@ -25,6 +25,11 @@ pub trait Transport {
     fn now_ms(&mut self) -> u64;
 }
 
+/// Minimum post-reply turnaround margin (Tester #2: 0 ms with high baud shrinks cutoff).
+pub const MIN_REPLY_GUARD_MS: u64 = 20;
+/// Upper bound for configured line rate (daemon rejects above this at startup).
+pub const MAX_LINK_BAUD: u32 = 115_200;
+
 /// Timing parameters (defaults until hardware test H5 measures them; design §9b).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Timing {
@@ -36,6 +41,58 @@ pub struct Timing {
     pub busy_limit_ms: u64,
     /// Quiet window that ends drain-until-quiet before a verify re-read.
     pub quiet_ms: u64,
+    /// Line rate for post-send cutoff math (10 bits per byte).
+    pub link_baud: u32,
+    /// Margin added to the post-send reply cutoff for PBX turnaround.
+    pub reply_guard_ms: u64,
+}
+
+/// Shortest reply frame (an ack), for the post-send cutoff.
+const MIN_REPLY_LEN: usize = 4;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TimingConfigError {
+    LinkBaudOutOfRange,
+    ReplyGuardTooLow,
+}
+
+impl std::fmt::Display for TimingConfigError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::LinkBaudOutOfRange => {
+                write!(f, "link_baud must be between 1 and {MAX_LINK_BAUD}")
+            }
+            Self::ReplyGuardTooLow => {
+                write!(f, "reply_guard_ms must be at least {MIN_REPLY_GUARD_MS} ms")
+            }
+        }
+    }
+}
+
+impl std::error::Error for TimingConfigError {}
+
+impl Timing {
+    /// Milliseconds to transmit `n` bytes at `link_baud`, 10 bits per byte, rounded up.
+    pub fn tx_ms(&self, n: usize) -> u64 {
+        let bits = n as u64 * 10 * 1000;
+        bits.div_ceil(u64::from(self.link_baud.max(1)))
+    }
+
+    /// Earliest time after send start at which a genuine reply could have arrived.
+    pub fn reply_cutoff_ms(&self, request_len: usize) -> u64 {
+        self.tx_ms(request_len) + self.tx_ms(MIN_REPLY_LEN) + self.reply_guard_ms
+    }
+
+    /// Reject daemon config that would shrink the reply cutoff below a sane floor.
+    pub fn validate(self) -> Result<Self, TimingConfigError> {
+        if self.link_baud == 0 || self.link_baud > MAX_LINK_BAUD {
+            return Err(TimingConfigError::LinkBaudOutOfRange);
+        }
+        if self.reply_guard_ms < MIN_REPLY_GUARD_MS {
+            return Err(TimingConfigError::ReplyGuardTooLow);
+        }
+        Ok(self)
+    }
 }
 
 impl Default for Timing {
@@ -45,6 +102,8 @@ impl Default for Timing {
             ack_timeout_ms: 2_000,
             busy_limit_ms: 12_000,
             quiet_ms: 500,
+            link_baud: 9600,
+            reply_guard_ms: MIN_REPLY_GUARD_MS,
         }
     }
 }

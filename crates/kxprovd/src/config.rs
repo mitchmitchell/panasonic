@@ -1,7 +1,10 @@
 use crate::gates::GateConfig;
 use crate::peer::PeerPolicy;
 use kxprov_api::Profile;
+use kxtd1232::{Timing, TimingConfigError};
+use kxtd1232_sim::SimPbx;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TransportKind {
@@ -9,7 +12,7 @@ pub enum TransportKind {
     Serial,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Config {
     pub profile: Profile,
     pub transport: TransportKind,
@@ -25,9 +28,29 @@ pub struct Config {
     /// Optional TOTP for admin re-auth (A4 wires verification; off by default).
     pub totp_enabled: bool,
     pub totp_secret_path: Option<PathBuf>,
+    /// Protocol client timing (`link_baud`, `reply_guard_ms`, …); validated at daemon start.
+    pub timing: Timing,
+    /// In-process PBX shared by every sim-transport client in this daemon (sim only).
+    pub sim_pbx: Option<Arc<Mutex<SimPbx>>>,
+}
+
+impl std::fmt::Debug for Config {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Config")
+            .field("profile", &self.profile)
+            .field("transport", &self.transport)
+            .field("data_dir", &self.data_dir)
+            .field("timing", &self.timing)
+            .field("sim_pbx", &self.sim_pbx.as_ref().map(|_| "SimPbx"))
+            .finish_non_exhaustive()
+    }
 }
 
 impl Config {
+    pub fn validate(&self) -> Result<(), TimingConfigError> {
+        self.timing.validate().map(|_| ())
+    }
+
     pub fn sim_test(data_dir: PathBuf, socket_path: PathBuf, peer_uid: u32) -> Self {
         Self {
             profile: Profile::Sim,
@@ -43,6 +66,8 @@ impl Config {
             admin_uid: peer_uid,
             totp_enabled: false,
             totp_secret_path: None,
+            timing: Timing::default(),
+            sim_pbx: Some(Arc::new(Mutex::new(SimPbx::default()))),
         }
     }
 }

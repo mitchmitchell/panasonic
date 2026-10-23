@@ -10,6 +10,7 @@ use kxtd1232::frame::{checksum, encode_raw, Cmd, BUSY_FRAME};
 use kxtd1232::tables;
 use kxtd1232::{Transport, TransportError};
 use std::collections::{HashMap, VecDeque};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 pub const PLACEHOLDER_PASSWORD: &str = "0000";
 pub const PLACEHOLDER_ROM_ID: &str = "-----PXXXXXXXXXX";
@@ -158,6 +159,12 @@ impl SimPbx {
 
     pub fn dtr_down(&mut self) {
         self.mode = Mode::Idle;
+    }
+
+    /// Clear line/session state before a new client attaches (shared PBX, new transport).
+    pub fn reset_for_new_session(&mut self) {
+        self.mode = Mode::Idle;
+        self.buf.clear();
     }
 
     pub fn feed(&mut self, data: &[u8]) -> Emits {
@@ -339,7 +346,7 @@ impl SimPbx {
 
 /// Virtual-time loopback transport binding a client to an in-process [`SimPbx`].
 pub struct SimTransport {
-    pub sim: SimPbx,
+    sim: Arc<Mutex<SimPbx>>,
     now: u64,
     queue: VecDeque<(u64, Vec<u8>)>,
     /// Every byte the client sent.
@@ -348,8 +355,17 @@ pub struct SimTransport {
 
 impl SimTransport {
     /// Opening the port raises DTR; the simulator answers XOFF/XON.
-    pub fn new(mut sim: SimPbx) -> Self {
-        let first = sim.dtr_up();
+    pub fn new(sim: SimPbx) -> Self {
+        Self::with_shared(Arc::new(Mutex::new(sim)))
+    }
+
+    /// Attach a fresh virtual-time session to an existing PBX (shared DB).
+    pub fn with_shared(sim: Arc<Mutex<SimPbx>>) -> Self {
+        let first = {
+            let mut pbx = sim.lock().expect("sim pbx lock");
+            pbx.reset_for_new_session();
+            pbx.dtr_up()
+        };
         let mut q = VecDeque::new();
         q.push_back((0, first));
         Self {
@@ -358,6 +374,18 @@ impl SimTransport {
             queue: q,
             sent: Vec::new(),
         }
+    }
+
+    pub fn shared_pbx(&self) -> Arc<Mutex<SimPbx>> {
+        Arc::clone(&self.sim)
+    }
+
+    pub fn sim(&self) -> MutexGuard<'_, SimPbx> {
+        self.sim.lock().expect("sim pbx lock")
+    }
+
+    pub fn sim_mut(&mut self) -> MutexGuard<'_, SimPbx> {
+        self.sim.lock().expect("sim pbx lock")
     }
 
     pub fn now(&self) -> u64 {
@@ -377,7 +405,8 @@ impl SimTransport {
 impl Transport for SimTransport {
     fn send(&mut self, data: &[u8]) -> Result<(), TransportError> {
         self.sent.extend_from_slice(data);
-        for (delay, bytes) in self.sim.feed(data) {
+        let emits = self.sim.lock().expect("sim pbx lock").feed(data);
+        for (delay, bytes) in emits {
             let at = self.now + delay;
             self.schedule(at, bytes);
         }

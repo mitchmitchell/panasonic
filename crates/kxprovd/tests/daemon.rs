@@ -253,24 +253,14 @@ async fn prod_apply_single_use_approval() {
         panic!("apply job");
     };
     tokio::time::sleep(Duration::from_millis(150)).await;
-    let _ = gw
-        .call_auth(
-            RequestBody::Unlock {
-                params: kxprov_api::UnlockParams {
-                    job_id: "test".into(),
-                    reason: "clear LOCKED after sim apply on prod profile".into(),
-                },
-            },
-            None,
-        )
-        .await;
 
-    let ResponseResult::ApplyApprovalRequired(_) = gw
+    let ResponseResult::PlanChange(plan2) = gw
         .call_auth(
-            RequestBody::ApplyPlan {
-                params: kxprov_api::ApplyPlanParams {
-                    plan_id: plan.plan_id,
-                    diff_hash: plan.diff_hash,
+            RequestBody::PlanChange {
+                params: kxprov_api::PlanChangeParams {
+                    kind: FieldKindWire::CidName,
+                    index: 4,
+                    value: "P2".into(),
                 },
             },
             Some(gateway_auth("writer")),
@@ -278,7 +268,23 @@ async fn prod_apply_single_use_approval() {
         .await
         .unwrap()
     else {
-        panic!("reuse needs approval again");
+        panic!("plan2");
+    };
+
+    let ResponseResult::ApplyApprovalRequired(_) = gw
+        .call_auth(
+            RequestBody::ApplyPlan {
+                params: kxprov_api::ApplyPlanParams {
+                    plan_id: plan2.plan_id,
+                    diff_hash: plan2.diff_hash,
+                },
+            },
+            Some(gateway_auth("writer")),
+        )
+        .await
+        .unwrap()
+    else {
+        panic!("second apply needs fresh approval");
     };
 }
 

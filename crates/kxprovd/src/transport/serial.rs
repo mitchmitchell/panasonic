@@ -11,9 +11,9 @@ pub struct TokioSerialTransport {
 }
 
 impl TokioSerialTransport {
-    pub fn open(path: &Path) -> Result<Self, String> {
+    pub fn open(path: &Path, baud: u32) -> Result<Self, String> {
         let path = path.to_string_lossy();
-        let port = tokio_serial::new(path.as_ref(), 9600)
+        let port = tokio_serial::new(path.as_ref(), baud)
             .data_bits(DataBits::Eight)
             .parity(Parity::None)
             .stop_bits(StopBits::One)

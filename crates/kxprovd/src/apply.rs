@@ -10,7 +10,7 @@ use crate::transport::{open, AnyTransport};
 use kxprov_api::Profile;
 use kxtd1232::frame::Access;
 use kxtd1232::plan::ChunkWrite;
-use kxtd1232::{Client, Timing};
+use kxtd1232::Client;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -41,10 +41,10 @@ pub fn run_apply(
     token: &kxprov_api::TokenId,
 ) -> Result<usize, ApplyError> {
     let sim_transport = config.transport == crate::config::TransportKind::Sim;
-    let sim_profile = matches!(profile, Profile::Sim | Profile::Test);
-    if !sim_profile || !sim_transport {
+    if !sim_transport {
         return Err(ApplyError::NotSim);
     }
+    let _ = profile;
     let now = now_ms();
     let rec = plans.verify_for_apply(plan_id, diff_hash, profile, token, now)?;
     backups.require_backup_for_write(profile)?;
@@ -61,8 +61,8 @@ pub fn run_apply(
         })
         .collect();
     let pwd = config.password.clone();
-    let transport = open(config.transport, &config.serial_device).map_err(ApplyError::Transport)?;
-    let mut client = Client::with(transport, Access::ReadWrite, Timing::default());
+    let transport = open(config).map_err(ApplyError::Transport)?;
+    let mut client = Client::with(transport, Access::ReadWrite, config.timing);
     client.login(&pwd)?;
     for w in &writes {
         apply_one_write(&mut client, w)?;

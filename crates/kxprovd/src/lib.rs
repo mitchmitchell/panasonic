@@ -47,6 +47,7 @@ pub struct Daemon {
 
 impl Daemon {
     pub fn start(config: Config) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        config.validate()?;
         let process_lock = lock::ProcessLock::acquire(&config.data_dir)?;
         std::fs::create_dir_all(&config.data_dir)?;
         std::fs::create_dir_all(config.data_dir.join("plans"))?;

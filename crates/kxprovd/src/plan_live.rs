@@ -17,9 +17,8 @@ pub fn verify_live_diff_hash(
     if rec.diff_hash != *expected {
         return Err(PlanError::DiffMismatch);
     }
-    let transport =
-        open(config.transport, &config.serial_device).map_err(|_| PlanError::NotFound)?;
-    let mut client = Client::new(transport);
+    let transport = open(config).map_err(|_| PlanError::NotFound)?;
+    let mut client = Client::with(transport, kxtd1232::frame::Access::ReadOnly, config.timing);
     client
         .login(&config.password)
         .map_err(|_| PlanError::NotFound)?;

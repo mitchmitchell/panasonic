@@ -12,12 +12,8 @@ pub use serial::TokioSerialTransport;
 #[cfg(not(target_os = "linux"))]
 pub use serial_stub::TokioSerialTransport;
 
-use crate::config::TransportKind;
+use crate::config::{Config, TransportKind};
 use kxtd1232::Transport;
-
-pub fn open_sim() -> SimTransportBridge {
-    SimTransportBridge::new()
-}
 
 pub enum AnyTransport {
     Sim(Box<SimTransportBridge>),
@@ -47,9 +43,18 @@ impl Transport for AnyTransport {
     }
 }
 
-pub fn open(kind: TransportKind, device: &std::path::Path) -> Result<AnyTransport, String> {
-    match kind {
-        TransportKind::Sim => Ok(AnyTransport::Sim(Box::new(open_sim()))),
-        TransportKind::Serial => TokioSerialTransport::open(device).map(AnyTransport::Serial),
+pub fn open(config: &Config) -> Result<AnyTransport, String> {
+    match config.transport {
+        TransportKind::Sim => {
+            let pbx = config
+                .sim_pbx
+                .clone()
+                .ok_or_else(|| "sim transport requires sim_pbx".to_string())?;
+            Ok(AnyTransport::Sim(Box::new(SimTransportBridge::new(pbx))))
+        }
+        TransportKind::Serial => {
+            TokioSerialTransport::open(&config.serial_device, config.timing.link_baud)
+                .map(AnyTransport::Serial)
+        }
     }
 }
