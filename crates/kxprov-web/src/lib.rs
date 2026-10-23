@@ -134,7 +134,7 @@ fn empty_dashboard(csrf: &str) -> DashboardTemplate {
         show_plan: false,
         plan_id_hex: String::new(),
         diff_hash_hex: String::new(),
-        diff_hash_prefix: String::new(),
+        plan_id_prefix: String::new(),
         plan_summary: String::new(),
         plan_table: 0,
         plan_record: 0,
@@ -185,7 +185,7 @@ fn apply_plan_result(tpl: &mut DashboardTemplate, summary: &PlanSummary, mode: O
     tpl.plan_old_value = summary.old_value.clone();
     tpl.plan_new_value = summary.new_value.clone();
     if mode == OperationalMode::Production {
-        tpl.diff_hash_prefix = summary.diff_hash.0.chars().take(8).collect();
+        tpl.plan_id_prefix = summary.plan_id.0.chars().take(8).collect();
         tpl.plan_expires_at_iso = summary.expires_at.clone();
         tpl.plan_expires_at_chicago = expiry::format_expiry_chicago(&summary.expires_at);
         tpl.plan_expires_at_ms = expiry::expiry_unix_ms(&summary.expires_at)
@@ -237,7 +237,9 @@ pub fn client_ip(
     if trust_x_forwarded_for {
         if let Some(v) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
             if let Some(client) = v.split(',').map(str::trim).find(|s| !s.is_empty()) {
-                return client.to_string();
+                if let Ok(ip) = client.parse::<std::net::IpAddr>() {
+                    return ip.to_string();
+                }
             }
         }
     }

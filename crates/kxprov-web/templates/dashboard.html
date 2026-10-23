@@ -107,7 +107,7 @@
       <p>{{ plan_summary }}</p>
       {% if show_production_plan_hint %}
       <p class="production-hint">
-        <strong>Production:</strong> use diff hash prefix <code class="hash-code">{{ diff_hash_prefix }}</code> when submitting approval in chat.
+        <strong>Production:</strong> use plan id prefix <code class="hash-code">{{ plan_id_prefix }}</code> when submitting approval in chat (with full diff hash).
         Approval window expires <time datetime="{{ plan_expires_at_iso }}">{{ plan_expires_at_chicago }}</time>
         (<span class="plan-expiry-countdown" data-expires-ms="{{ plan_expires_at_ms }}">…</span>).
       </p>

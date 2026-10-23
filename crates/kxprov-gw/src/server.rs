@@ -142,7 +142,7 @@ pub async fn serve(
     let (shutdown_tx_mcp, shutdown_rx_mcp) = oneshot::channel::<()>();
 
     tokio::spawn(async move {
-        axum::serve(
+        if let Err(e) = axum::serve(
             web_tailnet_listener,
             web_app_tailnet.into_make_service_with_connect_info::<SocketAddr>(),
         )
@@ -150,7 +150,9 @@ pub async fn serve(
             let _ = shutdown_rx.await;
         })
         .await
-        .ok();
+        {
+            tracing::error!(%e, "web tailnet serve exited with error");
+        }
     });
 
     for lan_addr in web_lan_addrs {
@@ -159,22 +161,33 @@ pub async fn serve(
         if bound_web_lan.is_none() || local.ip().is_loopback() {
             bound_web_lan = Some(local);
         }
+        let std = listener
+            .into_std()
+            .map_err(|e| anyhow::anyhow!("lan listener into_std: {e}"))?;
+        std.set_nonblocking(true)
+            .map_err(|e| anyhow::anyhow!("lan listener set_nonblocking: {e}"))?;
         let tls_cfg = tls.clone();
         let web_app_lan = web_app_https.clone();
         tokio::spawn(async move {
-            let _ = axum_server::from_tcp_rustls(listener.into_std().expect("tcp"), tls_cfg)
+            let server = axum_server::from_tcp_rustls(std, tls_cfg);
+            if let Err(e) = server
                 .serve(web_app_lan.into_make_service_with_connect_info::<SocketAddr>())
-                .await;
+                .await
+            {
+                tracing::error!(%e, "web lan https serve exited with error");
+            }
         });
     }
 
     tokio::spawn(async move {
-        axum::serve(mcp_listener, mcp_router)
+        if let Err(e) = axum::serve(mcp_listener, mcp_router)
             .with_graceful_shutdown(async {
                 let _ = shutdown_rx_mcp.await;
             })
             .await
-            .ok();
+        {
+            tracing::error!(%e, "mcp serve exited with error");
+        }
     });
 
     Ok(GatewayHandles {

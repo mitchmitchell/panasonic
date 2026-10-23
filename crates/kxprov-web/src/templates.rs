@@ -41,7 +41,7 @@ pub struct DashboardTemplate {
     pub show_plan: bool,
     pub plan_id_hex: String,
     pub diff_hash_hex: String,
-    pub diff_hash_prefix: String,
+    pub plan_id_prefix: String,
     pub plan_summary: String,
     pub plan_table: u8,
     pub plan_record: u16,

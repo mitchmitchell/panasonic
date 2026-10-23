@@ -4,7 +4,7 @@ use kxprov_api::{
 };
 use kxprov_mock::{
     BackendError, CallerIdentity, DaemonBackend, McpTokenIdentity, MockDaemon, PlanChangeRequest,
-    ScopeSet,
+    ScopeSet, WebSessionIdentity,
 };
 
 fn tester() -> CallerIdentity {
@@ -275,6 +275,54 @@ async fn approval_is_single_use_on_prod_profile() {
             .await,
         Err(BackendError::ApprovalRequired(_))
     ));
+}
+
+#[tokio::test]
+async fn plan_change_rejects_non_writable_table() {
+    let daemon = MockDaemon::new();
+    assert!(matches!(
+        daemon
+            .plan_change(
+                &comms(),
+                PlanChangeRequest {
+                    table: 0x10,
+                    record: 1,
+                    field: "cid_number".into(),
+                    new_value: "x".into(),
+                    base_bytes: vec![],
+                    new_bytes: vec![1],
+                },
+            )
+            .await,
+        Err(BackendError::BadRequest("table not writable"))
+    ));
+}
+
+#[tokio::test]
+async fn web_created_plan_can_receive_mcp_approval() {
+    let daemon = MockDaemon::with_profile(Profile::Prod);
+    enable_prod_live_writes(&daemon).await;
+    let web = CallerIdentity::Web(WebSessionIdentity {
+        session_key: "sess-abc".into(),
+    });
+    let plan = daemon
+        .plan_change(
+            &web,
+            PlanChangeRequest {
+                table: 0x24,
+                record: 1,
+                field: "cid_number".into(),
+                new_value: "5550199".into(),
+                base_bytes: vec![],
+                new_bytes: vec![9],
+            },
+        )
+        .await
+        .expect("plan");
+    daemon
+        .submit_approval(&approver(), &plan.plan_id.0, plan.diff_hash, Profile::Prod)
+        .await
+        .expect("web plan approvable");
 }
 
 #[tokio::test]

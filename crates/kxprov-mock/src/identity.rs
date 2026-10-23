@@ -43,4 +43,12 @@ impl CallerIdentity {
             _ => None,
         }
     }
+
+    /// Stable token id for plan requester / approver-differ checks (web sessions included).
+    pub fn plan_requester_token(&self) -> TokenId {
+        match self {
+            Self::Mcp(t) => t.token_id.clone(),
+            Self::Web(w) => TokenId(format!("web-session:{}", w.session_key)),
+        }
+    }
 }

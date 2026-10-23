@@ -16,16 +16,16 @@ pub fn effective_host_authority(req: &Request<Body>) -> Result<String, HostAutho
         .uri()
         .authority()
         .map(|a| a.as_str().to_ascii_lowercase());
-    let header_host = req
-        .headers()
-        .get(header::HOST)
+    let host_header = req.headers().get(header::HOST);
+    let header_host = host_header
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_ascii_lowercase());
-    match (uri_auth, header_host) {
-        (Some(u), Some(h)) if !hosts_equivalent(&u, &h) => Err(HostAuthorityError::Mismatch),
-        (Some(u), _) => Ok(u),
-        (None, Some(h)) => Ok(h),
-        (None, None) => Err(HostAuthorityError::Missing),
+    match (uri_auth, header_host, host_header) {
+        (Some(u), Some(h), _) if !hosts_equivalent(&u, &h) => Err(HostAuthorityError::Mismatch),
+        (Some(_), None, Some(_)) => Err(HostAuthorityError::Mismatch),
+        (Some(u), _, _) => Ok(u),
+        (None, Some(h), _) => Ok(h),
+        (None, None, _) => Err(HostAuthorityError::Missing),
     }
 }
 

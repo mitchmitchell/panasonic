@@ -1,0 +1,11 @@
+{
+  "data_dir": "/workspace/.run/a4/data",
+  "socket_path": "/workspace/.run/a4/kxprovd.sock",
+  "tokens_path": "/workspace/.run/a4/data/tokens.json",
+  "password_path": "/workspace/.run/a4/secrets/pbx.password",
+  "profile": "sim",
+  "transport": "sim",
+  "goliath_target": "/workspace/.run/a4/data/goliath",
+  "gateway_uid": 1000,
+  "admin_uid": 1001
+}

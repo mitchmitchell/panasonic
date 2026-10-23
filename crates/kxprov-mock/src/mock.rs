@@ -130,7 +130,11 @@ impl MockDaemon {
             return plan_id_from_hex(id);
         }
         if id.len() == 8 {
-            let matches: Vec<&String> = plans.keys().filter(|k| k.starts_with(id)).collect();
+            let prefix = id.to_ascii_lowercase();
+            let matches: Vec<&String> = plans
+                .keys()
+                .filter(|k| k.starts_with(prefix.as_str()))
+                .collect();
             return match matches.len() {
                 0 => Err(BackendError::PlanNotFound),
                 1 => plan_id_from_hex(matches[0]),
@@ -260,12 +264,14 @@ impl DaemonBackend for MockDaemon {
         req: PlanChangeRequest,
     ) -> Result<PlanSummary, BackendError> {
         Self::require_scope(caller, Scope::Plan)?;
+        kxtd1232::tables::check_writable_table(req.table)
+            .map_err(|_| BackendError::BadRequest("table not writable"))?;
         let kind = Self::field_kind_for_request(&req)?;
         let old_value = Self::simulated_value(kind, req.record);
         let inner = self.inner.read().await;
         let profile = inner.profile;
         drop(inner);
-        let creator = caller.token_id().cloned();
+        let creator = Some(caller.plan_requester_token());
         let table = req.table;
         let record = req.record;
         let field = req.field.clone();
@@ -376,6 +382,9 @@ impl DaemonBackend for MockDaemon {
             if plan.diff_hash != diff_hash {
                 return Err(BackendError::InvalidApproval);
             }
+            if plan.is_expired(plan_storage_ttl()) {
+                return Err(BackendError::PlanExpired);
+            }
         }
         if prod_profile_write_gates_active(active_profile) {
             let now = now_ms();
@@ -469,5 +478,30 @@ mod tests {
             MockDaemon::resolve_plan_id(&plans, "aabbccdd"),
             Err(BackendError::AmbiguousPlanPrefix)
         ));
+    }
+
+    #[test]
+    fn plan_prefix_match_is_case_insensitive() {
+        let mut plans = HashMap::new();
+        let key = "aabbccdd000000000000000000000000";
+        plans.insert(
+            key.into(),
+            ImmutablePlan::from_request(
+                Profile::Test,
+                PlanChangeRequest {
+                    table: 0x24,
+                    record: 1,
+                    field: "f".into(),
+                    new_value: "v".into(),
+                    base_bytes: vec![],
+                    new_bytes: vec![1],
+                },
+                Some(TokenId("r".into())),
+            )
+            .expect("plan"),
+        );
+        let resolved =
+            MockDaemon::resolve_plan_id(&plans, "AABBCCDD").expect("uppercase prefix resolves");
+        assert_eq!(resolved.0, key);
     }
 }

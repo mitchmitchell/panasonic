@@ -223,12 +223,7 @@ async fn whoami(
     let verified = state
         .tokens
         .verify_bearer_identity(&auth.bearer, now)
-        .map_err(|e| match e {
-            TokenError::Unauthorized | TokenError::Revoked | TokenError::Expired => {
-                api_err("unauthorized", "invalid bearer")
-            }
-            _ => api_err("token", &e.to_string()),
-        })?;
+        .map_err(token_error_to_api)?;
     Ok(ResponseResult::Whoami(WhoamiResult {
         token_id: verified.id,
         scopes: verified.scopes,
@@ -310,13 +305,20 @@ fn verify_bearer(
         .tokens
         .verify_bearer(&auth.bearer, now, need)
         .map(|v| v.id)
-        .map_err(|e| match e {
-            TokenError::Unauthorized | TokenError::Revoked | TokenError::Expired => {
-                api_err("unauthorized", "invalid bearer")
-            }
-            TokenError::ScopeDenied => api_err("forbidden", "token scope denied"),
-            _ => api_err("token", &e.to_string()),
-        })
+        .map_err(token_error_to_api)
+}
+
+fn token_error_to_api(e: TokenError) -> ApiErrorBody {
+    match e {
+        TokenError::Unauthorized | TokenError::Revoked | TokenError::Expired => {
+            api_err("unauthorized", "invalid bearer")
+        }
+        TokenError::ScopeDenied => api_err("forbidden", "token scope denied"),
+        TokenError::Invalid(msg) => api_err("token", &msg),
+        TokenError::InsecurePermissions => api_err("token", "insecure tokens file permissions"),
+        TokenError::Io(err) => api_err("token", &err.to_string()),
+        TokenError::Json(err) => api_err("token", &err.to_string()),
+    }
 }
 
 fn require_access(

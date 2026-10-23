@@ -58,7 +58,7 @@ cat >"$etc_dir/kxprovd.json" <<JSON
   "transport": "sim",
   "goliath_target": "$data_dir/goliath",
   "gateway_uid": $uid,
-  "admin_uid": 0
+  "admin_uid": $((uid + 1))
 }
 JSON
 
@@ -77,8 +77,7 @@ tls_key_path = "$tls_dir/lan.key"
 trust_x_forwarded_for = true
 TOML
 
-sudo chown root:root "$data_dir/tokens.json"
-sudo chmod 600 "$data_dir/tokens.json"
+chmod 600 "$data_dir/tokens.json" 2>/dev/null || true
 
 export KXPROV_DAEMON_CONFIG="$etc_dir/kxprovd.json"
 # Debug gateway (`test-secret-skip`) only; release builds ignore this env var.
@@ -90,7 +89,7 @@ stop_stack() {
     rm -f "$run_dir/kxprov-gw.pid"
   fi
   if [[ -f "$run_dir/kxprovd.pid" ]]; then
-    sudo kill "$(cat "$run_dir/kxprovd.pid")" 2>/dev/null || true
+    kill "$(cat "$run_dir/kxprovd.pid")" 2>/dev/null || true
     rm -f "$run_dir/kxprovd.pid"
   fi
 }
@@ -100,18 +99,13 @@ start_kxprovd() {
     echo "run-a4: kxprovd already running (pid $(cat "$run_dir/kxprovd.pid"))" >&2
     return 0
   fi
-  sudo -E env KXPROV_DAEMON_CONFIG="$KXPROV_DAEMON_CONFIG" \
-    "$bin_dir/kxprovd" &
+  env KXPROV_DAEMON_CONFIG="$KXPROV_DAEMON_CONFIG" "$bin_dir/kxprovd" &
   echo $! | tee "$run_dir/kxprovd.pid" >/dev/null
 }
 
 wait_for_socket() {
   for _ in $(seq 1 100); do
-    if [[ -S "$run_dir/kxprovd.sock" ]]; then
-      sudo chown "root:$gid" "$run_dir/kxprovd.sock"
-      sudo chmod 660 "$run_dir/kxprovd.sock"
-      return 0
-    fi
+    [[ -S "$run_dir/kxprovd.sock" ]] && return 0
     sleep 0.05
   done
   echo "run-a4: daemon socket did not appear" >&2
