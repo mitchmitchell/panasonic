@@ -6,9 +6,7 @@
 //! line delay for replies (see [`SimTransport::send`]).
 
 use kxtd1232::fields::{encode_cid_name, encode_cid_number, encode_ext_name};
-use kxtd1232::frame::{checksum, Cmd};
-#[cfg(feature = "faults")]
-use kxtd1232::frame::BUSY_FRAME;
+use kxtd1232::frame::{checksum, Cmd, BUSY_FRAME};
 use kxtd1232::tables;
 use kxtd1232::{SignOn, Transport, TransportError};
 use std::collections::{HashMap, VecDeque};
@@ -43,6 +41,8 @@ pub fn reply_frame(cmd: u8, body: &[u8]) -> Vec<u8> {
 }
 /// Busy-frame cadence (behavior spec / design §9b default until H5).
 pub const BUSY_CADENCE_MS: u64 = 128;
+/// Default busy train length after a malformed binary frame (matches §9b bound smoke tests).
+pub const BUSY_LOCKUP_FRAMES: u32 = 55;
 
 /// Injected faults, consumed in order. Requires the `faults` feature.
 #[cfg(feature = "faults")]
@@ -164,6 +164,8 @@ pub struct SimPbx {
     pub latency_ms: u64,
     /// When set, BYE gets no answer (logout not confirmed).
     pub silent_bye: bool,
+    /// More busy frames to schedule after the first one in a malformed-frame lockup.
+    pub(crate) lockup_busy_left: u32,
     #[cfg(feature = "faults")]
     pub(crate) link_drop_partial: Option<usize>,
     #[cfg(feature = "faults")]
@@ -197,6 +199,7 @@ impl SimPbx {
             commands: Vec::new(),
             latency_ms: 30,
             silent_bye: false,
+            lockup_busy_left: 0,
             #[cfg(feature = "faults")]
             link_drop_partial: None,
             #[cfg(feature = "faults")]
@@ -248,6 +251,11 @@ impl SimPbx {
                 let Some(&len) = self.buf.first() else {
                     return out;
                 };
+                if len < 2 {
+                    self.buf.drain(..1);
+                    out.extend(self.malformed_frame());
+                    continue;
+                }
                 let n = len as usize + 1;
                 if self.buf.len() < n {
                     return out;
@@ -336,12 +344,26 @@ impl SimPbx {
         reply_frame(cmd, body)
     }
 
+    fn clear_busy_lockup(&mut self) {
+        self.lockup_busy_left = 0;
+    }
+
+    /// PBX enters a busy lockup after a malformed frame; the first busy lands after latency.
+    fn malformed_frame(&mut self) -> Emits {
+        self.lockup_busy_left = BUSY_LOCKUP_FRAMES.saturating_sub(1);
+        vec![(self.latency_ms, BUSY_FRAME.to_vec())]
+    }
+
     fn frame(&mut self, raw: &[u8]) -> Emits {
         let lat = self.latency_ms;
         let cmd = raw.get(1).copied().unwrap_or(0xFF);
-        if raw.len() < 3 || checksum(&raw[..raw.len() - 1]) != raw[raw.len() - 1] {
-            return vec![(lat, Self::reply(cmd, &[0x01, 0x02]))];
+        if raw.len() < 3
+            || raw.first().is_some_and(|&len| len < 2)
+            || checksum(&raw[..raw.len() - 1]) != raw[raw.len() - 1]
+        {
+            return self.malformed_frame();
         }
+        self.clear_busy_lockup();
         self.commands.push(cmd);
         let body = &raw[2..raw.len() - 1];
         let mut out: Emits = Vec::new();
@@ -568,6 +590,17 @@ impl SimTransport {
             .unwrap_or(self.queue.len());
         self.queue.insert(pos, (at, bytes));
     }
+
+    fn schedule_busy_cadence(&mut self, start_ms: u64, frames: u32) {
+        if frames == 0 {
+            return;
+        }
+        let tline = kxtd1232::Timing::default();
+        for i in 0..frames {
+            let at = start_ms + u64::from(i) * BUSY_CADENCE_MS + tline.tx_ms(BUSY_FRAME.len());
+            self.schedule(at, BUSY_FRAME.to_vec());
+        }
+    }
 }
 
 impl Transport for SimTransport {
@@ -619,13 +652,12 @@ impl Transport for SimTransport {
         }
         #[cfg(feature = "faults")]
         if let Some(frames) = self.sim.post_write_busy.take() {
-            for i in 0..frames {
-                let at = rx_done
-                    + self.sim.latency_ms
-                    + u64::from(i) * BUSY_CADENCE_MS
-                    + tline.tx_ms(BUSY_FRAME.len());
-                self.schedule(at, BUSY_FRAME.to_vec());
-            }
+            self.schedule_busy_cadence(rx_done + self.sim.latency_ms, frames);
+        }
+        if self.sim.lockup_busy_left > 0 {
+            let frames = self.sim.lockup_busy_left;
+            self.sim.lockup_busy_left = 0;
+            self.schedule_busy_cadence(rx_done + self.sim.latency_ms, frames);
         }
         Ok(())
     }

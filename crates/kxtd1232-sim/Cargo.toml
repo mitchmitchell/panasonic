@@ -25,6 +25,10 @@ name = "busy_unacked"
 required-features = ["faults"]
 
 [[test]]
+name = "busy_lockup_recovery"
+required-features = ["faults"]
+
+[[test]]
 name = "fault_suite"
 required-features = ["faults"]
 
