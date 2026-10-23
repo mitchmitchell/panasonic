@@ -84,7 +84,12 @@ fn map_remote_error(code: &str, message: &str) -> BackendError {
         "not_found" if lower.contains("job") => BackendError::JobNotFound,
         "expired" => BackendError::PlanExpired,
         "rate_limited" => BackendError::ApprovalRateLimited,
-        _ if lower.contains("live write") => BackendError::LiveWritesBlocked,
+        "gate" if lower.contains("live_write") => BackendError::LiveWritesBlocked,
+        "locked" => BackendError::ForbiddenScope,
+        "transition_blocked" => BackendError::ForbiddenScope,
+        _ if lower.contains("live write") || lower.contains("live_write") => {
+            BackendError::LiveWritesBlocked
+        }
         _ => BackendError::BadRequest("daemon"),
     }
 }

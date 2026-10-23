@@ -26,6 +26,16 @@ pub async fn post_origin_middleware(
     (StatusCode::FORBIDDEN, "origin not allowed").into_response()
 }
 
+fn referer_origin(referer: &str) -> Option<String> {
+    let referer = referer.trim();
+    let (scheme, rest) = referer.split_once("://")?;
+    let authority = rest.split('/').next()?.trim_end_matches('/');
+    if authority.is_empty() {
+        return None;
+    }
+    Some(format!("{scheme}://{authority}"))
+}
+
 fn state_changing_method(method: &Method) -> bool {
     matches!(
         method,
@@ -38,10 +48,10 @@ fn origin_allowed(cfg: &HostOriginConfig, headers: &axum::http::HeaderMap) -> bo
         return origin_matches(&cfg.allowed_origins, origin);
     }
     if let Some(referer) = headers.get(header::REFERER).and_then(|v| v.to_str().ok()) {
-        return cfg.allowed_origins.iter().any(|allowed| {
-            origin_matches(&[allowed.clone()], referer.trim_end_matches('/'))
-                || referer.starts_with(&format!("{allowed}/"))
-        });
+        let Some(referer_origin) = referer_origin(referer) else {
+            return false;
+        };
+        return origin_matches(&cfg.allowed_origins, &referer_origin);
     }
     false
 }
@@ -83,5 +93,19 @@ mod tests {
             "https://127.0.0.1:8443/dashboard".parse().unwrap(),
         );
         assert!(origin_allowed(&cfg, &headers));
+    }
+
+    #[test]
+    fn referer_prefix_port_spoof_rejected() {
+        let cfg = HostOriginConfig {
+            allowed_hosts: vec!["127.0.0.1:8443".into()],
+            allowed_origins: vec!["https://127.0.0.1:8443".into()],
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::REFERER,
+            "https://127.0.0.1:84430/evil".parse().unwrap(),
+        );
+        assert!(!origin_allowed(&cfg, &headers));
     }
 }

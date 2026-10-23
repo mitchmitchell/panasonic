@@ -156,7 +156,7 @@ fn load_by_hash(path: &Path) -> anyhow::Result<HashMap<[u8; 32], McpTokenRecord>
     for entry in entries {
         if let Some(exp) = entry.expires_at_ms {
             if now_ms >= exp {
-                anyhow::bail!("token {} expired", entry.id);
+                continue;
             }
         }
         let hash = decode_sha256_hex(&entry.token_sha256_hex)?;

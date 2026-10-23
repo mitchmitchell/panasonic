@@ -106,6 +106,7 @@ impl GatewayConfig {
         }
         let mut out = self.effective_web_tailnet_hosts();
         out.extend(self.effective_web_https_hosts());
+        out.extend(self.derived_mcp_hosts());
         out.sort();
         out.dedup();
         out
@@ -172,6 +173,14 @@ impl GatewayConfig {
             return self.allowed_origins.clone();
         }
         derive()
+    }
+
+    fn derived_mcp_hosts(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        if let Ok(addr) = self.mcp_public_bind.parse::<SocketAddr>() {
+            push_http_listener_hosts(&mut out, addr.port(), &["localhost", "127.0.0.1"]);
+        }
+        out
     }
 
     fn derived_web_tailnet_hosts(&self) -> Vec<String> {
