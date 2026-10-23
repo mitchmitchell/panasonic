@@ -49,6 +49,33 @@ pub struct Daemon {
     _thread: std::thread::JoinHandle<()>,
 }
 
+fn bind_unix_listener(
+    socket_path: &std::path::Path,
+) -> Result<UnixListener, Box<dyn std::error::Error + Send + Sync>> {
+    if let Some(parent) = socket_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    if socket_path.exists() {
+        std::fs::remove_file(socket_path)?;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::net::UnixListener as StdUnixListener;
+        let std_listener = StdUnixListener::bind(socket_path)?;
+        std::fs::set_permissions(
+            socket_path,
+            std::fs::Permissions::from_mode(0o660),
+        )?;
+        std_listener.set_nonblocking(true)?;
+        UnixListener::from_std(std_listener).map_err(|e| Box::new(e) as _)
+    }
+    #[cfg(not(unix))]
+    {
+        UnixListener::bind(socket_path).map_err(|e| Box::new(e) as _)
+    }
+}
+
 impl Daemon {
     pub fn start(config: Config) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         config.validate()?;
@@ -58,7 +85,7 @@ impl Daemon {
         std::fs::create_dir_all(config.data_dir.join("backups"))?;
 
         let journal = Journal::new(&config.data_dir);
-        journal.replay(config.data_dir.join("backups").as_path())?;
+        journal.replay(&config.data_dir)?;
 
         let plans = PlanStore::new(config.data_dir.join("plans"))?;
         let backups = BackupStore::new(config.data_dir.join("backups"))?;
@@ -117,10 +144,7 @@ impl Daemon {
             transition,
         });
 
-        let socket_path = config.socket_path.clone();
-        if socket_path.exists() {
-            let _ = std::fs::remove_file(&socket_path);
-        }
+        let listener = bind_unix_listener(&config.socket_path)?;
 
         let thread = std::thread::spawn(move || {
             let runtime = tokio::runtime::Builder::new_current_thread()
@@ -128,21 +152,6 @@ impl Daemon {
                 .build()
                 .expect("runtime");
             runtime.block_on(async move {
-                let listener = match UnixListener::bind(&socket_path) {
-                    Ok(l) => l,
-                    Err(e) => {
-                        tracing::error!("bind {socket_path:?}: {e}");
-                        return;
-                    }
-                };
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    let _ = std::fs::set_permissions(
-                        &socket_path,
-                        std::fs::Permissions::from_mode(0o660),
-                    );
-                }
                 let tokens_worker = api_state.tokens.clone();
                 let ((), serve_res) = tokio::join!(
                     worker::run_worker(job_rx, worker_ctx, q, tokens_worker),
@@ -193,7 +202,7 @@ impl Daemon {
         std::fs::create_dir_all(config.data_dir.join("backups"))?;
 
         let journal = Journal::new(&config.data_dir);
-        journal.replay(config.data_dir.join("backups").as_path())?;
+        journal.replay(&config.data_dir)?;
 
         let plans = PlanStore::new(config.data_dir.join("plans"))?;
         let backups = BackupStore::new(config.data_dir.join("backups"))?;
@@ -247,10 +256,7 @@ impl Daemon {
             transition,
         });
 
-        let socket_path = config.socket_path.clone();
-        if socket_path.exists() {
-            let _ = std::fs::remove_file(&socket_path);
-        }
+        let listener = bind_unix_listener(&config.socket_path)?;
 
         let thread = std::thread::spawn(move || {
             let runtime = tokio::runtime::Builder::new_current_thread()
@@ -258,21 +264,6 @@ impl Daemon {
                 .build()
                 .expect("runtime");
             runtime.block_on(async move {
-                let listener = match UnixListener::bind(&socket_path) {
-                    Ok(l) => l,
-                    Err(e) => {
-                        tracing::error!("bind {socket_path:?}: {e}");
-                        return;
-                    }
-                };
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    let _ = std::fs::set_permissions(
-                        &socket_path,
-                        std::fs::Permissions::from_mode(0o660),
-                    );
-                }
                 let tokens_worker = api_state.tokens.clone();
                 let ((), serve_res) = tokio::join!(
                     worker::run_worker(job_rx, worker_ctx, q, tokens_worker),

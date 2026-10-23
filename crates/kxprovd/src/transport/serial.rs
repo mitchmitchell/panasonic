@@ -6,14 +6,13 @@ use std::path::Path;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio_serial::{DataBits, FlowControl, Parity, SerialPortBuilderExt, StopBits};
 
-const SEND_BOUND_MS: u64 = 5_000;
-
 pub struct TokioSerialTransport {
     port: tokio_serial::SerialStream,
+    send_bound_ms: u64,
 }
 
 impl TokioSerialTransport {
-    pub fn open(path: &Path, baud: u32) -> Result<Self, String> {
+    pub fn open(path: &Path, baud: u32, send_bound_ms: u64) -> Result<Self, String> {
         let path = path.to_string_lossy();
         let port = tokio_serial::new(path.as_ref(), baud)
             .data_bits(DataBits::Eight)
@@ -23,19 +22,26 @@ impl TokioSerialTransport {
             .exclusive(true)
             .open_native_async()
             .map_err(|e| e.to_string())?;
-        Ok(Self { port })
+        Ok(Self {
+            port,
+            send_bound_ms,
+        })
     }
 
     fn send_all(&mut self, data: &[u8]) -> Result<(), TransportError> {
-        send_all_port(&mut self.port, data)
+        send_all_port(&mut self.port, data, self.send_bound_ms)
     }
 }
 
-fn send_all_port<W: Write>(port: &mut W, data: &[u8]) -> Result<(), TransportError> {
+fn send_all_port<W: Write>(
+    port: &mut W,
+    data: &[u8],
+    send_bound_ms: u64,
+) -> Result<(), TransportError> {
     if data.is_empty() {
         return Ok(());
     }
-    let deadline = Instant::now() + Duration::from_millis(SEND_BOUND_MS);
+    let deadline = Instant::now() + Duration::from_millis(send_bound_ms);
     let mut written = 0;
     while written < data.len() {
         if Instant::now() >= deadline {
@@ -182,7 +188,8 @@ mod tests {
     #[test]
     fn would_block_on_send_retries_until_complete() {
         let mut port = BlockThenWrite { blocks: 2 };
-        send_all_port(&mut port, &[1, 2, 3]).expect("send completes after WouldBlock retries");
+        send_all_port(&mut port, &[1, 2, 3], 5_000)
+            .expect("send completes after WouldBlock retries");
     }
 
     #[test]
@@ -197,7 +204,7 @@ mod tests {
             }
         }
         let mut zw = ZeroWrite;
-        let err = send_all_port(&mut zw, &[0x01, 0x02]);
+        let err = send_all_port(&mut zw, &[0x01, 0x02], 5_000);
         assert!(matches!(err, Err(TransportError::NothingWritten(_))));
     }
 }

@@ -49,6 +49,11 @@ pub struct TokenStore {
     job_queue: Mutex<Option<Weak<JobQueue>>>,
 }
 
+struct TokenRefreshDelta {
+    newly_revoked: Vec<TokenId>,
+    reactivated: Vec<TokenId>,
+}
+
 impl Clone for TokenStore {
     fn clone(&self) -> Self {
         let state = self.inner.lock().expect("token store lock");
@@ -112,7 +117,7 @@ impl TokenStore {
         *self.job_queue.lock().expect("token store lock") = Some(queue);
     }
 
-    fn notify_newly_revoked(&self, ids: &[TokenId]) {
+    fn notify_token_revocation_changes(&self, newly_revoked: &[TokenId], reactivated: &[TokenId]) {
         let q = self
             .job_queue
             .lock()
@@ -122,8 +127,11 @@ impl TokenStore {
         let Some(q) = q else {
             return;
         };
-        for id in ids {
+        for id in newly_revoked {
             q.mark_token_revoked(id);
+        }
+        for id in reactivated {
+            q.clear_token_revoked(id);
         }
     }
 
@@ -159,26 +167,41 @@ impl TokenStore {
             ));
         }
         let mut ids = std::collections::HashSet::new();
+        let mut hashes = std::collections::HashSet::new();
         for t in entries {
             if !ids.insert(t.id.as_str().to_string()) {
                 return Err(TokenError::Invalid("duplicate token id".into()));
+            }
+            if !hashes.insert(t.secret_hash.clone()) {
+                return Err(TokenError::Invalid("duplicate token secret_hash".into()));
             }
         }
         Ok(())
     }
 
-    fn refresh_if_modified(state: &mut TokenState) -> Result<Vec<TokenId>, TokenError> {
+    fn refresh_if_modified(state: &mut TokenState) -> Result<TokenRefreshDelta, TokenError> {
         if state.loaded_mtime.is_none() {
-            return Ok(Vec::new());
+            return Ok(TokenRefreshDelta {
+                newly_revoked: Vec::new(),
+                reactivated: Vec::new(),
+            });
         }
         let meta = std::fs::metadata(&state.path)?;
         let mtime = meta.modified().ok();
         if mtime == state.loaded_mtime {
-            return Ok(Vec::new());
+            return Ok(TokenRefreshDelta {
+                newly_revoked: Vec::new(),
+                reactivated: Vec::new(),
+            });
         }
         if state.enforce_secure_reload {
             Self::check_secure(&state.path)?;
         }
+        let prev_ids: HashSet<String> = state
+            .entries
+            .iter()
+            .map(|t| t.id.as_str().to_string())
+            .collect();
         let prev_revoked: HashSet<String> = state
             .entries
             .iter()
@@ -187,14 +210,31 @@ impl TokenStore {
             .collect();
         let fresh = Self::read_state(&state.path)?;
         Self::validate_file(&fresh.entries, &fresh.approver_token_id)?;
-        let newly_revoked = fresh
+        let fresh_ids: HashSet<String> = fresh
+            .entries
+            .iter()
+            .map(|t| t.id.as_str().to_string())
+            .collect();
+        let mut newly_revoked: Vec<TokenId> = fresh
             .entries
             .iter()
             .filter(|t| t.revoked && !prev_revoked.contains(t.id.as_str()))
             .map(|t| t.id.clone())
-            .collect::<Vec<_>>();
+            .collect();
+        for id in prev_ids.difference(&fresh_ids) {
+            newly_revoked.push(TokenId(id.clone()));
+        }
+        let reactivated = fresh
+            .entries
+            .iter()
+            .filter(|t| !t.revoked && prev_revoked.contains(t.id.as_str()))
+            .map(|t| t.id.clone())
+            .collect();
         *state = fresh;
-        Ok(newly_revoked)
+        Ok(TokenRefreshDelta {
+            newly_revoked,
+            reactivated,
+        })
     }
 
     fn find_entry<'a>(entries: &'a [TokenEntry], hash: &str) -> Option<&'a TokenEntry> {
@@ -237,9 +277,9 @@ impl TokenStore {
         need: Scope,
     ) -> Result<VerifiedToken, TokenError> {
         let mut state = self.inner.lock().expect("token store lock");
-        let newly = Self::refresh_if_modified(&mut state)?;
+        let delta = Self::refresh_if_modified(&mut state)?;
         drop(state);
-        self.notify_newly_revoked(&newly);
+        self.notify_token_revocation_changes(&delta.newly_revoked, &delta.reactivated);
         let state = self.inner.lock().expect("token store lock");
         let hash = hash_bearer_secret(bearer);
         let entry = Self::find_entry(&state.entries, &hash).ok_or(TokenError::Unauthorized)?;
@@ -278,15 +318,16 @@ impl TokenStore {
 
     pub fn is_revoked(&self, token_id: &TokenId) -> Result<bool, TokenError> {
         let mut state = self.inner.lock().expect("token store lock");
-        let newly = Self::refresh_if_modified(&mut state)?;
+        let delta = Self::refresh_if_modified(&mut state)?;
         drop(state);
-        self.notify_newly_revoked(&newly);
+        self.notify_token_revocation_changes(&delta.newly_revoked, &delta.reactivated);
         let state = self.inner.lock().expect("token store lock");
         Ok(state
             .entries
             .iter()
             .find(|t| t.id == *token_id)
-            .is_some_and(|t| t.revoked))
+            .map(|t| t.revoked)
+            .unwrap_or(true))
     }
 
     #[cfg(unix)]

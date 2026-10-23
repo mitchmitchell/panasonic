@@ -84,7 +84,7 @@ impl TransitionBlockStore {
 
     pub fn clear(&self) -> Result<(), std::io::Error> {
         if self.path.exists() {
-            let _ = std::fs::remove_file(&self.path);
+            std::fs::remove_file(&self.path)?;
         }
         Ok(())
     }
@@ -160,19 +160,27 @@ pub fn verify_enter_production_or_block(
     match verify_enter_production(config, backups) {
         Ok(()) => Ok(()),
         Err(e @ TransitionError::Mismatch) => {
-            let _ = transition.set_blocked("live caller-id tables differ from last prod backup");
+            transition
+                .set_blocked("live caller-id tables differ from last prod backup")
+                .map_err(|io| TransitionError::Transport(io.to_string()))?;
             Err(e)
         }
         Err(e @ TransitionError::NoDigest) => {
-            let _ = transition.set_blocked("no production-mode backup for transition verify");
+            transition
+                .set_blocked("no production-mode backup for transition verify")
+                .map_err(|io| TransitionError::Transport(io.to_string()))?;
             Err(e)
         }
         Err(e @ TransitionError::Protocol(_)) | Err(e @ TransitionError::Transport(_)) => {
-            let _ = transition.set_blocked("live read failed during transition verify");
+            transition
+                .set_blocked("live read failed during transition verify")
+                .map_err(|io| TransitionError::Transport(io.to_string()))?;
             Err(e)
         }
         Err(e @ TransitionError::Backup(_)) => {
-            let _ = transition.set_blocked("backup read failed during transition verify");
+            transition
+                .set_blocked("backup read failed during transition verify")
+                .map_err(|io| TransitionError::Transport(io.to_string()))?;
             Err(e)
         }
     }

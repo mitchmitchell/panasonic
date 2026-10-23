@@ -54,14 +54,14 @@ impl LockedStore {
             job_id: job_id.map(str::to_string),
             alert_sent: false,
         };
-        std::fs::write(&self.path, serde_json::to_vec_pretty(&st)?)?;
+        crate::atomic_write::write(&self.path, &serde_json::to_vec_pretty(&st)?)?;
         Ok(())
     }
 
     pub fn clear(&self) -> Result<(), LockedError> {
-        std::fs::write(
+        crate::atomic_write::write(
             &self.path,
-            serde_json::to_vec_pretty(&LockedState::default())?,
+            &serde_json::to_vec_pretty(&LockedState::default())?,
         )?;
         Ok(())
     }
@@ -72,7 +72,7 @@ impl LockedStore {
             return Ok(());
         }
         st.alert_sent = true;
-        std::fs::write(&self.path, serde_json::to_vec_pretty(&st)?)?;
+        crate::atomic_write::write(&self.path, &serde_json::to_vec_pretty(&st)?)?;
         Ok(())
     }
 }

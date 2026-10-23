@@ -100,52 +100,60 @@ impl JobQueue {
             .contains(token_id.as_str())
     }
 
+    pub fn clear_token_revoked(&self, token_id: &TokenId) {
+        self.revoked_tokens
+            .lock()
+            .expect("revoked tokens lock")
+            .remove(token_id.as_str());
+    }
+
     pub async fn enqueue(
         &self,
         kind: JobKind,
         token_id: Option<TokenId>,
         now_ms: u64,
     ) -> Result<(String, oneshot::Receiver<JobOutcome>), QueueError> {
-        if let Some(ref tid) = token_id {
-            self.check_token_limits(tid, now_ms).await?;
-        }
         let id = next_job_id();
         let (reply_tx, reply_rx) = oneshot::channel();
-        self.jobs.lock().await.insert(id.clone(), JobState::Queued);
         if let Some(ref tid) = token_id {
             let mut rates = self.token_rates.lock().await;
             let st = rates.entry(tid.as_str().to_string()).or_default();
+            if st.active >= TOKEN_QUEUE_DEPTH_MAX {
+                return Err(QueueError::RateLimit);
+            }
+            let minute_ago = now_ms.saturating_sub(60_000);
+            while st.start_times_ms.front().is_some_and(|t| *t < minute_ago) {
+                st.start_times_ms.pop_front();
+            }
+            if st.start_times_ms.len() as u32 >= TOKEN_JOBS_PER_MINUTE {
+                return Err(QueueError::RateLimit);
+            }
             st.active += 1;
             st.start_times_ms.push_back(now_ms);
         }
-        let tid_clone = token_id.clone();
-        self.tx
+        self.jobs.lock().await.insert(id.clone(), JobState::Queued);
+        if self
+            .tx
             .send(JobRequest {
                 id: id.clone(),
                 kind,
-                token_id,
+                token_id: token_id.clone(),
                 reply: reply_tx,
             })
             .await
-            .map_err(|_| QueueError::Shutdown)?;
-        let _ = tid_clone;
+            .is_err()
+        {
+            if let Some(ref tid) = token_id {
+                let mut rates = self.token_rates.lock().await;
+                if let Some(st) = rates.get_mut(tid.as_str()) {
+                    st.active = st.active.saturating_sub(1);
+                    let _ = st.start_times_ms.pop_back();
+                }
+            }
+            self.jobs.lock().await.remove(&id);
+            return Err(QueueError::Shutdown);
+        }
         Ok((id, reply_rx))
-    }
-
-    async fn check_token_limits(&self, token_id: &TokenId, now_ms: u64) -> Result<(), QueueError> {
-        let mut rates = self.token_rates.lock().await;
-        let st = rates.entry(token_id.as_str().to_string()).or_default();
-        if st.active >= TOKEN_QUEUE_DEPTH_MAX {
-            return Err(QueueError::RateLimit);
-        }
-        let minute_ago = now_ms.saturating_sub(60_000);
-        while st.start_times_ms.front().is_some_and(|t| *t < minute_ago) {
-            st.start_times_ms.pop_front();
-        }
-        if st.start_times_ms.len() as u32 >= TOKEN_JOBS_PER_MINUTE {
-            return Err(QueueError::RateLimit);
-        }
-        Ok(())
     }
 
     pub async fn release_token(&self, token_id: Option<&TokenId>) {
@@ -158,7 +166,12 @@ impl JobQueue {
     }
 
     pub async fn set_state(&self, id: &str, state: JobState) {
-        self.jobs.lock().await.insert(id.to_string(), state);
+        let mut jobs = self.jobs.lock().await;
+        if matches!(state, JobState::Done | JobState::Failed) {
+            jobs.remove(id);
+        } else {
+            jobs.insert(id.to_string(), state);
+        }
     }
 
     pub async fn depth(&self) -> u32 {

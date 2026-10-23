@@ -109,8 +109,6 @@ pub enum ConfigError {
     Timing(#[from] TimingConfigError),
     #[error("gateway_uid must differ from admin_uid")]
     UidsMustDiffer,
-    #[error("missing config")]
-    Missing,
 }
 
 impl std::fmt::Debug for Config {

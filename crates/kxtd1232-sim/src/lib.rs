@@ -408,6 +408,8 @@ pub struct SimTransport {
     /// Next write send fails with `LinkDown` after this many bytes left the host (a
     /// partial frame, or the whole frame when >= its length, which the PBX then stores).
     pub fail_write_send_after: Option<usize>,
+    pub fail_send_after: Option<usize>,
+    pub send_timeout_next: bool,
     link_down: bool,
 }
 
@@ -433,6 +435,8 @@ impl SimTransport {
             sent: Vec::new(),
             drop_link_after_write: false,
             fail_write_send_after: None,
+            fail_send_after: None,
+            send_timeout_next: false,
             link_down: false,
         }
     }
@@ -454,6 +458,8 @@ impl SimTransport {
         self.link_down = false;
         self.drop_link_after_write = false;
         self.fail_write_send_after = None;
+        self.fail_send_after = None;
+        self.send_timeout_next = false;
         self.queue.clear();
         let first = {
             let mut pbx = self.sim.lock().expect("sim pbx lock");
@@ -499,6 +505,28 @@ impl Transport for SimTransport {
     fn send(&mut self, data: &[u8]) -> Result<(), TransportError> {
         if self.link_down {
             return Err(TransportError::NothingWritten("sim: link dropped".into()));
+        }
+        if self.send_timeout_next {
+            self.send_timeout_next = false;
+            return Err(TransportError::Timeout);
+        }
+        if let Some(n) = self.fail_send_after.take() {
+            let n = n.min(data.len());
+            self.sent.extend_from_slice(&data[..n]);
+            if n == data.len() {
+                self.sim.lock().expect("sim pbx lock").feed(data);
+            }
+            self.link_down = true;
+            return if n == 0 {
+                Err(TransportError::NothingWritten(
+                    "sim: link dropped mid-send".into(),
+                ))
+            } else {
+                Err(TransportError::LinkDown(LinkDownError {
+                    detail: "sim: link dropped mid-send".into(),
+                    bytes_sent: n,
+                }))
+            };
         }
         if data.get(1) == Some(&Cmd::Write.byte()) {
             if let Some(n) = self.fail_write_send_after.take() {

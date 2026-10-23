@@ -396,17 +396,25 @@ fn atomic_write_tokens(path: &std::path::Path, data: &[u8]) -> std::io::Result<(
         std::process::id()
     ));
     {
-        let mut f = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(&tmp)?;
+        let mut opts = OpenOptions::new();
+        opts.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        let mut f = opts.open(&tmp)?;
         f.write_all(data)?;
         f.sync_all()?;
     }
     std::fs::rename(&tmp, path)?;
     if let Ok(dirf) = File::open(dir) {
         let _ = dirf.sync_all();
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
     }
     Ok(())
 }

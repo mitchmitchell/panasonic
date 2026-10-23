@@ -136,6 +136,52 @@ async fn b7_revocation_takes_effect_without_restart() {
     );
 }
 
+/// B9: a token revoked (or removed) while its job is queued fails without running.
+#[tokio::test]
+async fn b9_revoked_token_fails_queued_job() {
+    let tmp = tempfile::tempdir().unwrap();
+    let uid = nix::unistd::getuid().as_raw();
+    let (_d, sock) = init_test_daemon(&tmp, uid, Profile::Sim);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let plan_params = |value: &str| PlanChangeParams {
+        kind: kxprov_api::FieldKindWire::CidName,
+        index: 0,
+        value: value.into(),
+    };
+
+    let mut clients: Vec<ApiClient> = Vec::new();
+    let mut handles = Vec::new();
+    for i in 0..4 {
+        clients.push(ApiClient::connect(&sock).await.unwrap());
+        let mut c = clients.pop().unwrap();
+        let params = plan_params(&format!("QUEUED-{i}"));
+        handles.push(tokio::spawn(async move {
+            c.call_auth(RequestBody::PlanChange { params }, Some(bearer_auth(WRITER_SECRET)))
+                .await
+        }));
+    }
+
+    let path = tmp.path().join("tokens.json");
+    let mut file: TokensFile =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).expect("tokens file");
+    file.tokens.retain(|t| t.id.as_str() != "writer");
+    std::fs::write(&path, serde_json::to_vec_pretty(&file).unwrap()).unwrap();
+
+    let mut saw_revoked = false;
+    for h in handles {
+        match h.await.unwrap() {
+            Err(e) if e.to_string().contains("token_revoked") => saw_revoked = true,
+            Err(e) if e.to_string().contains("unauthorized") || e.to_string().contains("invalid bearer") => {
+                saw_revoked = true;
+            }
+            Ok(_) => {}
+            Err(e) => panic!("unexpected error: {e}"),
+        }
+    }
+    assert!(saw_revoked, "expected at least one queued job to fail after token removal");
+}
+
 /// B8: gateway and admin Unix identities must differ at startup.
 #[test]
 fn b8_gateway_and_admin_uid_must_differ() {

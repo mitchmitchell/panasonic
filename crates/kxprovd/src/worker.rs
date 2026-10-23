@@ -296,12 +296,31 @@ async fn run_apply_job(
         &token_id,
     ) {
         Ok(_blocks) => {
-            let _ = ctx.plans.mark_applied(&plan_id, now_ms());
-            let _ = ctx.journal.truncate();
+            if let Err(e) = ctx.plans.mark_applied(&plan_id, now_ms()) {
+                let msg = format!("mark_applied failed: {e}");
+                let _ = lock_on_apply_failure(&ctx.locked, &msg, job_id);
+                return JobOutcome::Err {
+                    code: "apply".into(),
+                    message: msg,
+                };
+            }
+            if let Err(e) = ctx.journal.truncate() {
+                let msg = format!("journal truncate failed: {e}");
+                let _ = lock_on_apply_failure(&ctx.locked, &msg, job_id);
+                return JobOutcome::Err {
+                    code: "apply".into(),
+                    message: msg,
+                };
+            }
             JobOutcome::ApplyPlan { plan_id, diff_hash }
         }
         Err(e) => {
-            lock_on_apply_failure(&ctx.locked, &e.to_string(), job_id);
+            if lock_on_apply_failure(&ctx.locked, &e.to_string(), job_id).is_err() {
+                return JobOutcome::Err {
+                    code: "locked".into(),
+                    message: "apply failed and LOCKED could not be persisted".into(),
+                };
+            }
             let _ = ctx.journal.append(&JournalEntry::ApplyAbort {
                 job_id: job_id.to_string(),
             });

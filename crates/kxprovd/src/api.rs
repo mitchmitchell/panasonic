@@ -108,7 +108,10 @@ async fn dispatch(
 ) -> Response {
     let id = env.id.clone();
     let role = state.peer_policy.role(cred);
-    let locked = state.locked.load().ok().is_some_and(|s| s.locked);
+    let locked = match state.locked.load() {
+        Ok(s) => s.locked,
+        Err(_) => true,
+    };
 
     let result = match &env.body {
         RequestBody::Status => Ok(ResponseResult::Status(status_snapshot(state, locked).await)),
@@ -209,7 +212,12 @@ fn verify_bearer(
                 api_err("unauthorized", "invalid bearer")
             }
             TokenError::ScopeDenied => api_err("forbidden", "token scope denied"),
-            _ => api_err("token", &e.to_string()),
+            TokenError::Io(_) | TokenError::Json(_) => {
+                api_err("token", "token store unavailable")
+            }
+            TokenError::InsecurePermissions | TokenError::Invalid(_) => {
+                api_err("token", "invalid tokens configuration")
+            }
         })
 }
 
@@ -501,8 +509,11 @@ async fn unlock(
     if !state.peer_policy.is_admin(cred) {
         return Err(api_err("forbidden", "root admin required"));
     }
-    let _ = params.reason;
-    let _ = params.job_id;
+    tracing::info!(
+        job_id = %params.job_id,
+        reason = %params.reason,
+        "LOCKED cleared via unlock"
+    );
     state
         .locked
         .clear()

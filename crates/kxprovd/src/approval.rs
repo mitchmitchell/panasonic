@@ -131,7 +131,11 @@ impl ApprovalBook {
         let idx = store
             .items
             .iter()
-            .position(|a| a.matches(plan_id, diff_hash, profile))
+            .position(|a| {
+                a.matches(plan_id, diff_hash, profile)
+                    && !a.consumed
+                    && a.active(now_ms, profile)
+            })
             .ok_or(ApprovalError::NotFound)?;
         let a = &mut store.items[idx];
         if a.consumed {

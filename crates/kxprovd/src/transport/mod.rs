@@ -53,8 +53,12 @@ pub fn open(config: &Config) -> Result<AnyTransport, String> {
             Ok(AnyTransport::Sim(Box::new(SimTransportBridge::new(pbx))))
         }
         TransportKind::Serial => {
-            TokioSerialTransport::open(&config.serial_device, config.timing.link_baud)
-                .map(AnyTransport::Serial)
+            TokioSerialTransport::open(
+                &config.serial_device,
+                config.timing.link_baud,
+                config.timing.send_bound_ms,
+            )
+            .map(AnyTransport::Serial)
         }
     }
 }
