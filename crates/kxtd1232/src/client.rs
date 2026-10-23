@@ -873,4 +873,51 @@ mod tests {
         assert!(c.rx.is_empty(), "buffered bytes survived the drain");
         assert_eq!(c.drained().first().map(|d| d.bytes.clone()), Some(stale));
     }
+
+    /// Replies only after a send; the send takes long enough that the post-send guard
+    /// window has already passed, so the guard never clears `rx` itself.
+    struct ReplyOnSend {
+        now: u64,
+        reply: Vec<u8>,
+        inbound: VecDeque<Vec<u8>>,
+    }
+
+    impl Transport for ReplyOnSend {
+        fn send(&mut self, _: &[u8]) -> Result<(), TransportError> {
+            self.now += 1_000;
+            self.inbound.push_back(self.reply.clone());
+            Ok(())
+        }
+        fn recv(&mut self, timeout_ms: u64) -> Result<Vec<u8>, TransportError> {
+            self.inbound.pop_front().ok_or_else(|| {
+                self.now += timeout_ms;
+                TransportError::Timeout
+            })
+        }
+        fn now_ms(&mut self) -> u64 {
+            self.now
+        }
+    }
+
+    /// Architect 5632467751: a stale frame already buffered in `rx` before a send is
+    /// discarded by the pre-send rx flush in `flush_pending`, so the real ack is the
+    /// reply. Without that flush the stale read reply is parsed first and the request
+    /// fails (mismatched command), so this test fails.
+    #[test]
+    fn presend_flush_discards_buffered_rx_before_reply() {
+        let ack = vec![0x03, 0x00, 0x00, 0x03];
+        let stale = vec![0x03, 0x01, 0x00, 0x04];
+        let mut c = Client::new(ReplyOnSend {
+            now: 0,
+            reply: ack.clone(),
+            inbound: VecDeque::new(),
+        });
+        c.state = SessionState::Binary;
+        c.rx = stale.clone();
+        let r = c.request(&[0x02, 0x08, 0x0a], Cmd::Write, 500);
+        let want = frame::classify(&ack).ok();
+        assert!(want.is_some());
+        assert_eq!(r.ok(), want);
+        assert_eq!(c.drained().first().map(|d| d.bytes.clone()), Some(stale));
+    }
 }
