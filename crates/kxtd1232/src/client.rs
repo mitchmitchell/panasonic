@@ -8,13 +8,13 @@ use crate::session::{Login, LoginState};
 use crate::signon::SignOn;
 use crate::tables;
 
-/// Link loss while sending: how many bytes reached the line before the failure.
+/// Link loss on the transport (send or receive).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LinkDownError {
     pub detail: String,
-    /// Bytes transmitted before the failure on **`send` only** (`0` = provably none).
-    /// Receive-side link loss sets this to `usize::MAX` (ignored by the client).
-    pub bytes_sent: usize,
+    /// Bytes transmitted before a **`send`** failure (`None` = not applicable, e.g. receive).
+    /// Provably zero bytes on send use [`TransportError::NothingWritten`], not `Some(0)`.
+    pub bytes_sent: Option<usize>,
 }
 
 /// Transport errors.
@@ -23,8 +23,9 @@ pub struct LinkDownError {
 pub enum TransportError {
     /// Nothing arrived within the timeout.
     Timeout,
-    /// From `send`: some or all of the data may have reached the line (see
-    /// [`LinkDownError::bytes_sent`]). Surfaces to callers as [`Error::LinkDown`].
+    /// From `send`: some or all of the data may have reached the line when
+    /// [`LinkDownError::bytes_sent`] is `Some(n > 0)`. From `recv`: `bytes_sent` is `None`.
+    /// Surfaces to callers as [`Error::LinkDown`].
     LinkDown(LinkDownError),
     /// From `send` only: provably zero bytes were written. The client maps this to
     /// [`Error::PreSend`] wrapping [`Error::LinkDown`], not to a top-level `LinkDown`.

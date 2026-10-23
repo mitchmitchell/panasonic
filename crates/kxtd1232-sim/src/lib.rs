@@ -717,7 +717,7 @@ impl Transport for SimTransport {
             }
             return Err(TransportError::LinkDown(LinkDownError {
                 detail: "sim: link dropped mid-send".into(),
-                bytes_sent: n,
+                bytes_sent: Some(n),
             }));
         }
         #[cfg(feature = "faults")]
@@ -739,7 +739,7 @@ impl Transport for SimTransport {
             }
             return Err(TransportError::LinkDown(LinkDownError {
                 detail: "simulated serial link down mid-send".into(),
-                bytes_sent: n,
+                bytes_sent: Some(n),
             }));
         }
         self.sent.extend_from_slice(data);
@@ -778,7 +778,7 @@ impl Transport for SimTransport {
         if self.link_down {
             return Err(TransportError::LinkDown(LinkDownError {
                 detail: "sim: link dropped".into(),
-                bytes_sent: usize::MAX,
+                bytes_sent: None,
             }));
         }
         match self.queue.front() {
