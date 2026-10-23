@@ -147,8 +147,46 @@ impl TokenStore {
         Sha256::digest(raw).into()
     }
 
+    fn tokens_file_parse_ok(raw: &[u8]) -> bool {
+        serde_json::from_slice::<TokensFile>(raw).is_ok()
+    }
+
+    /// Read `tokens.json` for reload; retries ENOENT and torn/partial JSON from concurrent writers.
+    fn read_tokens_bytes_resilient(path: &Path) -> Result<Vec<u8>, TokenError> {
+        use std::io::ErrorKind;
+        const ATTEMPTS: usize = 5;
+        let mut last_io: Option<std::io::Error> = None;
+        for attempt in 0..ATTEMPTS {
+            match std::fs::read(path) {
+                Ok(raw) => {
+                    if Self::tokens_file_parse_ok(&raw) {
+                        return Ok(raw);
+                    }
+                    if attempt + 1 >= ATTEMPTS {
+                        return Err(TokenError::Invalid(
+                            "tokens.json invalid after retries".into(),
+                        ));
+                    }
+                }
+                Err(e) if e.kind() == ErrorKind::NotFound => {
+                    last_io = Some(e);
+                    if attempt + 1 >= ATTEMPTS {
+                        return Err(TokenError::Io(
+                            last_io.unwrap_or_else(|| std::io::Error::from(ErrorKind::NotFound)),
+                        ));
+                    }
+                }
+                Err(e) => return Err(TokenError::Io(e)),
+            }
+            std::thread::yield_now();
+        }
+        Err(TokenError::Io(last_io.unwrap_or_else(|| {
+            std::io::Error::from(ErrorKind::NotFound)
+        })))
+    }
+
     fn read_state(path: &Path) -> Result<TokenState, TokenError> {
-        let raw = std::fs::read(path)?;
+        let raw = Self::read_tokens_bytes_resilient(path)?;
         let loaded_digest = Self::digest_bytes(&raw);
         let file: TokensFile = serde_json::from_slice(&raw)?;
         Ok(TokenState {
@@ -221,7 +259,18 @@ impl TokenStore {
                 rotated: Vec::new(),
             });
         }
-        let raw = std::fs::read(&state.path)?;
+        let raw = match Self::read_tokens_bytes_resilient(&state.path) {
+            Ok(raw) => raw,
+            Err(e) => {
+                // Atomic replace or torn write: keep last good in-memory snapshot.
+                tracing::debug!("tokens reload skipped, using cached file: {e}");
+                return Ok(TokenRefreshDelta {
+                    newly_revoked: Vec::new(),
+                    reactivated: Vec::new(),
+                    rotated: Vec::new(),
+                });
+            }
+        };
         let digest = Self::digest_bytes(&raw);
         if Some(digest) == state.loaded_digest {
             return Ok(TokenRefreshDelta {
@@ -232,7 +281,14 @@ impl TokenStore {
         }
         let enforce_secure = state.enforce_secure_reload;
         if enforce_secure {
-            Self::check_secure(&state.path)?;
+            if let Err(e) = Self::check_secure(&state.path) {
+                tracing::debug!("tokens reload skipped (secure check): {e}");
+                return Ok(TokenRefreshDelta {
+                    newly_revoked: Vec::new(),
+                    reactivated: Vec::new(),
+                    rotated: Vec::new(),
+                });
+            }
         }
         let prev_ids: HashSet<String> = state
             .entries
@@ -250,8 +306,25 @@ impl TokenStore {
             .iter()
             .map(|t| (t.id.as_str().to_string(), t.secret_hash.clone()))
             .collect();
-        let fresh = Self::read_state_from_raw(&state.path, &raw)?;
-        Self::validate_file(&fresh.entries, &fresh.approver_token_id)?;
+        let fresh = match Self::read_state_from_raw(&state.path, &raw) {
+            Ok(f) => f,
+            Err(e) => {
+                tracing::debug!("tokens reload parse skipped: {e}");
+                return Ok(TokenRefreshDelta {
+                    newly_revoked: Vec::new(),
+                    reactivated: Vec::new(),
+                    rotated: Vec::new(),
+                });
+            }
+        };
+        if let Err(e) = Self::validate_file(&fresh.entries, &fresh.approver_token_id) {
+            tracing::debug!("tokens reload validation skipped: {e}");
+            return Ok(TokenRefreshDelta {
+                newly_revoked: Vec::new(),
+                reactivated: Vec::new(),
+                rotated: Vec::new(),
+            });
+        }
         let fresh_ids: HashSet<String> = fresh
             .entries
             .iter()
