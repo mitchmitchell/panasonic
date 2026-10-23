@@ -7,10 +7,12 @@ mod client;
 mod ids;
 mod plan_hash;
 mod protocol;
+mod surface;
 mod types;
 
 pub use client::{ApiClient, ApiError};
 pub use ids::{Approval, DiffHash, PlanId, Profile, TokenId};
 pub use plan_hash::{diff_hash, CanonicalPlan, CanonicalWrite};
 pub use protocol::*;
+pub use surface::*;
 pub use types::*;

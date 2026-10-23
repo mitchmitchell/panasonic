@@ -3,11 +3,12 @@
 use crate::config::Config;
 use crate::plan_store::{diff_hash_with_live_table, PlanError, PlanStore};
 use crate::transport::open;
-use kxprov_api::{DiffHash, PlanId};
+use kxprov_api::{DiffHash, PlanId, Profile};
 use kxtd1232::Client;
 
 pub fn verify_live_diff_hash(
     config: &Config,
+    profile: Profile,
     plans: &PlanStore,
     plan_id: &PlanId,
     expected: &DiffHash,
@@ -26,7 +27,7 @@ pub fn verify_live_diff_hash(
         .read_table(rec.table)
         .map_err(|_| PlanError::NotFound)?;
     let _ = client.end_binary();
-    let live = diff_hash_with_live_table(config.profile, &rec, &table)?;
+    let live = diff_hash_with_live_table(profile, &rec, &table)?;
     if live != rec.diff_hash {
         return Err(PlanError::DiffMismatch);
     }

@@ -346,9 +346,16 @@ fn sim_mark(cli: &Cli) -> Result<(), CliError> {
                     .map(|d| d.as_millis() as u64)
                     .unwrap_or(0),
             });
-            let bytes = serde_json::to_vec_pretty(&mark).map_err(|e| CliError::Usage(e.to_string()))?;
-            std::fs::write(data_dir.join("sim-mark.json"), bytes)
-                .map_err(|e| CliError::Usage(e.to_string()))?;
+            let bytes =
+                serde_json::to_vec_pretty(&mark).map_err(|e| CliError::Usage(e.to_string()))?;
+            let path = data_dir.join("sim-mark.json");
+            std::fs::write(&path, bytes).map_err(|e| CliError::Usage(e.to_string()))?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+                    .map_err(|e| CliError::Usage(e.to_string()))?;
+            }
             println!("sim-mark written for build {}", env!("KXPROV_BUILD_HASH"));
             Ok(())
         }

@@ -20,6 +20,7 @@ pub enum AuditKind {
     ModeCounterRollback,
     ModeTestingInvalidProfile,
     ModeSet,
+    ModeTransitionMismatch,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -69,4 +70,11 @@ impl AuditLog {
 
 pub fn alert_mode_failure(kind: &AuditKind, detail: &str) {
     tracing::warn!(?kind, detail, "mode.json alert (fail-closed to Production)");
+}
+
+pub fn alert_transition_mismatch(detail: &str) {
+    tracing::warn!(
+        detail,
+        "testing→production table mismatch (fail-closed writes)"
+    );
 }

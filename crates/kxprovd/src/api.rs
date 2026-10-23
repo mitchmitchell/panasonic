@@ -12,8 +12,8 @@ use crate::time::now_ms;
 use crate::tokens::TokenStore;
 use crate::worker::backup_info;
 use kxprov_api::{
-    ApiErrorBody, ApplyPlanParams, PlanChangeParams, Profile, RequestAuth, RequestBody,
-    RequestEnvelope, Response, ResponseResult, Scope, SetModeParams, SetModeResult,
+    ApiErrorBody, ApplyPlanParams, OperationalMode, PlanChangeParams, Profile, RequestAuth,
+    RequestBody, RequestEnvelope, Response, ResponseResult, Scope, SetModeParams, SetModeResult,
     SubmitApprovalParams, SubmitApprovalResult, TokenId, UnlockParams, UnlockResult,
 };
 use std::sync::Arc;
@@ -35,6 +35,7 @@ pub struct ApiState {
     pub locked: LockedStore,
     pub goliath: crate::goliath::GoliathQueue,
     pub mode: ModeStore,
+    pub transition: crate::transition::TransitionBlockStore,
 }
 
 pub async fn serve(listener: UnixListener, state: Arc<ApiState>) -> std::io::Result<()> {
@@ -213,6 +214,7 @@ fn require_access(
 
 async fn status_snapshot(state: &ApiState, locked: bool) -> kxprov_api::StatusResponse {
     let gates = state.gates.read().await;
+    state.transition.maybe_fire_alert();
     let profile = *state.profile.read().await;
     let effective = state.mode.effective(profile);
     let locked_alert = if locked {
@@ -335,6 +337,26 @@ async fn set_mode(
     if !state.queue.is_idle().await {
         return Err(api_err("busy", "daemon not idle"));
     }
+    let prior_mode = state.mode.read_stored_mode();
+    if prior_mode == Some(OperationalMode::Testing) && params.mode == OperationalMode::Production {
+        match crate::transition::verify_testing_to_production(&state.config, &state.backups) {
+            Ok(()) => {
+                let _ = state.transition.clear();
+            }
+            Err(crate::transition::TransitionError::Mismatch) => {
+                let _ = state
+                    .transition
+                    .set_blocked("live caller-id tables differ from last backup");
+                return Err(api_err(
+                    "transition_mismatch",
+                    "testing→production table verify failed; writes blocked",
+                ));
+            }
+            Err(e) => {
+                return Err(api_err("transition", &e.to_string()));
+            }
+        }
+    }
     let (effective, profile, counter) = state
         .mode
         .set_operational(params.mode, params.profile, true)
@@ -354,6 +376,12 @@ async fn apply_plan(
 ) -> Result<ResponseResult, ApiErrorBody> {
     let now = now_ms();
     let profile = *state.profile.read().await;
+    if state.transition.writes_blocked() {
+        return Err(api_err(
+            "transition_blocked",
+            "writes blocked after testing→production mismatch",
+        ));
+    }
     if !state.gates.read().await.config.live_writes_approved && profile == Profile::Prod {
         return Err(api_err("gate", "live_writes_approved is false"));
     }
@@ -364,6 +392,7 @@ async fn apply_plan(
 
     verify_live_diff_hash(
         &state.config,
+        profile,
         &state.plans,
         &params.plan_id,
         &params.diff_hash,

@@ -21,6 +21,7 @@ pub mod queue;
 pub mod sim_mark;
 pub mod time;
 pub mod tokens;
+pub mod transition;
 pub mod transport;
 pub mod worker;
 
@@ -59,6 +60,7 @@ impl Daemon {
         let goliath = GoliathQueue::new(config.goliath_target.clone())?;
         let approvals = ApprovalBook::new(&config.data_dir);
         let locked = LockedStore::new(&config.data_dir);
+        let transition = transition::TransitionBlockStore::new(&config.data_dir);
         let mode = mode::ModeStore::new(&config.data_dir, config.profile);
         let _ = sim_mark::SimMarkStore::new(&config.data_dir).clear_if_stale();
         let profile = Arc::new(RwLock::new(mode.load_profile()));
@@ -99,6 +101,7 @@ impl Daemon {
             locked,
             goliath,
             mode,
+            transition,
         });
 
         let socket_path = config.socket_path.clone();
@@ -157,7 +160,6 @@ impl Daemon {
         let socket = data_dir.join("kxprovd.sock");
         let mut cfg = Config::sim_test(data_dir, socket.clone(), peer_uid);
         cfg.profile = profile;
-        cfg.gates.live_writes_approved = true;
         let daemon = Self::start(cfg).expect("daemon starts");
         (daemon, socket)
     }

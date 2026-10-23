@@ -2,8 +2,8 @@ use crate::dbh::{self, parse_size, HEADER_TAIL_LEN};
 use crate::goliath::GoliathQueue;
 use crate::time::now_ms;
 use crate::transport::AnyTransport;
-use kxprov_api::GoliathCopyStatus;
 use kxprov_api::DEFAULT_BACKUP_KEEP;
+use kxprov_api::{GoliathCopyStatus, Profile};
 use kxtd1232::tables::TABLES;
 use kxtd1232::{Client, Transport};
 use serde::{Deserialize, Serialize};
@@ -34,6 +34,9 @@ pub struct BackupMeta {
     pub bytes: u64,
     pub sha256: String,
     pub path: PathBuf,
+    /// SHA-256 of 0x24+0x25 wire bytes at backup time (v2.8 N2).
+    #[serde(default)]
+    pub caller_id_digest: Option<String>,
 }
 
 pub struct BackupStore {
@@ -86,13 +89,22 @@ impl BackupStore {
         }
     }
 
-    /// Apply and other writes require at least one verified backup on disk.
-    pub fn require_backup_for_write(&self) -> Result<(), BackupError> {
+    /// Pre-write backup gate: required on prod profile only (v2.9).
+    pub fn require_backup_for_write(&self, profile: Profile) -> Result<(), BackupError> {
+        if profile != Profile::Prod {
+            return Ok(());
+        }
         if self.list()?.is_empty() {
             Err(BackupError::NoBackupForWrite)
         } else {
             Ok(())
         }
+    }
+
+    pub fn latest_caller_id_digest(&self) -> Option<String> {
+        self.list()
+            .ok()
+            .and_then(|list| list.first().and_then(|m| m.caller_id_digest.clone()))
     }
 
     pub fn read_full_backup<T: Transport>(
@@ -112,6 +124,7 @@ impl BackupStore {
         &self,
         data: &[u8],
         goliath: &GoliathQueue,
+        caller_id_digest: Option<String>,
     ) -> Result<BackupMeta, BackupError> {
         parse_size(data)?;
         let hash = hex::encode(Sha256::digest(data));
@@ -130,6 +143,7 @@ impl BackupStore {
             bytes: data.len() as u64,
             sha256: hash.clone(),
             path: dbh_path.clone(),
+            caller_id_digest,
         };
         let meta_path = self.dir.join(format!("{id}.meta"));
         std::fs::write(&meta_path, serde_json::to_vec_pretty(&meta)?)?;

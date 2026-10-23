@@ -3,6 +3,7 @@
 use crate::backup::BackupStore;
 use crate::config::Config;
 use crate::locked::LockedStore;
+use crate::plan_live::verify_live_diff_hash;
 use crate::plan_store::PlanStore;
 use crate::time::now_ms;
 use crate::transport::{open, AnyTransport};
@@ -46,7 +47,8 @@ pub fn run_apply(
     }
     let now = now_ms();
     let rec = plans.verify_for_apply(plan_id, diff_hash, profile, token, now)?;
-    backups.require_backup_for_write()?;
+    backups.require_backup_for_write(profile)?;
+    verify_live_diff_hash(config, profile, plans, plan_id, diff_hash)?;
     let writes: Vec<ChunkWrite> = rec
         .writes
         .iter()

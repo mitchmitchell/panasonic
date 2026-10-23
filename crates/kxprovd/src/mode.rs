@@ -55,6 +55,13 @@ impl ModeStore {
         }
     }
 
+    pub fn read_stored_mode(&self) -> Option<OperationalMode> {
+        let raw = std::fs::read_to_string(&self.mode_path).ok()?;
+        serde_json::from_str::<ModeFileBody>(&raw)
+            .ok()
+            .map(|b| b.mode)
+    }
+
     pub fn load_profile(&self) -> Profile {
         match std::fs::read_to_string(&self.profile_path) {
             Ok(raw) => serde_json::from_str::<ProfileFileBody>(&raw)

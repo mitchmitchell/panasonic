@@ -219,7 +219,8 @@ async fn run_backup(ctx: &WorkerCtx) -> JobOutcome {
             message: "temp backup write failed".into(),
         };
     }
-    let meta = match ctx.backups.save_verified(&dbh, &ctx.goliath) {
+    let digest = Some(crate::transition::caller_id_wire_digest(&wire));
+    let meta = match ctx.backups.save_verified(&dbh, &ctx.goliath, digest) {
         Ok(m) => m,
         Err(e) => {
             return JobOutcome::Err {

@@ -63,8 +63,24 @@ async fn plan_immutable_and_token_bound() {
 #[tokio::test]
 async fn apply_requires_approval_on_prod() {
     let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        tmp.path().join("mode.json"),
+        serde_json::to_vec_pretty(&ModeFileBody {
+            mode: OperationalMode::Production,
+        })
+        .unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        tmp.path().join("profile.json"),
+        serde_json::to_vec_pretty(&ProfileFileBody {
+            profile: Profile::Test,
+        })
+        .unwrap(),
+    )
+    .unwrap();
     let uid = getuid().as_raw();
-    let (_d, sock) = Daemon::sim_for_tests_profile(tmp.path(), uid, Profile::Prod);
+    let (_d, sock) = Daemon::sim_for_tests_profile(tmp.path(), uid, Profile::Test);
     tokio::time::sleep(Duration::from_millis(50)).await;
     let mut c = ApiClient::connect(&sock).await.unwrap();
     let ResponseResult::PlanChange(plan) = c
