@@ -13,7 +13,7 @@ use std::time::Duration;
 #[test]
 fn rolled_back_mode_json_fails_closed_to_production() {
     let tmp = tempfile::tempdir().unwrap();
-    let store = ModeStore::new(tmp.path(), Profile::Sim);
+    let store = ModeStore::new(tmp.path(), tmp.path(), Profile::Sim);
     store
         .set_operational(OperationalMode::Testing, Profile::Test, true)
         .unwrap();
@@ -40,7 +40,7 @@ fn rolled_back_mode_json_fails_closed_to_production() {
 #[test]
 fn rolled_back_profile_json_fails_closed_to_prod_profile() {
     let tmp = tempfile::tempdir().unwrap();
-    let store = ModeStore::new(tmp.path(), Profile::Sim);
+    let store = ModeStore::new(tmp.path(), tmp.path(), Profile::Sim);
     store
         .set_operational(OperationalMode::Production, Profile::Sim, true)
         .unwrap();
@@ -155,15 +155,19 @@ fn default_production_paths() {
     .unwrap();
     let cfg = Config::load_from_etc(&cfg_path).unwrap();
     assert_eq!(
+        cfg.provision_root,
+        std::path::PathBuf::from(kxprovd::config::PROVISION_ROOT)
+    );
+    assert_eq!(
         cfg.data_dir,
-        std::path::PathBuf::from("/var/lib/kx-provision")
+        kxprovd::config::profile_data_dir(kxprov_api::Profile::Sim)
     );
     assert_eq!(
         cfg.socket_path,
-        std::path::PathBuf::from("/run/kx-provision/kxprovd.sock")
+        std::path::PathBuf::from(kxprovd::config::DEFAULT_SOCKET)
     );
     assert_eq!(
         cfg.tokens_path,
-        std::path::PathBuf::from("/var/lib/kx-provision/tokens.json")
+        std::path::PathBuf::from(kxprovd::config::PROVISION_ROOT).join("tokens.json")
     );
 }

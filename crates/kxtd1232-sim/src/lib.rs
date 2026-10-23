@@ -174,6 +174,12 @@ pub struct SimPbx {
     pub config: SimConfig,
     /// When set, BYE gets no answer (logout not confirmed).
     pub silent_bye: bool,
+    #[allow(dead_code)]
+    pub(crate) lockup_busy_left: u32,
+    #[allow(dead_code)]
+    pub(crate) lockup_discard: bool,
+    #[allow(dead_code)]
+    pub(crate) lockup_end_ms: u64,
     #[cfg(feature = "faults")]
     pub(crate) post_write_busy: Option<u32>,
     #[cfg(feature = "faults")]
@@ -214,6 +220,9 @@ impl SimPbx {
             latency_ms: 30,
             config: SimConfig::default(),
             silent_bye: false,
+            lockup_busy_left: 0,
+            lockup_discard: false,
+            lockup_end_ms: 0,
             #[cfg(feature = "faults")]
             post_write_busy: None,
             #[cfg(feature = "faults")]
@@ -344,6 +353,28 @@ impl SimPbx {
 
     fn reply(cmd: u8, body: &[u8]) -> Vec<u8> {
         reply_frame(cmd, body)
+    }
+
+    #[allow(dead_code)]
+    fn clear_busy_lockup(&mut self) {
+        self.lockup_busy_left = 0;
+        self.lockup_discard = false;
+        self.lockup_end_ms = 0;
+    }
+
+    #[allow(dead_code)]
+    fn start_busy_lockup(&mut self) {
+        self.buf.clear();
+        self.lockup_discard = true;
+        self.lockup_busy_left = self.config.busy_lockup_frames.saturating_sub(1);
+    }
+
+    /// Hypothesis (design §6 / RE busy-lockup fixture): malformed LEN or trailing junk after
+    /// a bad frame triggers a busy train; counts in [`SimConfig`] are placeholders, not measured.
+    #[allow(dead_code)]
+    fn malformed_frame(&mut self) -> Emits {
+        self.start_busy_lockup();
+        vec![(self.latency_ms, BUSY_FRAME.to_vec())]
     }
 
     fn frame(&mut self, raw: &[u8]) -> Emits {
@@ -633,7 +664,7 @@ impl Transport for SimTransport {
             } else {
                 Err(TransportError::LinkDown(LinkDownError {
                     detail: "sim: link dropped mid-send".into(),
-                    bytes_sent: n,
+                    bytes_sent: Some(n),
                 }))
             };
         }
@@ -652,7 +683,7 @@ impl Transport for SimTransport {
                 } else {
                     Err(TransportError::LinkDown(LinkDownError {
                         detail: "sim: link dropped mid-send".into(),
-                        bytes_sent: n,
+                        bytes_sent: Some(n),
                     }))
                 };
             }
@@ -676,7 +707,7 @@ impl Transport for SimTransport {
             } else {
                 Err(TransportError::LinkDown(LinkDownError {
                     detail: "simulated serial link down mid-send".into(),
-                    bytes_sent: n,
+                    bytes_sent: Some(n),
                 }))
             };
         }
@@ -722,7 +753,7 @@ impl Transport for SimTransport {
         if self.link_down {
             return Err(TransportError::LinkDown(LinkDownError {
                 detail: "sim: link dropped".into(),
-                bytes_sent: 0,
+                bytes_sent: None,
             }));
         }
         match self.queue.front() {

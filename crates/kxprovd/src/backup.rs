@@ -38,12 +38,8 @@ pub struct BackupMeta {
     #[serde(default)]
     pub caller_id_digest: Option<String>,
     /// Operational mode when the backup was taken (N2: prod transition uses prod backups only).
-    #[serde(default = "default_backup_operational_mode")]
-    pub operational_mode: OperationalMode,
-}
-
-fn default_backup_operational_mode() -> OperationalMode {
-    OperationalMode::Production
+    #[serde(default)]
+    pub operational_mode: Option<OperationalMode>,
 }
 
 pub struct BackupStore {
@@ -113,7 +109,7 @@ impl BackupStore {
         self.list()
             .ok()?
             .into_iter()
-            .find(|m| m.operational_mode == OperationalMode::Production)
+            .find(|m| m.operational_mode == Some(OperationalMode::Production))
             .and_then(|m| m.caller_id_digest.clone())
     }
 
@@ -155,7 +151,7 @@ impl BackupStore {
             sha256: hash.clone(),
             path: dbh_path.clone(),
             caller_id_digest,
-            operational_mode,
+            operational_mode: Some(operational_mode),
         };
         let meta_path = self.dir.join(format!("{id}.meta"));
         crate::atomic_write::write(&meta_path, &serde_json::to_vec_pretty(&meta)?)?;

@@ -114,7 +114,7 @@ fn test_a2_late_ack_garbled_stale() {
 }
 
 #[test]
-fn test_a2_silent_write_and_link_drop() {
+fn test_a2_silent_write() {
     let mut c = client();
     let base = c.read(0x25, 0, 0, 80).unwrap();
     let mut new = base.clone();

@@ -27,6 +27,8 @@ pub enum TransitionError {
     Mismatch,
     #[error("no prod backup digest")]
     NoDigest,
+    #[error("could not persist transition block: {0}")]
+    BlockPersist(String),
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -162,26 +164,27 @@ pub fn verify_enter_production_or_block(
         Err(e @ TransitionError::Mismatch) => {
             transition
                 .set_blocked("live caller-id tables differ from last prod backup")
-                .map_err(|io| TransitionError::Transport(io.to_string()))?;
+                .map_err(|io| TransitionError::BlockPersist(io.to_string()))?;
             Err(e)
         }
         Err(e @ TransitionError::NoDigest) => {
             transition
                 .set_blocked("no production-mode backup for transition verify")
-                .map_err(|io| TransitionError::Transport(io.to_string()))?;
+                .map_err(|io| TransitionError::BlockPersist(io.to_string()))?;
             Err(e)
         }
         Err(e @ TransitionError::Protocol(_)) | Err(e @ TransitionError::Transport(_)) => {
             transition
                 .set_blocked("live read failed during transition verify")
-                .map_err(|io| TransitionError::Transport(io.to_string()))?;
+                .map_err(|io| TransitionError::BlockPersist(io.to_string()))?;
             Err(e)
         }
         Err(e @ TransitionError::Backup(_)) => {
             transition
                 .set_blocked("backup read failed during transition verify")
-                .map_err(|io| TransitionError::Transport(io.to_string()))?;
+                .map_err(|io| TransitionError::BlockPersist(io.to_string()))?;
             Err(e)
         }
+        Err(e @ TransitionError::BlockPersist(_)) => Err(e),
     }
 }

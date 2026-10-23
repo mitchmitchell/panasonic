@@ -406,6 +406,7 @@ async fn set_mode(
             let code = match e {
                 crate::transition::TransitionError::Mismatch => "transition_mismatch",
                 crate::transition::TransitionError::NoDigest => "transition_no_backup",
+                crate::transition::TransitionError::BlockPersist(_) => "transition_block",
                 _ => "transition",
             };
             return Err(api_err(code, &e.to_string()));

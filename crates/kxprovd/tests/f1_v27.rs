@@ -41,7 +41,7 @@ async fn mode_missing_fail_closed_with_audit() {
         panic!("status");
     };
     assert_eq!(st.operational_mode, OperationalMode::Production);
-    let audit = ModeStore::new(tmp.path(), Profile::Sim)
+    let audit = ModeStore::new(tmp.path(), tmp.path(), Profile::Sim)
         .audit()
         .load()
         .unwrap();
@@ -78,7 +78,7 @@ async fn mode_set_via_root_socket_increments_counter() {
 #[test]
 fn mode_set_rejected_when_not_idle() {
     let tmp = tempfile::tempdir().unwrap();
-    let store = ModeStore::new(tmp.path(), Profile::Sim);
+    let store = ModeStore::new(tmp.path(), tmp.path(), Profile::Sim);
     let err = store
         .set_operational(OperationalMode::Production, Profile::Sim, false)
         .unwrap_err();

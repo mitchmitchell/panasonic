@@ -11,6 +11,17 @@ use std::sync::{Arc, Mutex};
 use thiserror::Error;
 
 pub const ETC_CONFIG: &str = "/etc/kxprov/kxprovd.json";
+pub const PROVISION_ROOT: &str = "/var/lib/kx-provision";
+pub const DEFAULT_SOCKET: &str = "/run/kx-provision/kxprovd.sock";
+
+pub fn profile_data_dir(profile: Profile) -> PathBuf {
+    let seg = match profile {
+        Profile::Sim => "sim",
+        Profile::Test => "test",
+        Profile::Prod => "prod",
+    };
+    PathBuf::from(PROVISION_ROOT).join(seg)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TransportKind {
@@ -22,6 +33,7 @@ pub enum TransportKind {
 pub struct Config {
     pub profile: Profile,
     pub transport: TransportKind,
+    pub provision_root: PathBuf,
     pub data_dir: PathBuf,
     pub socket_path: PathBuf,
     pub password: String,
@@ -41,15 +53,17 @@ pub struct Config {
 
 #[derive(Debug, Deserialize)]
 struct EtcConfigFile {
-    #[serde(default = "default_data_dir")]
-    data_dir: PathBuf,
+    #[serde(default)]
+    data_dir: Option<PathBuf>,
+    #[serde(default = "default_provision_root")]
+    provision_root: PathBuf,
     #[serde(default = "default_socket")]
     socket_path: PathBuf,
     #[serde(default = "default_tokens_path")]
     tokens_path: PathBuf,
     password_path: PathBuf,
-    #[serde(default = "default_goliath")]
-    goliath_target: PathBuf,
+    #[serde(default)]
+    goliath_target: Option<PathBuf>,
     #[serde(default = "default_serial")]
     serial_device: PathBuf,
     #[serde(default = "default_gateway_uid")]
@@ -79,20 +93,16 @@ enum TransportKindWire {
     Sim,
 }
 
-fn default_data_dir() -> PathBuf {
-    PathBuf::from("/var/lib/kx-provision")
+fn default_provision_root() -> PathBuf {
+    PathBuf::from(PROVISION_ROOT)
 }
 
 fn default_socket() -> PathBuf {
-    PathBuf::from("/run/kx-provision/kxprovd.sock")
+    PathBuf::from(DEFAULT_SOCKET)
 }
 
 fn default_tokens_path() -> PathBuf {
-    PathBuf::from("/var/lib/kx-provision/tokens.json")
-}
-
-fn default_goliath() -> PathBuf {
-    PathBuf::from("/var/lib/kx-provision/goliath")
+    PathBuf::from(PROVISION_ROOT).join("tokens.json")
 }
 
 fn default_serial() -> PathBuf {
@@ -161,15 +171,22 @@ impl Config {
         if let Some(guard) = file.reply_guard_ms {
             timing.reply_guard_ms = guard;
         }
+        let data_dir = file
+            .data_dir
+            .unwrap_or_else(|| profile_data_dir(file.profile));
+        let goliath_target = file
+            .goliath_target
+            .unwrap_or_else(|| data_dir.join("goliath"));
         let cfg = Self {
             profile: file.profile,
             transport,
-            data_dir: file.data_dir,
+            provision_root: file.provision_root,
+            data_dir,
             socket_path: file.socket_path,
             password: password.trim().to_string(),
             gates: file.gates,
             peer_policy: PeerPolicy::new(file.gateway_uid, file.admin_uid),
-            goliath_target: file.goliath_target,
+            goliath_target,
             serial_device: file.serial_device,
             gateway_uid: file.gateway_uid,
             admin_uid: file.admin_uid,
@@ -189,6 +206,7 @@ impl Config {
         Self {
             profile: Profile::Sim,
             transport: TransportKind::Sim,
+            provision_root: data_dir.clone(),
             data_dir: data_dir.clone(),
             socket_path,
             password: kxtd1232_sim::PLACEHOLDER_PASSWORD.to_string(),

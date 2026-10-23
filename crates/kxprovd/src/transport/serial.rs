@@ -55,7 +55,7 @@ fn send_all_port<W: Write>(
                         "serial: send timed out after {written}/{} bytes",
                         data.len()
                     ),
-                    bytes_sent: written,
+                    bytes_sent: Some(written),
                 }))
             };
         }
@@ -72,7 +72,7 @@ fn send_all_port<W: Write>(
             Err(e) => {
                 return Err(TransportError::LinkDown(LinkDownError {
                     detail: format!("serial: partial send {written}/{}: {e}", data.len()),
-                    bytes_sent: written,
+                    bytes_sent: Some(written),
                 }));
             }
         }
@@ -125,7 +125,7 @@ pub(crate) fn recv_with_poll<R: Read>(
             Err(e) => {
                 return Err(TransportError::LinkDown(LinkDownError {
                     detail: e.to_string(),
-                    bytes_sent: 0,
+                    bytes_sent: None,
                 }))
             }
         }

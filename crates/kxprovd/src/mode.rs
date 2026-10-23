@@ -50,11 +50,11 @@ pub struct ModeStore {
 }
 
 impl ModeStore {
-    pub fn new(data_dir: &Path, boot_profile: Profile) -> Self {
+    pub fn new(data_dir: &Path, provision_root: &Path, boot_profile: Profile) -> Self {
         Self {
             mode_path: data_dir.join("mode.json"),
             profile_path: data_dir.join("profile.json"),
-            counter_path: data_dir.join("mode.counter"),
+            counter_path: provision_root.join("mode.counter"),
             audit: AuditLog::new(data_dir),
             boot_profile,
         }

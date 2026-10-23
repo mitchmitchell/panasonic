@@ -8,21 +8,13 @@ use crate::session::{Login, LoginState};
 use crate::signon::SignOn;
 use crate::tables;
 
-/// Link loss while sending: how many bytes reached the line before the failure.
+/// Link loss on the transport (send or receive).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LinkDownError {
     pub detail: String,
-    /// `0` only when the transport can prove nothing was transmitted.
-    pub bytes_sent: usize,
-}
-
-impl LinkDownError {
-    pub fn nothing_written(detail: impl Into<String>) -> Self {
-        Self {
-            detail: detail.into(),
-            bytes_sent: 0,
-        }
-    }
+    /// Bytes transmitted before a **`send`** failure (`None` = not applicable, e.g. receive).
+    /// Provably zero bytes on send use [`TransportError::NothingWritten`], not `Some(0)`.
+    pub bytes_sent: Option<usize>,
 }
 
 /// Transport errors.
@@ -31,8 +23,9 @@ impl LinkDownError {
 pub enum TransportError {
     /// Nothing arrived within the timeout.
     Timeout,
-    /// From `send`: some or all of the data may have reached the line (see
-    /// [`LinkDownError::bytes_sent`]). Surfaces to callers as [`Error::LinkDown`].
+    /// From `send`: some or all of the data may have reached the line when
+    /// [`LinkDownError::bytes_sent`] is `Some(n > 0)`. From `recv`: `bytes_sent` is `None`.
+    /// Surfaces to callers as [`Error::LinkDown`].
     LinkDown(LinkDownError),
     /// From `send` only: provably zero bytes were written. The client maps this to
     /// [`Error::PreSend`] wrapping [`Error::LinkDown`], not to a top-level `LinkDown`.
@@ -382,19 +375,25 @@ impl<T: Transport> Client<T> {
             return Err(e);
         }
         let sent_at = self.t.now_ms();
-        if let Err(e) = self.send_frame(raw) {
-            if cmd != Cmd::Write {
-                match &e {
-                    Error::LinkDown(_) if !self.needs_drain => self.note_link_down(None),
-                    Error::PreSend(inner)
-                        if matches!(inner.as_ref(), Error::LinkDown(_)) && !self.needs_drain =>
-                    {
-                        self.note_link_down(None);
+        match self.send_frame(raw) {
+            Ok(()) => {}
+            // Every send failure propagates. Writes: `write()` maps LinkDown vs PreSend and
+            // saves resume. Reads/other: record disconnect unless a pending drain owns it.
+            Err(e) => {
+                if cmd != Cmd::Write {
+                    match &e {
+                        Error::LinkDown(_) if !self.needs_drain => self.note_link_down(None),
+                        Error::PreSend(inner)
+                            if matches!(inner.as_ref(), Error::LinkDown(_))
+                                && !self.needs_drain =>
+                        {
+                            self.note_link_down(None);
+                        }
+                        _ => {}
                     }
-                    _ => {}
                 }
+                return Err(e);
             }
-            return Err(e);
         }
         let r = match self
             .drop_before_cutoff(sent_at + self.timing.reply_cutoff_ms(raw.len()))
@@ -954,6 +953,53 @@ mod tests {
         c.rx = stale.clone();
         assert_eq!(c.drain_until_quiet(), Ok(()));
         assert!(c.rx.is_empty(), "buffered bytes survived the drain");
+        assert_eq!(c.drained().first().map(|d| d.bytes.clone()), Some(stale));
+    }
+
+    /// Replies only after a send; the send takes long enough that the post-send guard
+    /// window has already passed, so the guard never clears `rx` itself.
+    struct ReplyOnSend {
+        now: u64,
+        reply: Vec<u8>,
+        inbound: VecDeque<Vec<u8>>,
+    }
+
+    impl Transport for ReplyOnSend {
+        fn send(&mut self, _: &[u8]) -> Result<(), TransportError> {
+            self.now += 1_000;
+            self.inbound.push_back(self.reply.clone());
+            Ok(())
+        }
+        fn recv(&mut self, timeout_ms: u64) -> Result<Vec<u8>, TransportError> {
+            self.inbound.pop_front().ok_or_else(|| {
+                self.now += timeout_ms;
+                TransportError::Timeout
+            })
+        }
+        fn now_ms(&mut self) -> u64 {
+            self.now
+        }
+    }
+
+    /// Architect 5632467751: a stale frame already buffered in `rx` before a send is
+    /// discarded by the pre-send rx flush in `flush_pending`, so the real ack is the
+    /// reply. Without that flush the stale read reply is parsed first and the request
+    /// fails (mismatched command), so this test fails.
+    #[test]
+    fn presend_flush_discards_buffered_rx_before_reply() {
+        let ack = vec![0x03, 0x00, 0x00, 0x03];
+        let stale = vec![0x03, 0x01, 0x00, 0x04];
+        let mut c = Client::new(ReplyOnSend {
+            now: 0,
+            reply: ack.clone(),
+            inbound: VecDeque::new(),
+        });
+        c.state = SessionState::Binary;
+        c.rx = stale.clone();
+        let r = c.request(&[0x02, 0x08, 0x0a], Cmd::Write, 500);
+        let want = frame::classify(&ack).ok();
+        assert!(want.is_some());
+        assert_eq!(r.ok(), want);
         assert_eq!(c.drained().first().map(|d| d.bytes.clone()), Some(stale));
     }
 }

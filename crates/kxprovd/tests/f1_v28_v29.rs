@@ -153,7 +153,7 @@ async fn testing_to_production_mismatch_blocks_writes() {
     assert!(err.to_string().contains("transition") || err.to_string().contains("verify"));
 
     assert!(TransitionBlockStore::new(tmp.path()).writes_blocked());
-    let audit = ModeStore::new(tmp.path(), Profile::Sim)
+    let audit = ModeStore::new(tmp.path(), tmp.path(), Profile::Sim)
         .audit()
         .load()
         .unwrap();

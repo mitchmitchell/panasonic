@@ -6,7 +6,7 @@ use kxprov_api::{ApiClient, FieldKindWire, OperationalMode, Profile, RequestBody
 use kxprovd::config::Config;
 use kxprovd::mode::{ModeFileBody, ProfileFileBody};
 use kxtd1232::{build_plan, field_patch, frame::Access, Client, Granularity};
-use kxtd1232::{Timing, MAX_LINK_BAUD, MIN_REPLY_GUARD_MS};
+use kxtd1232::{SessionState, Timing, MAX_LINK_BAUD, MIN_REPLY_GUARD_MS};
 use kxtd1232_sim::{Fault, SimPbx, SimTransport, PLACEHOLDER_PASSWORD};
 use std::time::Duration;
 
@@ -50,6 +50,25 @@ fn apply_style_readback_after_each_write_all_profiles() {
         }
         let _ = client.end_binary();
     }
+}
+
+#[test]
+fn verify_send_failure_marks_session_disconnected() {
+    let mut client = Client::with(
+        SimTransport::new(SimPbx::default()),
+        Access::ReadWrite,
+        Timing::default(),
+    );
+    client.login(PLACEHOLDER_PASSWORD).unwrap();
+    client.transport_mut().fail_send_after = Some(5);
+    let err = client.read(0x24, 0, 0, 3).unwrap_err();
+    assert!(matches!(err, kxtd1232::Error::LinkDown(_)));
+    assert_eq!(client.state(), &SessionState::Disconnected);
+}
+
+#[test]
+fn timing_default_send_bound_is_five_seconds() {
+    assert_eq!(Timing::default().send_bound_ms, 5_000);
 }
 
 #[test]
