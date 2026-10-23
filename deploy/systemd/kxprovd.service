@@ -7,6 +7,7 @@ Documentation=file:///usr/share/doc/kx-provision/systemd-serial-device.md
 [Service]
 Type=simple
 # root:kxprovision so gateway (SupplementaryGroups=kxprovision) can reach kxprovd.sock.
+User=root
 Group=kxprovision
 RuntimeDirectory=kx-provision
 RuntimeDirectoryMode=0750

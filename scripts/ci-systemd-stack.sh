@@ -134,16 +134,23 @@ sudo rm -f /var/lib/kx-provision/sim/kxprovd.lock \
   /run/kx-provision/kxprovd.sock /run/kx-provision-gw/web-serve.sock
 
 sudo systemctl start kxprovd.service
-for _ in $(seq 1 120); do
+for _ in $(seq 1 300); do
   if [[ -S /run/kx-provision/kxprovd.sock ]]; then break; fi
-  if ! systemctl is-active --quiet kxprovd.service; then
-    log "kxprovd.service exited before socket bind"
+  state=$(systemctl show -p ActiveState --value kxprovd.service)
+  if [[ "$state" == "failed" || "$state" == "inactive" || "$state" == "dead" ]]; then
+    log "kxprovd.service state=$state before socket bind"
     sudo systemctl status kxprovd.service --no-pager || true
+    sudo journalctl -u kxprovd.service -n 80 --no-pager || true
     exit 1
   fi
   sleep 0.1
 done
-[[ -S /run/kx-provision/kxprovd.sock ]] || { log "kxprovd.sock missing"; exit 1; }
+if [[ ! -S /run/kx-provision/kxprovd.sock ]]; then
+  log "kxprovd.sock missing (ActiveState=$(systemctl show -p ActiveState --value kxprovd.service))"
+  ls -la /run/kx-provision 2>&1 || true
+  sudo journalctl -u kxprovd.service -n 80 --no-pager || true
+  exit 1
+fi
 
 run_prov_group="$(stat -c '%G' /run/kx-provision)"
 run_prov_mode="$(stat -c '%a' /run/kx-provision)"
