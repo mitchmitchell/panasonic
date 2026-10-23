@@ -61,24 +61,23 @@ jobs:
           command -v cargo >/dev/null || { echo 'cargo not on PATH' >&2; exit 1; }
           command -v grep >/dev/null || { echo 'grep not on PATH' >&2; exit 1; }
           feat='test-transport-access'
-          if cargo tree -p kxprovd --locked -e features -i kxtd1232-sim >/dev/null 2>&1; then
-            echo 'kxprovd release graph must not include kxtd1232-sim' >&2
-            cargo tree -p kxprovd --locked -e features -i kxtd1232-sim >&2 || true
+          edges='normal,build,features'
+          ship_tree=$(cargo tree -p kxprovd --locked -e "$edges" -i kxtd1232) || exit 1
+          if echo "$ship_tree" | grep -E "$feat" >/dev/null; then
+            echo 'kxprovd ship graph must not include kxtd1232/test-transport-access' >&2
+            echo "$ship_tree" | grep -E "$feat" >&2
             exit 1
           fi
-          util_sim=$(cargo tree -p kxprovd --locked --features test-util -e features -i kxtd1232-sim) || {
-            echo 'positive control failed: test-util build must include kxtd1232-sim' >&2
-            exit 1
-          }
-          if ! echo "$util_sim" | grep -E 'kxtd1232-sim' >/dev/null; then
-            echo 'positive control failed: test-util tree missing kxtd1232-sim' >&2
-            echo "$util_sim" >&2
+          forced=$(cargo tree -p kxprovd --locked -e "$edges" --features kxtd1232/test-transport-access -i kxtd1232) || exit 1
+          if ! echo "$forced" | grep -E "$feat" >/dev/null; then
+            echo 'positive control failed: forced kxtd1232/test-transport-access must appear in tree' >&2
+            echo "$forced" >&2
             exit 1
           fi
-          util_feat=$(cargo tree -p kxprovd --locked --features test-util -e features -i kxtd1232) || exit 1
-          if ! echo "$util_feat" | grep -E "$feat" >/dev/null; then
+          util_tree=$(cargo tree -p kxprovd --locked -e "$edges" --features test-util -i kxtd1232) || exit 1
+          if ! echo "$util_tree" | grep -E "$feat" >/dev/null; then
             echo 'positive control failed: test-util build must include test-transport-access' >&2
-            echo "$util_feat" >&2
+            echo "$util_tree" >&2
             exit 1
           fi
       - run: cargo build -p kxprovd --release --locked

@@ -243,7 +243,7 @@ async fn b9_revoked_token_fails_queued_job() {
     let mut file: TokensFile =
         serde_json::from_slice(&std::fs::read(&path).unwrap()).expect("tokens file");
     file.tokens.retain(|t| t.id.as_str() != "writer");
-    std::fs::write(&path, serde_json::to_vec_pretty(&file).unwrap()).unwrap();
+    kxprovd::tokens::TokenStore::write_test_file(&path, &file).expect("atomic tokens write");
 
     let mut saw_revoked = false;
     for h in handles {
