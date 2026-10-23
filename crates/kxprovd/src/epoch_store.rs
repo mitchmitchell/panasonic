@@ -1,6 +1,6 @@
 //! Root-only `.epoch/` counter storage (P4-R10).
 
-use crate::config::{profile_epoch_counter_path, EPOCH_DIR_NAME};
+use crate::config::{highest_epoch_counter_path, profile_epoch_counter_path, EPOCH_DIR_NAME};
 use kxprov_api::Profile;
 use std::path::{Path, PathBuf};
 #[cfg(feature = "test-util")]
@@ -188,6 +188,34 @@ pub fn write_counter(
 ) -> Result<(), EpochError> {
     ensure_epoch_dir(provision_root)?;
     let path = profile_epoch_counter_path(provision_root, profile);
+    crate::atomic_write::write(&path, counter.to_string().as_bytes())?;
+    check_counter_secure(&path)?;
+    bump_highest_epoch(provision_root, counter)?;
+    Ok(())
+}
+
+pub fn read_highest_epoch(provision_root: &Path) -> Result<u64, EpochError> {
+    check_epoch_dir_if_present(provision_root)?;
+    let path = highest_epoch_counter_path(provision_root);
+    check_counter_secure(&path)?;
+    if !path.exists() {
+        return Ok(0);
+    }
+    let s = std::fs::read_to_string(&path)?;
+    let trimmed = s.trim();
+    if trimmed.is_empty() {
+        return Ok(0);
+    }
+    trimmed.parse().map_err(|_| EpochError::Corrupt)
+}
+
+pub fn bump_highest_epoch(provision_root: &Path, counter: u64) -> Result<(), EpochError> {
+    ensure_epoch_dir(provision_root)?;
+    let current = read_highest_epoch(provision_root)?;
+    if counter <= current {
+        return Ok(());
+    }
+    let path = highest_epoch_counter_path(provision_root);
     crate::atomic_write::write(&path, counter.to_string().as_bytes())?;
     check_counter_secure(&path)?;
     Ok(())

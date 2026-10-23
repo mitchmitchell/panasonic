@@ -7,9 +7,7 @@ use kxprov_api::{
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-#[cfg(feature = "test-util")]
-use std::sync::atomic::AtomicBool;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, Weak};
 use std::time::{Duration, Instant};
 use thiserror::Error;
@@ -107,6 +105,14 @@ pub struct TokenStore {
     transient_flight: Arc<TransientReloadFlight>,
     /// At most one `token-reload-probe` thread doing disk I/O per store.
     disk_probe_live: Arc<AtomicUsize>,
+    /// Probes abandoned after recv timeout or path replace (thread may still be blocked).
+    disk_probe_leaked: Arc<AtomicUsize>,
+    /// Path identity the live probe opened (dev/ino).
+    probe_path_identity: Arc<Mutex<Option<PathIdentity>>>,
+    /// After timeout abandon, block respawn until path identity or bytes change.
+    probe_abandoned_path: Arc<Mutex<Option<PathIdentity>>>,
+    /// When set, the live probe's guard must not decrement `disk_probe_live`.
+    active_probe_abandon: Arc<Mutex<Option<Arc<AtomicBool>>>>,
     /// After a bounded probe times out, deny reload briefly without spawning.
     probe_fast_fail_until: Arc<Mutex<Option<Instant>>>,
     #[cfg(feature = "test-util")]
@@ -126,6 +132,10 @@ impl Clone for TokenStore {
             job_queue: Arc::clone(&self.job_queue),
             transient_flight: Arc::clone(&self.transient_flight),
             disk_probe_live: Arc::clone(&self.disk_probe_live),
+            disk_probe_leaked: Arc::clone(&self.disk_probe_leaked),
+            probe_path_identity: Arc::clone(&self.probe_path_identity),
+            probe_abandoned_path: Arc::clone(&self.probe_abandoned_path),
+            active_probe_abandon: Arc::clone(&self.active_probe_abandon),
             probe_fast_fail_until: Arc::clone(&self.probe_fast_fail_until),
             #[cfg(feature = "test-util")]
             reload_probe_hang: Arc::clone(&self.reload_probe_hang),
@@ -178,13 +188,38 @@ impl Drop for TransientProbeLeaderGuard<'_> {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PathIdentity {
+    dev: u64,
+    ino: u64,
+}
+
+#[cfg(unix)]
+fn path_identity(path: &Path) -> Option<PathIdentity> {
+    use std::os::unix::fs::MetadataExt;
+    let meta = std::fs::symlink_metadata(path).ok()?;
+    Some(PathIdentity {
+        dev: meta.dev(),
+        ino: meta.ino(),
+    })
+}
+
+#[cfg(not(unix))]
+fn path_identity(_path: &Path) -> Option<PathIdentity> {
+    None
+}
+
 struct DiskProbeLiveGuard {
     live: Arc<AtomicUsize>,
     fast_fail_until: Arc<Mutex<Option<Instant>>>,
+    abandoned: Arc<AtomicBool>,
 }
 
 impl Drop for DiskProbeLiveGuard {
     fn drop(&mut self) {
+        if self.abandoned.load(Ordering::Acquire) {
+            return;
+        }
         self.live.fetch_sub(1, Ordering::AcqRel);
         if self.live.load(Ordering::Acquire) == 0 {
             *self.fast_fail_until.lock().expect("probe fast-fail lock") = None;
@@ -232,12 +267,23 @@ impl TokenStore {
         self.disk_probe_live.load(Ordering::Acquire)
     }
 
+    #[cfg(feature = "test-util")]
+    pub fn leaked_disk_probe_threads_for_test(&self) -> usize {
+        self.disk_probe_leaked.load(Ordering::Acquire)
+    }
+
+    const MAX_LEAKED_PROBE_THREADS: usize = 2;
+
     fn wrap_state(state: TokenState) -> Self {
         Self {
             inner: Arc::new(Mutex::new(state)),
             job_queue: Arc::new(Mutex::new(None)),
             transient_flight: Arc::new(TransientReloadFlight::new()),
             disk_probe_live: Arc::new(AtomicUsize::new(0)),
+            disk_probe_leaked: Arc::new(AtomicUsize::new(0)),
+            probe_path_identity: Arc::new(Mutex::new(None)),
+            probe_abandoned_path: Arc::new(Mutex::new(None)),
+            active_probe_abandon: Arc::new(Mutex::new(None)),
             probe_fast_fail_until: Arc::new(Mutex::new(None)),
             #[cfg(feature = "test-util")]
             reload_probe_hang: Arc::new(AtomicBool::new(false)),
@@ -246,14 +292,134 @@ impl TokenStore {
 
     const PROBE_FAST_FAIL_SLACK: Duration = Duration::from_millis(100);
 
-    fn disk_reload_blocked_now(&self, during_outage: bool) -> bool {
+    fn probe_path_differs_from_live(&self, path: &Path) -> bool {
+        let current = path_identity(path);
+        let stuck = *self
+            .probe_path_identity
+            .lock()
+            .expect("probe path identity lock");
+        match (current, stuck) {
+            (Some(c), Some(s)) => c != s,
+            (None, Some(_)) => true,
+            _ => false,
+        }
+    }
+
+    fn disk_reload_blocked_now(&self, during_outage: bool, path: &Path) -> bool {
         if during_outage && self.disk_probe_live.load(Ordering::Acquire) > 0 {
+            if self.probe_path_differs_from_live(path) {
+                return false;
+            }
             return true;
         }
         self.probe_fast_fail_until
             .lock()
             .expect("probe fast-fail lock")
             .is_some_and(|until| Instant::now() < until)
+    }
+
+    fn abandon_stuck_probe(&self) {
+        if self.disk_probe_live.load(Ordering::Acquire) == 0 {
+            return;
+        }
+        if let Some(flag) = self
+            .active_probe_abandon
+            .lock()
+            .expect("active probe abandon lock")
+            .take()
+        {
+            flag.store(true, Ordering::Release);
+        }
+        self.disk_probe_live.fetch_sub(1, Ordering::AcqRel);
+        if self.disk_probe_live.load(Ordering::Acquire) == 0 {
+            *self
+                .probe_fast_fail_until
+                .lock()
+                .expect("probe fast-fail lock") = None;
+        }
+        let stuck_id = *self
+            .probe_path_identity
+            .lock()
+            .expect("probe path identity lock");
+        if let Some(id) = stuck_id {
+            let mut abandoned = self
+                .probe_abandoned_path
+                .lock()
+                .expect("probe abandoned path lock");
+            if *abandoned != Some(id) {
+                if self.disk_probe_leaked.load(Ordering::Acquire) < Self::MAX_LEAKED_PROBE_THREADS {
+                    self.disk_probe_leaked.fetch_add(1, Ordering::AcqRel);
+                }
+                *abandoned = Some(id);
+            }
+        }
+        *self
+            .probe_path_identity
+            .lock()
+            .expect("probe path identity lock") = None;
+    }
+
+    fn clear_probe_abandoned_path_if_disk_changed(&self, plan: &ReloadPlan) {
+        if let Some(fp) = plan.failed_fp {
+            if !Self::fingerprint_unchanged(fp, &plan.path) {
+                *self
+                    .probe_abandoned_path
+                    .lock()
+                    .expect("probe abandoned path lock") = None;
+            }
+        }
+    }
+
+    fn disk_probe_spawn_denied(&self, path: &Path) -> bool {
+        let current = path_identity(path);
+        let abandoned = *self
+            .probe_abandoned_path
+            .lock()
+            .expect("probe abandoned path lock");
+        if self.disk_probe_live.load(Ordering::Acquire) == 0 {
+            if current.is_some() && current == abandoned {
+                return true;
+            }
+            if self.disk_probe_leaked.load(Ordering::Acquire) >= Self::MAX_LEAKED_PROBE_THREADS
+                && current.is_some()
+                && abandoned.is_some()
+                && current == abandoned
+            {
+                return true;
+            }
+        }
+        #[cfg(feature = "test-util")]
+        if self.reload_probe_hang.load(Ordering::Relaxed)
+            && self.disk_probe_leaked.load(Ordering::Acquire) > 0
+            && self.disk_probe_live.load(Ordering::Acquire) == 0
+        {
+            return true;
+        }
+        false
+    }
+
+    fn reconcile_stuck_probe_for_path(&self, path: &Path) {
+        let current = path_identity(path);
+        let abandoned = *self
+            .probe_abandoned_path
+            .lock()
+            .expect("probe abandoned path lock");
+        if current.is_some() && abandoned.is_some() && current != abandoned {
+            *self
+                .probe_abandoned_path
+                .lock()
+                .expect("probe abandoned path lock") = None;
+        }
+        if self.disk_probe_live.load(Ordering::Acquire) == 0 {
+            return;
+        }
+        if self.probe_path_differs_from_live(path) {
+            self.abandon_stuck_probe();
+            *self
+                .probe_abandoned_path
+                .lock()
+                .expect("probe abandoned path lock") = None;
+        }
     }
 
     fn reload_plan_in_outage(plan: &ReloadPlan) -> bool {
@@ -272,15 +438,31 @@ impl TokenStore {
         }
     }
 
-    fn try_begin_disk_probe(&self) -> Option<DiskProbeLiveGuard> {
+    fn try_begin_disk_probe(
+        &self,
+        path: &Path,
+        abandoned: Arc<AtomicBool>,
+    ) -> Option<DiskProbeLiveGuard> {
+        if self.disk_probe_spawn_denied(path) {
+            return None;
+        }
         if self
             .disk_probe_live
             .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Relaxed)
             .is_ok()
         {
+            *self
+                .active_probe_abandon
+                .lock()
+                .expect("active probe abandon lock") = Some(Arc::clone(&abandoned));
+            *self
+                .probe_path_identity
+                .lock()
+                .expect("probe path identity lock") = path_identity(path);
             Some(DiskProbeLiveGuard {
                 live: Arc::clone(&self.disk_probe_live),
                 fast_fail_until: Arc::clone(&self.probe_fast_fail_until),
+                abandoned,
             })
         } else {
             None
@@ -338,7 +520,27 @@ impl TokenStore {
     const RELOAD_GRACE: Duration = Duration::from_secs(2);
     const RELOAD_MAX_ATTEMPTS: usize = 3;
 
+    #[cfg(unix)]
+    fn fifo_fingerprint(path: &Path) -> Option<DiskFingerprint> {
+        use std::os::unix::fs::{FileTypeExt, MetadataExt};
+        let meta = std::fs::symlink_metadata(path).ok()?;
+        if !meta.file_type().is_fifo() {
+            return None;
+        }
+        let mut hasher = Sha256::new();
+        hasher.update(b"fifo:");
+        hasher.update(meta.dev().to_le_bytes());
+        hasher.update(meta.ino().to_le_bytes());
+        hasher.update(meta.size().to_le_bytes());
+        hasher.update(meta.mtime().to_le_bytes());
+        Some(DiskFingerprint::InvalidDigest(hasher.finalize().into()))
+    }
+
     fn disk_fingerprint(path: &Path) -> DiskFingerprint {
+        #[cfg(unix)]
+        if let Some(fp) = Self::fifo_fingerprint(path) {
+            return fp;
+        }
         use std::io::ErrorKind;
         match std::fs::read(path) {
             Ok(raw) => DiskFingerprint::InvalidDigest(Self::digest_bytes(&raw)),
@@ -397,14 +599,21 @@ impl TokenStore {
     }
 
     fn run_disk_probe_off_thread(&self, plan: ReloadPlan) -> Result<DiskProbe, TokenError> {
+        self.reconcile_stuck_probe_for_path(&plan.path);
+        self.clear_probe_abandoned_path_if_disk_changed(&plan);
         let instant_deny = Self::reload_plan_in_outage(&plan);
         let wait_until = if instant_deny {
             Instant::now()
         } else {
             Instant::now() + Duration::from_millis(50)
         };
+        let abandoned = Arc::new(AtomicBool::new(false));
         let live_guard = loop {
-            if let Some(guard) = self.try_begin_disk_probe() {
+            self.reconcile_stuck_probe_for_path(&plan.path);
+            if self.disk_probe_spawn_denied(&plan.path) {
+                return Err(TokenError::StoreUnavailable);
+            }
+            if let Some(guard) = self.try_begin_disk_probe(&plan.path, Arc::clone(&abandoned)) {
                 break guard;
             }
             if instant_deny || Instant::now() >= wait_until {
@@ -428,12 +637,28 @@ impl TokenStore {
             .saturating_add(Duration::from_millis(300));
         if timeout.is_zero() {
             self.latch_probe_fast_fail();
+            self.abandon_stuck_probe();
             return Ok(Self::timed_out_disk_probe());
         }
         match rx.recv_timeout(timeout) {
-            Ok(probe) => Ok(probe),
+            Ok(probe) => {
+                *self
+                    .probe_path_identity
+                    .lock()
+                    .expect("probe path identity lock") = None;
+                *self
+                    .probe_abandoned_path
+                    .lock()
+                    .expect("probe abandoned path lock") = None;
+                *self
+                    .active_probe_abandon
+                    .lock()
+                    .expect("active probe abandon lock") = None;
+                Ok(probe)
+            }
             Err(_) => {
                 self.latch_probe_fast_fail();
+                self.abandon_stuck_probe();
                 Ok(Self::timed_out_disk_probe())
             }
         }
@@ -452,6 +677,7 @@ impl TokenStore {
                 TransientFlightState::Running => {
                     if Self::reload_plan_in_outage(&plan)
                         && self.disk_probe_live.load(Ordering::Acquire) > 0
+                        && !self.probe_path_differs_from_live(&plan.path)
                     {
                         return Err(TokenError::StoreUnavailable);
                     }
@@ -690,8 +916,11 @@ impl TokenStore {
         };
 
         let during_outage = Self::reload_plan_in_outage(&plan);
-        if self.disk_reload_blocked_now(during_outage) {
+        if self.disk_reload_blocked_now(during_outage, &plan.path) {
             return Err(TokenError::StoreUnavailable);
+        }
+        if during_outage {
+            self.reconcile_stuck_probe_for_path(&plan.path);
         }
 
         let probe = if plan.transient_done {
@@ -1049,8 +1278,9 @@ mod tests {
                 Instant::now() < drain_deadline,
                 "probe thread did not finish after hang cleared"
             );
-            std::thread::sleep(Duration::from_millis(20));
+            std::thread::sleep(Duration::from_millis(10));
         }
+        assert!(store.leaked_disk_probe_threads_for_test() <= 2);
         write_tokens_revoking_writer(&path, false);
         store
             .verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan)

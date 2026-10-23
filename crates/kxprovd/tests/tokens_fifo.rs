@@ -14,6 +14,54 @@ fn write_tokens(path: &std::path::Path) {
     TokenStore::write_test_file(path, &file).expect("write tokens");
 }
 
+fn wait_live_zero(store: &TokenStore, deadline: Instant) {
+    while store.live_disk_probe_threads_for_test() > 0 {
+        assert!(
+            Instant::now() < deadline,
+            "probe thread did not finish (live={}, leaked={})",
+            store.live_disk_probe_threads_for_test(),
+            store.leaked_disk_probe_threads_for_test()
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn assert_probe_counts_bounded(store: &TokenStore) {
+    assert!(
+        store.live_disk_probe_threads_for_test() <= 1,
+        "live probe threads {}",
+        store.live_disk_probe_threads_for_test()
+    );
+    assert!(
+        store.leaked_disk_probe_threads_for_test() <= 2,
+        "leaked probe threads {}",
+        store.leaked_disk_probe_threads_for_test()
+    );
+}
+
+fn auth_recovers_after_replace(store: &TokenStore, path: &std::path::Path) {
+    let deadline = Instant::now() + Duration::from_secs(8);
+    loop {
+        assert_probe_counts_bounded(store);
+        match store.verify_bearer(kxprovd::test_util::WRITER_SECRET, 0, Scope::Plan) {
+            Ok(_) => break,
+            Err(TokenError::StoreUnavailable) => {
+                assert!(
+                    Instant::now() < deadline,
+                    "auth did not recover after tokens.json replace"
+                );
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            Err(e) => panic!("unexpected token error: {e}"),
+        }
+    }
+    assert_eq!(store.live_disk_probe_threads_for_test(), 0);
+    assert!(
+        path.is_file(),
+        "expected regular tokens.json after recovery"
+    );
+}
+
 #[test]
 fn fifo_tokens_single_probe_thread_fast_fail_and_recovery() {
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -115,14 +163,7 @@ fn fifo_tokens_single_probe_thread_fast_fail_and_recovery() {
             .expect("feed valid tokens through fifo");
     }
 
-    let drain_deadline = Instant::now() + Duration::from_secs(5);
-    while store.live_disk_probe_threads_for_test() > 0 {
-        assert!(
-            Instant::now() < drain_deadline,
-            "probe thread did not finish after FIFO fed"
-        );
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    wait_live_zero(&store, Instant::now() + Duration::from_secs(5));
 
     std::fs::remove_file(&path).expect("remove fifo");
     write_tokens(&path);
@@ -131,4 +172,55 @@ fn fifo_tokens_single_probe_thread_fast_fail_and_recovery() {
         .verify_bearer(kxprovd::test_util::WRITER_SECRET, 0, Scope::Plan)
         .expect("auth recovers after valid tokens.json restored");
     assert_eq!(store.live_disk_probe_threads_for_test(), 0);
+}
+
+#[test]
+fn fifo_replaced_by_regular_file_via_rename_recovers_auth() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let path = tmp.path().join("tokens.json");
+    write_tokens(&path);
+    let store = TokenStore::load_insecure(path.clone()).expect("load");
+    store
+        .verify_bearer(kxprovd::test_util::WRITER_SECRET, 0, Scope::Plan)
+        .expect("warm");
+
+    std::fs::remove_file(&path).expect("remove tokens");
+    use nix::sys::stat::Mode;
+    nix::unistd::mkfifo(&path, Mode::S_IRUSR | Mode::S_IWUSR).expect("mkfifo");
+    let stress_until = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < stress_until {
+        let _ = store.verify_bearer(kxprovd::test_util::WRITER_SECRET, 0, Scope::Plan);
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    let replacement = tmp.path().join("tokens.replacement.json");
+    write_tokens(&replacement);
+    std::fs::rename(&replacement, &path).expect("rename regular file over fifo path");
+
+    auth_recovers_after_replace(&store, &path);
+}
+
+#[test]
+fn fifo_replaced_by_regular_file_via_unlink_create_recovers_auth() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let path = tmp.path().join("tokens.json");
+    write_tokens(&path);
+    let store = TokenStore::load_insecure(path.clone()).expect("load");
+    store
+        .verify_bearer(kxprovd::test_util::WRITER_SECRET, 0, Scope::Plan)
+        .expect("warm");
+
+    std::fs::remove_file(&path).expect("remove tokens");
+    use nix::sys::stat::Mode;
+    nix::unistd::mkfifo(&path, Mode::S_IRUSR | Mode::S_IWUSR).expect("mkfifo");
+    let stress_until = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < stress_until {
+        let _ = store.verify_bearer(kxprovd::test_util::WRITER_SECRET, 0, Scope::Plan);
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    std::fs::remove_file(&path).expect("unlink fifo");
+    write_tokens(&path);
+
+    auth_recovers_after_replace(&store, &path);
 }

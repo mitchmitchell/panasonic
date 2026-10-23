@@ -37,6 +37,14 @@ pub fn profile_epoch_counter_path(provision_root: impl AsRef<Path>, profile: Pro
         .join(format!("{seg}.counter"))
 }
 
+/// Monotonic highest epoch ever written under this provision root (cross-profile rollback guard).
+pub fn highest_epoch_counter_path(provision_root: impl AsRef<Path>) -> PathBuf {
+    provision_root
+        .as_ref()
+        .join(EPOCH_DIR_NAME)
+        .join("highest.counter")
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TransportKind {
     Sim,
