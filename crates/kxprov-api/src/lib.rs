@@ -12,6 +12,7 @@ mod route_table;
 mod scope;
 mod token_id;
 mod types;
+mod write_gates;
 
 pub use approval::{
     approval_ttl, plan_storage_ttl, Approval, ApprovalId, APPROVAL_SUBMIT_LIMIT_PER_DAY,
@@ -31,6 +32,8 @@ pub use route_table::{
 pub use scope::{scopes_for_role, Scope, ScopeSet};
 pub use token_id::TokenId;
 pub use types::{
-    ApplyJob, BackupInfo, BackupList, DaemonStatus, FieldValue, JobId, JobState, PlanChangeRequest,
-    PlanSummary, ReadFieldsRequest, ReadFieldsResponse, RequestedBy,
+    ApplyJob, ApplyPlanAccepted, ApplyPlanApprovalRequired, BackupInfo, BackupList, DaemonStatus,
+    FieldValue, JobId, JobState, PlanChangeRequest, PlanSummary, ReadFieldsRequest,
+    ReadFieldsResponse, RequestedBy, SubmitApprovalRequest,
 };
+pub use write_gates::prod_profile_write_gates_active;

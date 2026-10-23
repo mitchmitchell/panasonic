@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::mode::Mode;
 use crate::plan::{DiffHash, PlanId};
+use crate::profile::Profile;
 use crate::token_id::TokenId;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -86,4 +87,26 @@ pub struct ApplyJob {
     pub job_id: JobId,
     pub state: JobState,
     pub message: String,
+}
+
+/// MCP / API success body for `apply_plan` (v2.11).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApplyPlanAccepted {
+    pub job_id: JobId,
+}
+
+/// MCP / API body when prod-profile approval is missing (v2.11).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApplyPlanApprovalRequired {
+    pub plan_id: PlanId,
+    pub diff_hash: DiffHash,
+    pub status: String,
+}
+
+/// MCP `submit_approval` request (v2.11).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubmitApprovalRequest {
+    pub plan_id: String,
+    pub diff_hash: DiffHash,
+    pub profile: Profile,
 }

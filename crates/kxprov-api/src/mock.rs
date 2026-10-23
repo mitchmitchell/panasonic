@@ -22,6 +22,7 @@ use crate::types::{
     ApplyJob, BackupInfo, BackupList, DaemonStatus, FieldValue, JobId, JobState, PlanChangeRequest,
     PlanSummary, ReadFieldsRequest, ReadFieldsResponse, RequestedBy,
 };
+use crate::write_gates::prod_profile_write_gates_active;
 
 struct StoredApproval {
     approval: Approval,
@@ -64,7 +65,20 @@ impl MockDaemon {
         Self::with_mode_and_password(mode, "test-admin-password")
     }
 
+    pub fn with_profile(profile: Profile) -> Self {
+        Self::with_mode_profile_and_password(Mode::Production, profile, "test-admin-password")
+    }
+
+    /// Test helper: allow prod-profile live writes (gate G5).
+    pub async fn test_set_live_writes_approved(&self, approved: bool) {
+        self.inner.write().await.live_writes_approved = approved;
+    }
+
     pub fn with_mode_and_password(mode: Mode, password: &str) -> Self {
+        Self::with_mode_profile_and_password(mode, Profile::test(), password)
+    }
+
+    pub fn with_mode_profile_and_password(mode: Mode, profile: Profile, password: &str) -> Self {
         let salt = SaltString::generate(&mut rand::thread_rng());
         let hash = Argon2::default()
             .hash_password(password.as_bytes(), &salt)
@@ -73,7 +87,7 @@ impl MockDaemon {
         Self {
             admin_hash: hash,
             inner: Arc::new(RwLock::new(Inner {
-                profile: Profile::test(),
+                profile,
                 mode,
                 plans: HashMap::new(),
                 plan_approvals: HashMap::new(),
@@ -286,6 +300,8 @@ impl DaemonBackend for MockDaemon {
         &self,
         caller: &CallerIdentity,
         plan_id_or_prefix: &str,
+        diff_hash: DiffHash,
+        profile: &Profile,
     ) -> Result<Approval, ApiError> {
         Self::require_scope(caller, Scope::Approve)?;
         let approver = caller.token_id().cloned().ok_or(ApiError::ForbiddenScope)?;
@@ -295,6 +311,12 @@ impl DaemonBackend for MockDaemon {
             .plans
             .get(&Self::plan_key(&plan_id))
             .ok_or(ApiError::PlanNotFound)?;
+        if plan.diff_hash != diff_hash {
+            return Err(ApiError::InvalidApproval);
+        }
+        if &plan.profile != profile {
+            return Err(ApiError::BadRequest("profile mismatch"));
+        }
         if plan.is_expired(plan_storage_ttl()) {
             return Err(ApiError::PlanExpired);
         }
@@ -305,7 +327,6 @@ impl DaemonBackend for MockDaemon {
         if requester == approver {
             return Err(ApiError::ApproverMustDiffer);
         }
-        let diff_hash = plan.diff_hash.clone();
         let rate = inner
             .submit_rates
             .entry(approver.0.clone())
@@ -335,7 +356,8 @@ impl DaemonBackend for MockDaemon {
     ) -> Result<ApplyJob, ApiError> {
         Self::require_scope(caller, Scope::Write)?;
         let mut inner = self.inner.write().await;
-        if inner.profile == Profile::prod() && !inner.live_writes_approved {
+        let active_profile = inner.profile.clone();
+        if prod_profile_write_gates_active(&active_profile) && !inner.live_writes_approved {
             return Err(ApiError::LiveWritesBlocked);
         }
         {
@@ -347,10 +369,9 @@ impl DaemonBackend for MockDaemon {
                 return Err(ApiError::InvalidApproval);
             }
         }
-        let profile = inner.profile.clone();
-        let mode = inner.mode;
+        let profile = active_profile;
 
-        if mode == Mode::Production {
+        if prod_profile_write_gates_active(&profile) {
             let key = inner.plan_approvals.iter().find_map(|(id, stored)| {
                 Self::validate_plan_approval(stored, plan_id, &diff_hash, &profile).ok()?;
                 Some(id.clone())

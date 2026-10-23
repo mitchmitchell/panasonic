@@ -4,6 +4,7 @@ use crate::approval::Approval;
 use crate::error::ApiError;
 use crate::identity::CallerIdentity;
 use crate::plan::{DiffHash, PlanId};
+use crate::profile::Profile;
 use crate::types::{
     ApplyJob, BackupInfo, BackupList, DaemonStatus, JobId, PlanChangeRequest, PlanSummary,
     ReadFieldsRequest, ReadFieldsResponse,
@@ -31,11 +32,13 @@ pub trait DaemonBackend: Send + Sync {
         req: PlanChangeRequest,
     ) -> Result<PlanSummary, ApiError>;
 
-    /// MCP `submit_approval` (approve scope): full plan id or 8-hex prefix (F1 v2.7).
+    /// MCP `submit_approval` (approve scope): plan id or 8-hex prefix, matching diff_hash + profile (v2.11).
     async fn submit_approval(
         &self,
         caller: &CallerIdentity,
         plan_id_or_prefix: &str,
+        diff_hash: DiffHash,
+        profile: &Profile,
     ) -> Result<Approval, ApiError>;
 
     /// Consumes a live approval for `(plan_id, diff_hash, profile)` or returns `approval_required`.

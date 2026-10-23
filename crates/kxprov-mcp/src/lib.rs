@@ -2,8 +2,8 @@ use std::borrow::Cow;
 use std::sync::Arc;
 
 use kxprov_api::{
-    ApiError, CallerIdentity, DaemonBackend, DiffHash, JobId, PlanChangeRequest, PlanId,
-    ReadFieldsRequest,
+    ApiError, ApplyPlanAccepted, CallerIdentity, DaemonBackend, DiffHash, JobId, PlanChangeRequest,
+    PlanId, Profile, ReadFieldsRequest,
 };
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
@@ -79,6 +79,8 @@ struct ApplyPlanParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 struct SubmitApprovalParams {
     plan_id: String,
+    diff_hash: String,
+    profile: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -153,7 +155,7 @@ impl KxMcpServer {
         Ok(text_json(summary))
     }
 
-    #[tool(description = "Apply a plan (production mode requires MCP approval)")]
+    #[tool(description = "Apply a plan (prod profile requires MCP approval)")]
     async fn apply_plan(
         &self,
         Parameters(params): Parameters<ApplyPlanParams>,
@@ -162,7 +164,7 @@ impl KxMcpServer {
         let plan_id = PlanId::from_hex(&params.plan_id).map_err(api_err)?;
         let diff_hash = DiffHash::from_hex(&params.diff_hash).map_err(api_err)?;
         match self.backend.apply_plan(&caller, plan_id, diff_hash).await {
-            Ok(job) => Ok(text_json(job)),
+            Ok(job) => Ok(text_json(ApplyPlanAccepted { job_id: job.job_id })),
             Err(ApiError::ApprovalRequired {
                 plan_id,
                 diff_hash,
@@ -179,15 +181,19 @@ impl KxMcpServer {
         }
     }
 
-    #[tool(description = "Submit approval for a plan (approve scope; full id or 8-hex prefix)")]
+    #[tool(
+        description = "Submit approval (approve scope; plan id or 8-hex prefix, diff_hash, profile)"
+    )]
     async fn submit_approval(
         &self,
         Parameters(params): Parameters<SubmitApprovalParams>,
     ) -> Result<CallToolResult, ErrorData> {
         let caller = Self::caller()?;
+        let diff_hash = DiffHash::from_hex(&params.diff_hash).map_err(api_err)?;
+        let profile = Profile(params.profile);
         let approval = self
             .backend
-            .submit_approval(&caller, &params.plan_id)
+            .submit_approval(&caller, &params.plan_id, diff_hash, &profile)
             .await
             .map_err(api_err)?;
         Ok(text_json(approval))
