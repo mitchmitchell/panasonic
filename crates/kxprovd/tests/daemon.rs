@@ -1,6 +1,6 @@
 #![allow(clippy::unwrap_used)]
 
-mod support;
+mod common;
 
 use kxprov_api::{
     ApiClient, ApplyPlanAwaitingStatus, FieldKindWire, OperationalMode, Profile, RequestBody,
@@ -9,7 +9,7 @@ use kxprov_api::{
 use kxprovd::locked::LockedStore;
 use kxprovd::mode::{ModeFileBody, ProfileFileBody};
 use std::time::Duration;
-use support::{bearer_auth, init_test_daemon, APPROVER_SECRET, COMM_SECRET, WRITER_SECRET};
+use common::{bearer_auth, init_test_daemon, APPROVER_SECRET, COMM_SECRET, WRITER_SECRET};
 
 #[tokio::test]
 async fn plan_immutable_and_token_bound() {

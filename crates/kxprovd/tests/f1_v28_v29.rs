@@ -1,6 +1,6 @@
-#![allow(clippy::unwrap_used)]
+#![allow(clippy::unwrap_used, unused_imports)]
 
-mod support;
+mod common;
 
 use kxprov_api::{http_dispatch, mcp_invoke, HttpMethod, HttpStatus};
 use kxprov_api::{
@@ -35,7 +35,7 @@ async fn test_apply_without_backup_when_not_prod() {
     )
     .unwrap();
     let uid = nix::unistd::getuid().as_raw();
-    let (_d, sock) = support::init_test_daemon(&tmp, uid, Profile::Sim);
+    let (_d, sock) = common::init_test_daemon(&tmp, uid, Profile::Sim);
     tokio::time::sleep(Duration::from_millis(50)).await;
     let mut gw = ApiClient::connect(&sock).await.unwrap();
     let ResponseResult::PlanChange(plan) = gw
@@ -47,7 +47,7 @@ async fn test_apply_without_backup_when_not_prod() {
                     value: "T".into(),
                 },
             },
-            Some(support::bearer_auth(support::WRITER_SECRET)),
+            Some(common::bearer_auth(common::WRITER_SECRET)),
         )
         .await
         .unwrap()
@@ -62,7 +62,7 @@ async fn test_apply_without_backup_when_not_prod() {
                     diff_hash: plan.diff_hash,
                 },
             },
-            Some(support::bearer_auth(support::WRITER_SECRET)),
+            Some(common::bearer_auth(common::WRITER_SECRET)),
         )
         .await
         .unwrap()
@@ -84,13 +84,13 @@ async fn testing_to_production_mismatch_blocks_writes() {
     )
     .unwrap();
     let uid = nix::unistd::getuid().as_raw();
-    let (_d, sock) = support::init_test_daemon(&tmp, uid, Profile::Sim);
+    let (_d, sock) = common::init_test_daemon(&tmp, uid, Profile::Sim);
     tokio::time::sleep(Duration::from_millis(50)).await;
     let mut gw = ApiClient::connect(&sock).await.unwrap();
     let ResponseResult::BackupNow(first) = gw
         .call_auth(
             RequestBody::BackupNow,
-            Some(support::bearer_auth(support::WRITER_SECRET)),
+            Some(common::bearer_auth(common::WRITER_SECRET)),
         )
         .await
         .unwrap()
@@ -106,7 +106,7 @@ async fn testing_to_production_mismatch_blocks_writes() {
             serde_json::from_slice(&std::fs::read(meta_path).unwrap()).unwrap();
         meta.caller_id_digest.unwrap()
     };
-    support::write_prod_mode_backup_meta(&tmp.path().join("backups"), &digest);
+    common::write_prod_mode_backup_meta(&tmp.path().join("backups"), &digest);
     let ResponseResult::PlanChange(plan) = gw
         .call_auth(
             RequestBody::PlanChange {
@@ -116,7 +116,7 @@ async fn testing_to_production_mismatch_blocks_writes() {
                     value: "CHANGED".into(),
                 },
             },
-            Some(support::bearer_auth(support::WRITER_SECRET)),
+            Some(common::bearer_auth(common::WRITER_SECRET)),
         )
         .await
         .unwrap()
@@ -131,7 +131,7 @@ async fn testing_to_production_mismatch_blocks_writes() {
                     diff_hash: plan.diff_hash.clone(),
                 },
             },
-            Some(support::bearer_auth(support::WRITER_SECRET)),
+            Some(common::bearer_auth(common::WRITER_SECRET)),
         )
         .await
         .unwrap()

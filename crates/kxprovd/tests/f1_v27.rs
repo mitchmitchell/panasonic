@@ -1,6 +1,6 @@
 #![allow(clippy::unwrap_used)]
 
-mod support;
+mod common;
 
 use kxprov_api::{
     ApiClient, FieldKindWire, OperationalMode, Profile, RequestBody, ResponseResult, SetModeParams,
@@ -30,7 +30,7 @@ fn write_profile(dir: &std::path::Path, profile: Profile) {
 async fn mode_missing_fail_closed_with_audit() {
     let tmp = tempfile::tempdir().unwrap();
     let uid = nix::unistd::getuid().as_raw();
-    let (_d, sock) = support::init_test_daemon(&tmp, uid, Profile::Sim);
+    let (_d, sock) = common::init_test_daemon(&tmp, uid, Profile::Sim);
     tokio::time::sleep(Duration::from_millis(50)).await;
     let mut c = ApiClient::connect(&sock).await.unwrap();
     let ResponseResult::Status(st) = c.call(RequestBody::Status).await.unwrap() else {
@@ -48,7 +48,7 @@ async fn mode_missing_fail_closed_with_audit() {
 async fn mode_set_via_root_socket_increments_counter() {
     let tmp = tempfile::tempdir().unwrap();
     let uid = nix::unistd::getuid().as_raw();
-    let (_d, sock) = support::init_test_daemon(&tmp, uid, Profile::Sim);
+    let (_d, sock) = common::init_test_daemon(&tmp, uid, Profile::Sim);
     tokio::time::sleep(Duration::from_millis(50)).await;
     let mut admin = ApiClient::connect(&sock).await.unwrap();
     let ResponseResult::SetMode(r) = admin
@@ -87,7 +87,7 @@ async fn sim_profile_skips_approval() {
     write_mode(tmp.path(), OperationalMode::Production);
     write_profile(tmp.path(), Profile::Sim);
     let uid = nix::unistd::getuid().as_raw();
-    let (_d, sock) = support::init_test_daemon(&tmp, uid, Profile::Sim);
+    let (_d, sock) = common::init_test_daemon(&tmp, uid, Profile::Sim);
     tokio::time::sleep(Duration::from_millis(50)).await;
     let mut gw = ApiClient::connect(&sock).await.unwrap();
     let ResponseResult::PlanChange(plan) = gw
@@ -99,7 +99,7 @@ async fn sim_profile_skips_approval() {
                     value: "Z".into(),
                 },
             },
-            Some(support::bearer_auth(support::WRITER_SECRET)),
+            Some(common::bearer_auth(common::WRITER_SECRET)),
         )
         .await
         .unwrap()
@@ -109,7 +109,7 @@ async fn sim_profile_skips_approval() {
     let ResponseResult::BackupNow(_) = gw
         .call_auth(
             RequestBody::BackupNow,
-            Some(support::bearer_auth(support::WRITER_SECRET)),
+            Some(common::bearer_auth(common::WRITER_SECRET)),
         )
         .await
         .unwrap()
@@ -124,7 +124,7 @@ async fn sim_profile_skips_approval() {
                     diff_hash: plan.diff_hash.clone(),
                 },
             },
-            Some(support::bearer_auth(support::WRITER_SECRET)),
+            Some(common::bearer_auth(common::WRITER_SECRET)),
         )
         .await
         .unwrap()
@@ -139,7 +139,7 @@ async fn submit_approval_accepts_eight_hex_prefix() {
     let tmp = tempfile::tempdir().unwrap();
     write_mode(tmp.path(), OperationalMode::Production);
     let uid = nix::unistd::getuid().as_raw();
-    let (_d, sock) = support::init_test_daemon(&tmp, uid, Profile::Sim);
+    let (_d, sock) = common::init_test_daemon(&tmp, uid, Profile::Sim);
     tokio::time::sleep(Duration::from_millis(50)).await;
     let mut gw = ApiClient::connect(&sock).await.unwrap();
     let ResponseResult::PlanChange(plan) = gw
@@ -151,7 +151,7 @@ async fn submit_approval_accepts_eight_hex_prefix() {
                     value: "P".into(),
                 },
             },
-            Some(support::bearer_auth(support::WRITER_SECRET)),
+            Some(common::bearer_auth(common::WRITER_SECRET)),
         )
         .await
         .unwrap()
@@ -169,7 +169,7 @@ async fn submit_approval_accepts_eight_hex_prefix() {
                     profile: Profile::Sim,
                 },
             },
-            Some(support::bearer_auth(support::APPROVER_SECRET)),
+            Some(common::bearer_auth(common::APPROVER_SECRET)),
         )
         .await
         .unwrap()

@@ -262,9 +262,6 @@ fn command(c: &mut Client<SimTransport>, cmd: &Command) -> Result<(), CliError> 
                 println!("{}\t{v}", u32::from(*first) + i as u32);
             }
         }
-        Command::Unlock { .. } | Command::Mode { .. } | Command::SimMark { .. } => {
-            unreachable!("handled earlier")
-        }
         Command::Plan { kind, index, value } => {
             let patch = field_patch(*kind, *index, value)?;
             kxtd1232::tables::check_writable_table(kind.table()).map_err(Error::from)?;
@@ -281,9 +278,7 @@ fn command(c: &mut Client<SimTransport>, cmd: &Command) -> Result<(), CliError> 
         Command::Unlock { .. }
         | Command::Mode { .. }
         | Command::SimMark { .. }
-        | Command::Token { .. } => {
-            return Err(CliError::Usage("daemon-only command".into()));
-        }
+        | Command::Token { .. } => unreachable!("handled in run()"),
     }
     Ok(())
 }

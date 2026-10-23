@@ -1,14 +1,14 @@
-#![allow(clippy::unwrap_used)]
+#![allow(clippy::unwrap_used, unused_imports)]
 
 //! Security Analyst cases B2, B3, B6 (draft).
 
-mod support;
+mod common;
 
 use kxprov_api::{ApiClient, OperationalMode, Profile, RequestBody, ResponseResult, SetModeParams};
 use kxprovd::mode::ModeFileBody;
 use kxprovd::transition::TransitionBlockStore;
 use std::time::Duration;
-use support::{bearer_auth, init_test_daemon, write_testing_mode_backup_meta, READER_SECRET};
+use common::{bearer_auth, init_test_daemon, write_testing_mode_backup_meta, READER_SECRET};
 
 /// B2: stale backup from another mode — only latest **Production** backup counts.
 #[tokio::test]

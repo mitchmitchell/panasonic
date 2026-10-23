@@ -1,9 +1,9 @@
-#![allow(clippy::unwrap_used)]
+#![allow(clippy::unwrap_used, clippy::field_reassign_with_default)]
 
-mod support;
+mod common;
 
 use kxprov_api::{
-    ApiClient, FieldKindWire, OperationalMode, Profile, RequestBody, ResponseResult, TokenId,
+    ApiClient, FieldKindWire, OperationalMode, Profile, RequestBody, ResponseResult,
 };
 use kxprovd::config::Config;
 use kxprovd::mode::{ModeFileBody, ProfileFileBody};
@@ -100,7 +100,7 @@ async fn daemon_apply_on_prod_profile_readback_via_read_fields() {
     )
     .unwrap();
     let uid = nix::unistd::getuid().as_raw();
-    let (_d, sock) = support::init_test_daemon(&tmp, uid, Profile::Prod);
+    let (_d, sock) = common::init_test_daemon(&tmp, uid, Profile::Prod);
     tokio::time::sleep(Duration::from_millis(50)).await;
     let mut gw = ApiClient::connect(&sock).await.unwrap();
     let ResponseResult::PlanChange(plan) = gw
@@ -112,7 +112,7 @@ async fn daemon_apply_on_prod_profile_readback_via_read_fields() {
                     value: "LIVE".into(),
                 },
             },
-            Some(support::bearer_auth(support::WRITER_SECRET)),
+            Some(common::bearer_auth(common::WRITER_SECRET)),
         )
         .await
         .unwrap()
@@ -129,14 +129,14 @@ async fn daemon_apply_on_prod_profile_readback_via_read_fields() {
                     profile: Profile::Prod,
                 },
             },
-            Some(support::bearer_auth(support::APPROVER_SECRET)),
+            Some(common::bearer_auth(common::APPROVER_SECRET)),
         )
         .await
         .unwrap();
     let ResponseResult::BackupNow(_) = gw
         .call_auth(
             RequestBody::BackupNow,
-            Some(support::bearer_auth(support::WRITER_SECRET)),
+            Some(common::bearer_auth(common::WRITER_SECRET)),
         )
         .await
         .unwrap()
@@ -151,7 +151,7 @@ async fn daemon_apply_on_prod_profile_readback_via_read_fields() {
                     diff_hash: plan.diff_hash,
                 },
             },
-            Some(support::bearer_auth(support::WRITER_SECRET)),
+            Some(common::bearer_auth(common::WRITER_SECRET)),
         )
         .await
         .unwrap()
@@ -168,7 +168,7 @@ async fn daemon_apply_on_prod_profile_readback_via_read_fields() {
                     count: 1,
                 },
             },
-            Some(support::bearer_auth(support::WRITER_SECRET)),
+            Some(common::bearer_auth(common::WRITER_SECRET)),
         )
         .await
         .unwrap()

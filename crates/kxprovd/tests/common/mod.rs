@@ -1,4 +1,4 @@
-#![allow(dead_code)]
+#![allow(dead_code, unused_imports, clippy::unwrap_used)]
 
 use kxprov_api::{OperationalMode, Profile, RequestAuth};
 use kxprovd::test_util::write_integration_tokens;
