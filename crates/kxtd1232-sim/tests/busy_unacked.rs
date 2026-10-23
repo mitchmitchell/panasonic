@@ -60,9 +60,9 @@ fn test_short_busy_ok() {
 fn test_busy_past_bound_on_write_is_unacked_then_verify() {
     let mut c = client();
     let (base, new) = block(&mut c);
-    c.transport_mut()
-        .sim
-        .inject(Fault::Busy { frames: frames_over_busy_limit() });
+    c.transport_mut().sim.inject(Fault::Busy {
+        frames: frames_over_busy_limit(),
+    });
     let e = c.write(0x25, 10, 0, &new).unwrap_err();
     assert!(matches!(e, Error::Unacked(ref u) if u.reason == UnackedReason::BusyTimeout));
     assert_eq!(
@@ -104,9 +104,9 @@ fn test_write_fault_survives_intervening_reads() {
 fn test_busy_forever_then_verify_block_starts_clean() {
     let mut c = client();
     let (base, new) = block(&mut c);
-    c.transport_mut()
-        .sim
-        .inject(Fault::Busy { frames: frames_over_busy_limit() });
+    c.transport_mut().sim.inject(Fault::Busy {
+        frames: frames_over_busy_limit(),
+    });
     assert!(matches!(c.write(0x25, 10, 0, &new), Err(Error::Unacked(_))));
     assert_eq!(
         c.verify_block(0x25, 10, 0, &new, &base),

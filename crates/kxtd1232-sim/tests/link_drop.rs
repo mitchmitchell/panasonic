@@ -1,4 +1,4 @@
-//! Link drop mid-chunk / mid-send (design §6, milestone A2).
+//! Link drop mid-chunk / mid-send / post-send (design §6, milestone A2).
 
 #![allow(clippy::unwrap_used)]
 
@@ -63,8 +63,9 @@ fn test_link_drop_mid_chunk_disconnects_then_relogin_verify() {
     );
 }
 
+/// Partial bytes on the wire: possibly applied — resume verify after reconnect (Tester t4).
 #[test]
-fn test_link_drop_mid_send_not_stored_verify_not_applied() {
+fn test_link_drop_partial_frame_send_verify_after_relogin() {
     let mut c = client();
     let (base, new) = block(&mut c);
     c.transport_mut()
@@ -75,10 +76,33 @@ fn test_link_drop_mid_send_not_stored_verify_not_applied() {
         Err(Error::LinkDown(_))
     ));
     assert_eq!(c.state(), &SessionState::Disconnected);
-    assert_eq!(write_cmds(&c), 0, "partial frame must not commit");
+    assert_eq!(write_cmds(&c), 0, "partial frame must not commit on PBX");
     relogin(&mut c);
-    assert_eq!(c.state(), &SessionState::Binary);
-    assert_eq!(c.read(0x25, 10, 0, 80).unwrap(), base);
+    assert!(matches!(c.state(), SessionState::AwaitingVerify(_)));
+    assert_eq!(
+        c.verify_block(0x25, 10, 0, &new, &base),
+        Ok(VerifyOutcome::NotApplied)
+    );
+}
+
+/// Full write frame sent, link drops before ack: verify after reconnect (Tester probe t4).
+#[test]
+fn test_link_drop_after_full_write_send_verify_after_relogin() {
+    let mut c = client();
+    let (base, new) = block(&mut c);
+    c.transport_mut().drop_link_after_write = true;
+    assert!(matches!(
+        c.write(0x25, 10, 0, &new),
+        Err(Error::LinkDown(_))
+    ));
+    assert_eq!(c.state(), &SessionState::Disconnected);
+    assert_eq!(write_cmds(&c), 1, "full frame reached the PBX");
+    relogin(&mut c);
+    assert!(matches!(c.state(), SessionState::AwaitingVerify(_)));
+    assert_eq!(
+        c.verify_block(0x25, 10, 0, &new, &base),
+        Ok(VerifyOutcome::Applied)
+    );
 }
 
 #[test]

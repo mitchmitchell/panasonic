@@ -8,7 +8,7 @@
 use kxtd1232::fields::{encode_cid_name, encode_cid_number, encode_ext_name};
 use kxtd1232::frame::{checksum, Cmd, BUSY_FRAME};
 use kxtd1232::tables;
-use kxtd1232::{SignOn, Transport, TransportError};
+use kxtd1232::{LinkDownError, SignOn, Transport, TransportError};
 use std::collections::{HashMap, VecDeque};
 
 pub const PLACEHOLDER_PASSWORD: &str = "0000";
@@ -378,11 +378,12 @@ impl SimPbx {
     fn frame(&mut self, raw: &[u8]) -> Emits {
         let lat = self.latency_ms;
         let cmd = raw.get(1).copied().unwrap_or(0xFF);
-        if raw.len() < 3
-            || raw.first().is_some_and(|&len| len < 2)
-            || checksum(&raw[..raw.len() - 1]) != raw[raw.len() - 1]
-        {
+        let len_byte = raw.first().copied().unwrap_or(0);
+        if raw.len() < 3 || len_byte < 2 || raw.len() != len_byte as usize + 1 {
             return self.malformed_frame();
+        }
+        if checksum(&raw[..raw.len() - 1]) != raw[raw.len() - 1] {
+            return vec![(lat, Self::reply(cmd, &[0x01, 0x02]))];
         }
         self.clear_busy_lockup();
         self.commands.push(cmd);
@@ -627,7 +628,9 @@ impl SimTransport {
 impl Transport for SimTransport {
     fn send(&mut self, data: &[u8]) -> Result<(), TransportError> {
         if self.link_down {
-            return Err(TransportError::LinkDown("sim: link dropped".into()));
+            return Err(TransportError::LinkDown(LinkDownError::nothing_written(
+                "sim: link dropped",
+            )));
         }
         let tline = kxtd1232::Timing::default();
         #[cfg(feature = "faults")]
@@ -642,9 +645,10 @@ impl Transport for SimTransport {
                 }
             }
             self.link_down = true;
-            return Err(TransportError::LinkDown(
-                "simulated serial link down mid-send".into(),
-            ));
+            return Err(TransportError::LinkDown(LinkDownError {
+                detail: "simulated serial link down mid-send".into(),
+                bytes_sent: n,
+            }));
         }
         self.sent.extend_from_slice(data);
         if self.drop_link_after_write && data.get(1) == Some(&Cmd::Write.byte()) {
@@ -686,7 +690,9 @@ impl Transport for SimTransport {
 
     fn recv(&mut self, timeout_ms: u64) -> Result<Vec<u8>, TransportError> {
         if self.link_down {
-            return Err(TransportError::LinkDown("sim: link dropped".into()));
+            return Err(TransportError::LinkDown(LinkDownError::nothing_written(
+                "sim: link dropped",
+            )));
         }
         match self.queue.front() {
             Some(&(at, _)) if at <= self.now + timeout_ms => {

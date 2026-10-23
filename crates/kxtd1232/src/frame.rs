@@ -10,7 +10,7 @@ use crate::tables;
 pub const MAX_WRITE_PAYLOAD: usize = 200;
 /// A data reply is `LEN CMD 00 <2n> SUM`, so LEN = 3 + 2n must fit in one byte.
 pub const MAX_READ_WORDS: u8 = 126;
-/// The busy/NAK-style frame the PBX repeats (~128 ms cadence) after malformed frames.
+/// The busy frame the PBX repeats after malformed LEN / junk (not after a checksum NAK).
 pub const BUSY_FRAME: [u8; 5] = [0x04, 0xFF, 0x01, 0x00, 0x04];
 
 /// Commands this library can send. The full-upload commands `0x0A` and `0x10` (meaning

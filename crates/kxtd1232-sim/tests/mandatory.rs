@@ -66,11 +66,9 @@ fn test_late_ack_drained_before_verify_reread() {
 fn test_drain_waits_out_busy_then_rereads() {
     let mut c = client();
     let (base, new) = block(&mut c);
-    c.transport_mut()
-        .sim
-        .inject(Fault::Busy {
-            frames: frames_over_busy_limit(),
-        });
+    c.transport_mut().sim.inject(Fault::Busy {
+        frames: frames_over_busy_limit(),
+    });
     assert!(matches!(c.write(0x24, 0, 0, &new), Err(Error::Unacked(_))));
     assert_eq!(
         c.verify_block(0x24, 0, 0, &new, &base),
@@ -103,11 +101,9 @@ fn test_end_binary_held_after_unacked_write() {
 fn test_end_binary_held_after_busy_timeout_until_rollback() {
     let mut c = client();
     let (base, new) = block(&mut c);
-    c.transport_mut()
-        .sim
-        .inject(Fault::Busy {
-            frames: frames_over_busy_limit(),
-        });
+    c.transport_mut().sim.inject(Fault::Busy {
+        frames: frames_over_busy_limit(),
+    });
     assert!(matches!(c.write(0x24, 0, 0, &new), Err(Error::Unacked(_))));
     assert_eq!(c.end_binary(), Err(Error::EndBinaryHeld));
     // Something else changed the block meanwhile: verify says neither.

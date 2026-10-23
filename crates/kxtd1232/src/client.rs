@@ -8,13 +8,30 @@ use crate::session::{Login, LoginState};
 use crate::signon::SignOn;
 use crate::tables;
 
+/// Link loss while sending: how many bytes reached the line before the failure.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinkDownError {
+    pub detail: String,
+    /// `0` only when the transport can prove nothing was transmitted.
+    pub bytes_sent: usize,
+}
+
+impl LinkDownError {
+    pub fn nothing_written(detail: impl Into<String>) -> Self {
+        Self {
+            detail: detail.into(),
+            bytes_sent: 0,
+        }
+    }
+}
+
 /// Transport errors.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TransportError {
     /// Nothing arrived within the timeout.
     Timeout,
-    /// The link is gone.
-    LinkDown(String),
+    /// The link is gone (see [`LinkDownError::bytes_sent`]).
+    LinkDown(LinkDownError),
 }
 
 /// Byte transport plus clock. Implemented by the simulator and (A3) the daemon's port.
@@ -33,7 +50,7 @@ pub struct Timing {
     pub reply_timeout_ms: u64,
     /// Ack wait per write (every real ack so far: <= 589 ms).
     pub ack_timeout_ms: u64,
-    /// Longest busy run tolerated (observed ~7 s at ~128 ms cadence, plus margin).
+    /// Longest busy run tolerated before giving up (design §9b default until H5).
     pub busy_limit_ms: u64,
     /// Quiet window: ends drain-until-quiet, and is the window after every reply in which
     /// any further non-busy frame makes that reply suspect (possibly stale).
@@ -216,15 +233,28 @@ impl<T: Transport> Client<T> {
             Ok(b) if b.is_empty() => Err(Error::LinkDown("transport returned no bytes".into())),
             Ok(b) => Ok(b),
             Err(TransportError::Timeout) => Err(Error::Timeout),
-            Err(TransportError::LinkDown(s)) => Err(Error::LinkDown(s)),
+            Err(TransportError::LinkDown(e)) => Err(Error::LinkDown(e.detail)),
         }
     }
 
     fn send(&mut self, data: &[u8]) -> Result<(), Error> {
-        self.t.send(data).map_err(|e| match e {
-            TransportError::Timeout => Error::Timeout,
-            TransportError::LinkDown(s) => Error::LinkDown(s),
-        })
+        match self.t.send(data) {
+            Ok(()) => Ok(()),
+            Err(TransportError::Timeout) => Err(Error::Timeout),
+            Err(TransportError::LinkDown(e)) => Err(Error::LinkDown(e.detail)),
+        }
+    }
+
+    /// Send and classify link loss: provably zero bytes vs possibly-on-wire.
+    fn send_request(&mut self, data: &[u8]) -> Result<(), Error> {
+        match self.t.send(data) {
+            Ok(()) => Ok(()),
+            Err(TransportError::Timeout) => Err(Error::Timeout),
+            Err(TransportError::LinkDown(e)) if e.bytes_sent == 0 => {
+                Err(Error::PreSend(Box::new(Error::LinkDown(e.detail))))
+            }
+            Err(TransportError::LinkDown(e)) => Err(Error::LinkDown(e.detail)),
+        }
     }
 
     /// Text login to binary mode, within `login_timeout_ms` overall and at most
@@ -300,10 +330,7 @@ impl<T: Transport> Client<T> {
             return Err(e);
         }
         let sent_at = self.t.now_ms();
-        if let Err(e @ Error::LinkDown(_)) = self.send(raw) {
-            // Frame never fully left the host: nothing to verify after reconnect.
-            return Err(Error::PreSend(Box::new(e)));
-        }
+        self.send_request(raw)?;
         let r = match self
             .drop_before_cutoff(sent_at + self.timing.reply_cutoff_ms(raw.len()))
             .and_then(|()| self.await_reply(cmd, timeout_ms))
