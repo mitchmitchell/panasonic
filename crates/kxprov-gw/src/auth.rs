@@ -300,6 +300,14 @@ mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
 
+    #[test]
+    fn skip_secret_file_checks_only_honors_env_in_test_builds() {
+        std::env::remove_var("KXPROV_SKIP_SECRET_FILE_CHECKS");
+        assert!(!skip_secret_file_checks());
+        std::env::set_var("KXPROV_SKIP_SECRET_FILE_CHECKS", "1");
+        assert!(skip_secret_file_checks());
+    }
+
     fn write_tokens(path: &std::path::Path, body: &str) {
         std::fs::write(path, body).unwrap();
         let mut perms = std::fs::metadata(path).unwrap().permissions();

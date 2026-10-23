@@ -222,7 +222,7 @@ fn caller_from_session(session: &Session) -> CallerIdentity {
 }
 
 /// Client IP for login rate limiting. Trust `X-Forwarded-For` only when the TCP peer is loopback
-/// (tailscale serve / reverse proxy on the gateway host).
+/// (e.g. tailscale serve forwarding from `127.0.0.1` on the gateway host).
 pub fn client_ip(headers: &HeaderMap, peer: Option<SocketAddr>) -> String {
     if let Some(peer) = peer {
         if peer.ip().is_loopback() {
