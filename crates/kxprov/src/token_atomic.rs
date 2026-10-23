@@ -2,7 +2,18 @@
 
 use std::fs::{File, OpenOptions};
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+fn atomic_temp_path(dir: &Path, base: &str) -> PathBuf {
+    let mut rnd = [0u8; 8];
+    let _ = getrandom::fill(&mut rnd);
+    dir.join(format!(
+        ".{}.tmp.{}.{}",
+        base,
+        std::process::id(),
+        hex::encode(rnd)
+    ))
+}
 
 pub fn atomic_write_tokens(path: &Path, data: &[u8]) -> std::io::Result<()> {
     atomic_write_tokens_inner(path, data, |_| Ok(()))
@@ -15,13 +26,11 @@ pub(crate) fn atomic_write_tokens_inner(
 ) -> std::io::Result<()> {
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
     std::fs::create_dir_all(dir)?;
-    let tmp = dir.join(format!(
-        ".{}.tmp.{}",
-        path.file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("tokens"),
-        std::process::id()
-    ));
+    let base = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("tokens");
+    let tmp = atomic_temp_path(dir, base);
     {
         let mut opts = OpenOptions::new();
         opts.write(true).create_new(true);
@@ -66,5 +75,17 @@ mod tests {
         .unwrap();
         let final_mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(final_mode, 0o600);
+    }
+
+    #[test]
+    fn stale_pid_temp_does_not_block_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tokens.json");
+        let stale = dir
+            .path()
+            .join(format!(".tokens.json.tmp.{}", std::process::id()));
+        std::fs::write(&stale, b"stale").unwrap();
+        atomic_write_tokens(&path, b"{}").expect("write despite stale temp");
+        assert!(path.is_file());
     }
 }

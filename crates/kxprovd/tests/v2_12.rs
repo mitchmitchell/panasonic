@@ -13,7 +13,7 @@ use std::time::Duration;
 #[test]
 fn rolled_back_mode_json_fails_closed_to_production() {
     let tmp = tempfile::tempdir().unwrap();
-    let store = ModeStore::new(tmp.path(), tmp.path(), Profile::Sim);
+    let store = ModeStore::new(tmp.path(), Profile::Sim);
     store
         .set_operational(OperationalMode::Testing, Profile::Test, true)
         .unwrap();
@@ -40,7 +40,7 @@ fn rolled_back_mode_json_fails_closed_to_production() {
 #[test]
 fn rolled_back_profile_json_fails_closed_to_prod_profile() {
     let tmp = tempfile::tempdir().unwrap();
-    let store = ModeStore::new(tmp.path(), tmp.path(), Profile::Sim);
+    let store = ModeStore::new(tmp.path(), Profile::Sim);
     store
         .set_operational(OperationalMode::Production, Profile::Sim, true)
         .unwrap();
@@ -160,7 +160,10 @@ fn default_production_paths() {
     );
     assert_eq!(
         cfg.data_dir,
-        kxprovd::config::profile_data_dir(kxprov_api::Profile::Sim)
+        kxprovd::config::profile_data_dir(
+            kxprovd::config::PROVISION_ROOT,
+            kxprov_api::Profile::Sim,
+        )
     );
     assert_eq!(
         cfg.socket_path,
@@ -169,5 +172,71 @@ fn default_production_paths() {
     assert_eq!(
         cfg.tokens_path,
         std::path::PathBuf::from(kxprovd::config::PROVISION_ROOT).join("tokens.json")
+    );
+}
+
+#[test]
+fn profile_data_dir_honors_configured_provision_root() {
+    use kxprovd::config::{profile_data_dir, Config};
+    let p = tempfile::tempdir().unwrap();
+    let root = p.path().join("custom-root");
+    let pass = p.path().join("password");
+    std::fs::write(&pass, "0000").unwrap();
+    let cfg_path = p.path().join("kxprovd.json");
+    std::fs::write(
+        &cfg_path,
+        format!(
+            r#"{{"password_path":"{}","provision_root":"{}"}}"#,
+            pass.display(),
+            root.display()
+        ),
+    )
+    .unwrap();
+    let cfg = Config::load_from_etc(&cfg_path).unwrap();
+    assert_eq!(
+        cfg.data_dir,
+        profile_data_dir(&root, kxprov_api::Profile::Sim)
+    );
+    assert_eq!(
+        profile_data_dir(&root, kxprov_api::Profile::Prod),
+        root.join("prod")
+    );
+}
+
+#[test]
+fn mode_counter_is_per_profile_data_directory() {
+    use kxprovd::mode::ProfileFileBody;
+    let root = tempfile::tempdir().unwrap();
+    let sim_dir = root.path().join("sim");
+    let prod_dir = root.path().join("prod");
+    std::fs::create_dir_all(&sim_dir).unwrap();
+    std::fs::create_dir_all(&prod_dir).unwrap();
+    std::fs::write(sim_dir.join("mode.counter"), "1\n").unwrap();
+    std::fs::write(prod_dir.join("mode.counter"), "9\n").unwrap();
+    std::fs::write(
+        sim_dir.join("profile.json"),
+        serde_json::to_vec_pretty(&ProfileFileBody {
+            profile: Profile::Sim,
+            counter: 1,
+        })
+        .unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        prod_dir.join("profile.json"),
+        serde_json::to_vec_pretty(&ProfileFileBody {
+            profile: Profile::Prod,
+            counter: 9,
+        })
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        ModeStore::new(&sim_dir, Profile::Sim).load_profile(),
+        Profile::Sim
+    );
+    assert_eq!(
+        ModeStore::new(&prod_dir, Profile::Prod).load_profile(),
+        Profile::Prod
     );
 }

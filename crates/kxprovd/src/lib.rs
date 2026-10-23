@@ -91,7 +91,7 @@ impl Daemon {
         let approvals = ApprovalBook::new(&config.data_dir);
         let locked = LockedStore::new(&config.data_dir);
         let transition = transition::TransitionBlockStore::new(&config.data_dir);
-        let mode = mode::ModeStore::new(&config.data_dir, &config.provision_root, config.profile);
+        let mode = mode::ModeStore::new(&config.data_dir, config.profile);
         let _ = sim_mark::SimMarkStore::new(&config.provision_root).clear_if_stale();
         let profile = Arc::new(RwLock::new(mode.load_profile()));
 
@@ -229,7 +229,7 @@ impl Daemon {
         let approvals = ApprovalBook::new(&config.data_dir);
         let locked = LockedStore::new(&config.data_dir);
         let transition = transition::TransitionBlockStore::new(&config.data_dir);
-        let mode = mode::ModeStore::new(&config.data_dir, &config.provision_root, config.profile);
+        let mode = mode::ModeStore::new(&config.data_dir, config.profile);
         let _ = sim_mark::SimMarkStore::new(&config.provision_root).clear_if_stale();
         let profile = Arc::new(RwLock::new(mode.load_profile()));
 

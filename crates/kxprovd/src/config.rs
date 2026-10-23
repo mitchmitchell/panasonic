@@ -14,13 +14,13 @@ pub const ETC_CONFIG: &str = "/etc/kxprov/kxprovd.json";
 pub const PROVISION_ROOT: &str = "/var/lib/kx-provision";
 pub const DEFAULT_SOCKET: &str = "/run/kx-provision/kxprovd.sock";
 
-pub fn profile_data_dir(profile: Profile) -> PathBuf {
+pub fn profile_data_dir(provision_root: impl AsRef<Path>, profile: Profile) -> PathBuf {
     let seg = match profile {
         Profile::Sim => "sim",
         Profile::Test => "test",
         Profile::Prod => "prod",
     };
-    PathBuf::from(PROVISION_ROOT).join(seg)
+    provision_root.as_ref().join(seg)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -173,7 +173,7 @@ impl Config {
         }
         let data_dir = file
             .data_dir
-            .unwrap_or_else(|| profile_data_dir(file.profile));
+            .unwrap_or_else(|| profile_data_dir(&file.provision_root, file.profile));
         let goliath_target = file
             .goliath_target
             .unwrap_or_else(|| data_dir.join("goliath"));

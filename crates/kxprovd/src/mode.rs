@@ -26,7 +26,7 @@ pub enum ModeError {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModeFileBody {
     pub mode: OperationalMode,
-    /// Monotonic revision; must match `mode.counter` and `profile.json` (v2.12 rollback guard).
+    /// Monotonic revision; must match per-profile `mode.counter` and `profile.json` (v2.12 rollback guard).
     #[serde(default)]
     pub counter: u64,
 }
@@ -46,17 +46,18 @@ pub struct EffectiveMode {
 pub struct ModeStore {
     mode_path: PathBuf,
     profile_path: PathBuf,
+    /// Per profile data directory (`…/sim|test|prod/mode.counter`), not shared across profiles (v2.12).
     counter_path: PathBuf,
     audit: AuditLog,
     boot_profile: Profile,
 }
 
 impl ModeStore {
-    pub fn new(data_dir: &Path, provision_root: &Path, boot_profile: Profile) -> Self {
+    pub fn new(data_dir: &Path, boot_profile: Profile) -> Self {
         Self {
             mode_path: data_dir.join("mode.json"),
             profile_path: data_dir.join("profile.json"),
-            counter_path: provision_root.join("mode.counter"),
+            counter_path: data_dir.join("mode.counter"),
             audit: AuditLog::new(data_dir),
             boot_profile,
         }
@@ -83,7 +84,20 @@ impl ModeStore {
                     self.fail_closed_profile_rollback(body.counter, last);
                     Profile::Prod
                 }
-                Ok(body) => body.profile,
+                Ok(body) => {
+                    if self.boot_profile == Profile::Prod && body.profile != Profile::Prod {
+                        self.fail_closed(
+                            AuditKind::ModeCorrupt,
+                            format!(
+                                "profile.json {:?} disagrees with prod data directory",
+                                body.profile
+                            ),
+                        );
+                        Profile::Prod
+                    } else {
+                        body.profile
+                    }
+                }
                 Err(e) => {
                     self.fail_closed(AuditKind::ModeCorrupt, format!("profile.json: {e}"));
                     Profile::Prod
