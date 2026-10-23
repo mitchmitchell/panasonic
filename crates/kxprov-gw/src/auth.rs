@@ -60,12 +60,14 @@ impl McpTokenStore {
         let mut by_hash = HashMap::new();
         for entry in entries {
             let hash = decode_sha256_hex(&entry.token_sha256_hex)?;
+            let scopes = scopes_for_role(&entry.role);
+            scopes.validate().map_err(|e| anyhow::anyhow!("{e}"))?;
             by_hash.insert(
                 hash,
                 McpTokenRecord {
                     token_id: entry.id,
                     agent_name: entry.name,
-                    scopes: scopes_for_role(&entry.role),
+                    scopes,
                 },
             );
         }

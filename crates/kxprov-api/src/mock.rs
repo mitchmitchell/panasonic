@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::{Duration as StdDuration, Instant};
 
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
 use argon2::Argon2;
@@ -7,29 +8,48 @@ use async_trait::async_trait;
 use time::OffsetDateTime;
 use tokio::sync::RwLock;
 
-use crate::approval::{default_approval_url, plan_storage_ttl, Approval};
+use crate::approval::{
+    plan_storage_ttl, Approval, ApprovalChallenge, APPROVAL_SUBMIT_LIMIT_PER_DAY,
+    APPROVAL_SUBMIT_LIMIT_PER_HOUR,
+};
 use crate::backend::DaemonBackend;
 use crate::error::ApiError;
 use crate::identity::CallerIdentity;
+use crate::mode::Mode;
 use crate::plan::{DiffHash, ImmutablePlan, PlanId};
 use crate::profile::Profile;
 use crate::scope::Scope;
+use crate::token_id::TokenId;
 use crate::types::{
-    ApplyJob, BackupInfo, BackupList, DaemonMode, DaemonStatus, FieldValue, JobId, JobState,
-    PlanChangeRequest, PlanSummary, ReadFieldsRequest, ReadFieldsResponse, RequestedBy,
+    ApplyJob, BackupInfo, BackupList, DaemonStatus, FieldValue, JobId, JobState, PlanChangeRequest,
+    PlanSummary, ReadFieldsRequest, ReadFieldsResponse, RequestedBy,
 };
 
 struct StoredApproval {
     approval: Approval,
     consumed: bool,
-    _rollback_job: Option<String>,
+}
+
+struct PendingApproval {
+    challenge: ApprovalChallenge,
+    requester_token_id: TokenId,
+    summary: String,
+}
+
+struct SubmitRateState {
+    hour_window: Instant,
+    hour_count: u32,
+    day_window: Instant,
+    day_count: u32,
 }
 
 struct Inner {
     profile: Profile,
+    mode: Mode,
     plans: HashMap<String, ImmutablePlan>,
     plan_approvals: HashMap<String, StoredApproval>,
-    rollback_approvals: HashMap<String, StoredApproval>,
+    pending: HashMap<String, PendingApproval>,
+    submit_rates: HashMap<String, SubmitRateState>,
     backups: Vec<BackupInfo>,
     next_job: u64,
     live_writes_approved: bool,
@@ -46,6 +66,14 @@ impl MockDaemon {
     }
 
     pub fn with_admin_password(password: &str) -> Self {
+        Self::with_mode_and_password(Mode::DryRun, password)
+    }
+
+    pub fn with_mode(mode: Mode) -> Self {
+        Self::with_mode_and_password(mode, "test-admin-password")
+    }
+
+    pub fn with_mode_and_password(mode: Mode, password: &str) -> Self {
         let salt = SaltString::generate(&mut rand::thread_rng());
         let hash = Argon2::default()
             .hash_password(password.as_bytes(), &salt)
@@ -55,9 +83,11 @@ impl MockDaemon {
             admin_hash: hash,
             inner: Arc::new(RwLock::new(Inner {
                 profile: Profile::test(),
+                mode,
                 plans: HashMap::new(),
                 plan_approvals: HashMap::new(),
-                rollback_approvals: HashMap::new(),
+                pending: HashMap::new(),
+                submit_rates: HashMap::new(),
                 backups: vec![BackupInfo {
                     id: "sim-initial".into(),
                     created_at: "2026-01-01T00:00:00Z".into(),
@@ -76,14 +106,6 @@ impl MockDaemon {
         }
     }
 
-    fn require_admin(caller: &CallerIdentity) -> Result<(), ApiError> {
-        if caller.is_web_admin() {
-            Ok(())
-        } else {
-            Err(ApiError::ForbiddenAdmin)
-        }
-    }
-
     fn verify_password(hash: &str, password: &str) -> bool {
         let parsed = match PasswordHash::new(hash) {
             Ok(p) => p,
@@ -96,6 +118,10 @@ impl MockDaemon {
 
     fn plan_key(id: &PlanId) -> String {
         id.to_hex()
+    }
+
+    fn pending_key(plan_id: &PlanId, diff_hash: &DiffHash) -> String {
+        format!("{}:{}", plan_id.to_hex(), diff_hash.to_hex())
     }
 
     fn validate_plan_approval(
@@ -116,6 +142,26 @@ impl MockDaemon {
         {
             return Err(ApiError::InvalidApproval);
         }
+        Ok(())
+    }
+
+    fn check_submit_rate(state: &mut SubmitRateState) -> Result<(), ApiError> {
+        let now = Instant::now();
+        if now.duration_since(state.hour_window) >= StdDuration::from_secs(3600) {
+            state.hour_window = now;
+            state.hour_count = 0;
+        }
+        if now.duration_since(state.day_window) >= StdDuration::from_secs(86_400) {
+            state.day_window = now;
+            state.day_count = 0;
+        }
+        if state.hour_count >= APPROVAL_SUBMIT_LIMIT_PER_HOUR
+            || state.day_count >= APPROVAL_SUBMIT_LIMIT_PER_DAY
+        {
+            return Err(ApiError::ApprovalRateLimited);
+        }
+        state.hour_count += 1;
+        state.day_count += 1;
         Ok(())
     }
 
@@ -161,7 +207,7 @@ impl DaemonBackend for MockDaemon {
         Ok(DaemonStatus {
             profile: inner.profile.0.clone(),
             simulator: true,
-            mode: DaemonMode::ReadOnly,
+            mode: inner.mode,
             locked: false,
             live_writes_approved: inner.live_writes_approved,
             queue_depth: 0,
@@ -231,50 +277,16 @@ impl DaemonBackend for MockDaemon {
         Ok(summary)
     }
 
-    async fn get_plan(
+    async fn submit_approval(
         &self,
         caller: &CallerIdentity,
         plan_id: PlanId,
         diff_hash: DiffHash,
-    ) -> Result<PlanSummary, ApiError> {
-        Self::require_admin(caller)?;
-        let inner = self.inner.read().await;
-        let plan = inner
-            .plans
-            .get(&Self::plan_key(&plan_id))
-            .ok_or(ApiError::PlanNotFound)?;
-        if plan.diff_hash != diff_hash {
-            return Err(ApiError::InvalidApproval);
-        }
-        if plan.is_expired(plan_storage_ttl()) {
-            return Err(ApiError::PlanExpired);
-        }
-        let summary_text = format!("{} → {}", plan.request.field, plan.request.new_value);
-        let requested_by = plan.creator_token.as_ref().map(|id| RequestedBy {
-            agent: "agent".into(),
-            token_id: id.clone(),
-        });
-        Ok(plan_summary_from(
-            &plan_id,
-            &diff_hash,
-            &summary_text,
-            &requested_by,
-            plan,
-        ))
-    }
-
-    async fn mint_plan_approval(
-        &self,
-        caller: &CallerIdentity,
-        plan_id: PlanId,
-        diff_hash: DiffHash,
-        admin_password: &str,
+        challenge: ApprovalChallenge,
     ) -> Result<Approval, ApiError> {
-        Self::require_admin(caller)?;
+        Self::require_scope(caller, Scope::Approve)?;
+        let approver = caller.token_id().cloned().ok_or(ApiError::ForbiddenScope)?;
         let mut inner = self.inner.write().await;
-        if !Self::verify_password(&self.admin_hash, admin_password) {
-            return Err(ApiError::ReauthFailed);
-        }
         let plan = inner
             .plans
             .get(&Self::plan_key(&plan_id))
@@ -285,39 +297,36 @@ impl DaemonBackend for MockDaemon {
         if plan.is_expired(plan_storage_ttl()) {
             return Err(ApiError::PlanExpired);
         }
-        let approval = Approval::new(plan_id, diff_hash, inner.profile.clone());
+        let requester = plan
+            .creator_token
+            .clone()
+            .ok_or(ApiError::BadRequest("plan has no requester token"))?;
+        if requester == approver {
+            return Err(ApiError::ApproverMustDiffer);
+        }
+        let key = Self::pending_key(&plan_id, &diff_hash);
+        let pending = inner.pending.get(&key).ok_or(ApiError::InvalidApproval)?;
+        if pending.challenge != challenge {
+            return Err(ApiError::InvalidApproval);
+        }
+        let _ = (&pending.requester_token_id, &pending.summary);
+        let rate = inner
+            .submit_rates
+            .entry(approver.0.clone())
+            .or_insert_with(|| SubmitRateState {
+                hour_window: Instant::now(),
+                hour_count: 0,
+                day_window: Instant::now(),
+                day_count: 0,
+            });
+        Self::check_submit_rate(rate)?;
+        inner.pending.remove(&key);
+        let approval = Approval::new(plan_id, diff_hash, inner.profile.clone(), approver.clone());
         inner.plan_approvals.insert(
             approval.id.0.clone(),
             StoredApproval {
                 approval: approval.clone(),
                 consumed: false,
-                _rollback_job: None,
-            },
-        );
-        Ok(approval)
-    }
-
-    async fn mint_rollback_approval(
-        &self,
-        caller: &CallerIdentity,
-        job_id: JobId,
-        admin_password: &str,
-    ) -> Result<Approval, ApiError> {
-        Self::require_admin(caller)?;
-        if job_id.0.is_empty() {
-            return Err(ApiError::JobNotFound);
-        }
-        let mut inner = self.inner.write().await;
-        if !Self::verify_password(&self.admin_hash, admin_password) {
-            return Err(ApiError::ReauthFailed);
-        }
-        let approval = Approval::new(PlanId::new(), DiffHash([0u8; 32]), inner.profile.clone());
-        inner.rollback_approvals.insert(
-            job_id.0.clone(),
-            StoredApproval {
-                approval: approval.clone(),
-                consumed: false,
-                _rollback_job: Some(job_id.0.clone()),
             },
         );
         Ok(approval)
@@ -334,23 +343,53 @@ impl DaemonBackend for MockDaemon {
         if inner.profile == Profile::prod() && !inner.live_writes_approved {
             return Err(ApiError::LiveWritesBlocked);
         }
-        let profile = inner.profile.clone();
-        let key = inner.plan_approvals.iter().find_map(|(id, stored)| {
-            Self::validate_plan_approval(stored, plan_id, &diff_hash, &profile).ok()?;
-            Some(id.clone())
-        });
-        let Some(approval_key) = key else {
-            return Err(ApiError::ApprovalRequired {
-                approval_url: default_approval_url(&plan_id, &diff_hash),
-                plan_id,
-                diff_hash,
-            });
+        let (summary_text, requester_token_id) = {
+            let plan = inner
+                .plans
+                .get(&Self::plan_key(&plan_id))
+                .ok_or(ApiError::PlanNotFound)?;
+            if plan.diff_hash != diff_hash {
+                return Err(ApiError::InvalidApproval);
+            }
+            let summary_text = format!("{} → {}", plan.request.field, plan.request.new_value);
+            let requester = plan
+                .creator_token
+                .clone()
+                .unwrap_or_else(|| TokenId("unknown-requester".into()));
+            (summary_text, requester)
         };
-        let stored = inner
-            .plan_approvals
-            .get_mut(&approval_key)
-            .ok_or(ApiError::InvalidApproval)?;
-        stored.consumed = true;
+        let profile = inner.profile.clone();
+        let mode = inner.mode;
+
+        if mode == Mode::Production {
+            let key = inner.plan_approvals.iter().find_map(|(id, stored)| {
+                Self::validate_plan_approval(stored, plan_id, &diff_hash, &profile).ok()?;
+                Some(id.clone())
+            });
+            let Some(approval_key) = key else {
+                let challenge = ApprovalChallenge::fresh();
+                inner.pending.insert(
+                    Self::pending_key(&plan_id, &diff_hash),
+                    PendingApproval {
+                        challenge: challenge.clone(),
+                        requester_token_id,
+                        summary: summary_text.clone(),
+                    },
+                );
+                return Err(ApiError::ApprovalRequired {
+                    plan_id,
+                    diff_hash,
+                    summary: summary_text,
+                    challenge,
+                });
+            };
+            let stored = inner
+                .plan_approvals
+                .get_mut(&approval_key)
+                .ok_or(ApiError::InvalidApproval)?;
+            stored.consumed = true;
+        }
+
         inner.next_job += 1;
         Ok(ApplyJob {
             job_id: JobId(format!("job-{}", inner.next_job)),
@@ -361,17 +400,9 @@ impl DaemonBackend for MockDaemon {
 
     async fn rollback(&self, caller: &CallerIdentity, job_id: JobId) -> Result<ApplyJob, ApiError> {
         Self::require_scope(caller, Scope::Write)?;
-        let mut inner = self.inner.write().await;
-        let Some(stored) = inner.rollback_approvals.get_mut(&job_id.0) else {
-            return Err(ApiError::RollbackApprovalRequired {
-                approval_url: format!("/jobs/{}/approve-rollback", job_id.0),
-                job_id: job_id.0.clone(),
-            });
-        };
-        if stored.consumed || stored.approval.expires_at < OffsetDateTime::now_utc() {
-            return Err(ApiError::InvalidApproval);
+        if job_id.0.is_empty() {
+            return Err(ApiError::JobNotFound);
         }
-        stored.consumed = true;
         Ok(ApplyJob {
             job_id,
             state: JobState::Succeeded,

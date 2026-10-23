@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 
-use crate::approval::Approval;
+use crate::approval::{Approval, ApprovalChallenge};
 use crate::error::ApiError;
 use crate::identity::CallerIdentity;
 use crate::plan::{DiffHash, PlanId};
@@ -31,28 +31,13 @@ pub trait DaemonBackend: Send + Sync {
         req: PlanChangeRequest,
     ) -> Result<PlanSummary, ApiError>;
 
-    /// Load an immutable plan for the approval UI (admin only).
-    async fn get_plan(
+    /// MCP `submit_approval` (approve scope): records approval after challenge verification (F1).
+    async fn submit_approval(
         &self,
         caller: &CallerIdentity,
         plan_id: PlanId,
         diff_hash: DiffHash,
-    ) -> Result<PlanSummary, ApiError>;
-
-    /// Admin re-auth proof forwarded by the gateway; only the daemon mints approvals (F2).
-    async fn mint_plan_approval(
-        &self,
-        caller: &CallerIdentity,
-        plan_id: PlanId,
-        diff_hash: DiffHash,
-        admin_password: &str,
-    ) -> Result<Approval, ApiError>;
-
-    async fn mint_rollback_approval(
-        &self,
-        caller: &CallerIdentity,
-        job_id: JobId,
-        admin_password: &str,
+        challenge: ApprovalChallenge,
     ) -> Result<Approval, ApiError>;
 
     /// Consumes a live approval for `(plan_id, diff_hash, profile)` or returns `approval_required`.

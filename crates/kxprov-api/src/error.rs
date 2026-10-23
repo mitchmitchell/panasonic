@@ -1,3 +1,4 @@
+use crate::approval::ApprovalChallenge;
 use crate::plan::{DiffHash, PlanId};
 
 use thiserror::Error;
@@ -12,17 +13,21 @@ pub enum ApiError {
     Unauthorized,
     #[error("approval required")]
     ApprovalRequired {
-        approval_url: String,
         plan_id: PlanId,
         diff_hash: DiffHash,
+        summary: String,
+        challenge: ApprovalChallenge,
     },
     #[error("rollback approval required")]
-    RollbackApprovalRequired {
-        approval_url: String,
-        job_id: String,
-    },
+    RollbackApprovalRequired { job_id: String },
     #[error("approval invalid or expired")]
     InvalidApproval,
+    #[error("approver must differ from plan requester")]
+    ApproverMustDiffer,
+    #[error("approval submit rate limit exceeded")]
+    ApprovalRateLimited,
+    #[error("invalid scope combination")]
+    InvalidScopeSet,
     #[error("plan not found")]
     PlanNotFound,
     #[error("plan or approval window expired")]

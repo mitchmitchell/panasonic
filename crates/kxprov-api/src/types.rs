@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+use crate::mode::Mode;
 use crate::plan::{DiffHash, PlanId};
 use crate::token_id::TokenId;
 
@@ -7,17 +8,10 @@ use crate::token_id::TokenId;
 pub struct DaemonStatus {
     pub profile: String,
     pub simulator: bool,
-    pub mode: DaemonMode,
+    pub mode: Mode,
     pub locked: bool,
     pub live_writes_approved: bool,
     pub queue_depth: u32,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum DaemonMode {
-    ReadOnly,
-    DryRun,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

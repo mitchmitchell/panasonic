@@ -30,7 +30,6 @@ pub fn router(state: WebState) -> Router {
         .route("/logout", post(logout))
         .route("/", get(dashboard))
         .route("/plan", post(plan_change))
-        .route("/approve-plan", post(approve_plan))
         .route("/apply", post(apply_plan))
         .with_state(state)
 }
@@ -41,6 +40,8 @@ async fn static_file(Path(file): Path<String>) -> impl IntoResponse {
 
 fn empty_dashboard(csrf: &str) -> DashboardTemplate {
     DashboardTemplate {
+        show_mode_banner: false,
+        mode_banner: String::new(),
         show_status: false,
         profile: String::new(),
         locked: false,
@@ -95,15 +96,6 @@ pub struct PlanForm {
 }
 
 #[derive(Deserialize)]
-pub struct ApproveForm {
-    plan_id: String,
-    diff_hash: String,
-    password: String,
-    #[serde(rename = "_csrf")]
-    pub _csrf: String,
-}
-
-#[derive(Deserialize)]
 pub struct ApplyForm {
     plan_id: String,
     diff_hash: String,
@@ -121,6 +113,8 @@ async fn dashboard(State(state): State<WebState>) -> impl IntoResponse {
     let caller = admin_caller(&state);
     let mut tpl = empty_dashboard("");
     if let Ok(status) = state.backend.status(&caller).await {
+        tpl.show_mode_banner = true;
+        tpl.mode_banner = status.mode.banner_label().into();
         tpl.show_status = true;
         tpl.profile = status.profile;
         tpl.locked = status.locked;
@@ -154,6 +148,8 @@ async fn plan_change(
         .map_err(|_| StatusCode::FORBIDDEN)?;
     let mut tpl = empty_dashboard("");
     if let Ok(status) = state.backend.status(&caller).await {
+        tpl.show_mode_banner = true;
+        tpl.mode_banner = status.mode.banner_label().into();
         tpl.show_status = true;
         tpl.profile = status.profile;
         tpl.locked = status.locked;
@@ -163,24 +159,6 @@ async fn plan_change(
     tpl.plan_id_hex = summary.plan_id.to_hex();
     tpl.diff_hash_hex = summary.diff_hash.to_hex();
     tpl.plan_summary = summary.summary;
-    Ok(Html(tpl.render().unwrap_or_default()))
-}
-
-async fn approve_plan(
-    State(state): State<WebState>,
-    Form(form): Form<ApproveForm>,
-) -> Result<Html<String>, StatusCode> {
-    let caller = admin_caller(&state);
-    let plan_id = PlanId::from_hex(&form.plan_id).map_err(|_| StatusCode::BAD_REQUEST)?;
-    let diff_hash = DiffHash::from_hex(&form.diff_hash).map_err(|_| StatusCode::BAD_REQUEST)?;
-    state
-        .backend
-        .mint_plan_approval(&caller, plan_id, diff_hash, &form.password)
-        .await
-        .map_err(|_| StatusCode::UNAUTHORIZED)?;
-    let mut tpl = empty_dashboard("");
-    tpl.show_message = true;
-    tpl.message = "Approval minted (10 min, single-use)".into();
     Ok(Html(tpl.render().unwrap_or_default()))
 }
 
@@ -197,6 +175,10 @@ async fn apply_plan(
         .await
         .map_err(|_| StatusCode::BAD_REQUEST)?;
     let mut tpl = empty_dashboard("");
+    if let Ok(status) = state.backend.status(&caller).await {
+        tpl.show_mode_banner = true;
+        tpl.mode_banner = status.mode.banner_label().into();
+    }
     tpl.show_message = true;
     tpl.message = format!("Apply job {}: {}", job.job_id.0, job.message);
     Ok(Html(tpl.render().unwrap_or_default()))

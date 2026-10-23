@@ -2,8 +2,8 @@ use std::borrow::Cow;
 use std::sync::Arc;
 
 use kxprov_api::{
-    ApiError, CallerIdentity, DaemonBackend, DiffHash, JobId, PlanChangeRequest, PlanId,
-    ReadFieldsRequest,
+    ApiError, ApprovalChallenge, CallerIdentity, DaemonBackend, DiffHash, JobId, PlanChangeRequest,
+    PlanId, ReadFieldsRequest,
 };
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
@@ -65,6 +65,13 @@ struct ReadFieldsParams {
 struct ApplyPlanParams {
     plan_id: String,
     diff_hash: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct SubmitApprovalParams {
+    plan_id: String,
+    diff_hash: String,
+    challenge: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -139,7 +146,7 @@ impl KxMcpServer {
         Ok(text_json(summary))
     }
 
-    #[tool(description = "Apply a plan (requires daemon-stored approval)")]
+    #[tool(description = "Apply a plan (production mode requires MCP approval)")]
     async fn apply_plan(
         &self,
         Parameters(params): Parameters<ApplyPlanParams>,
@@ -150,15 +157,17 @@ impl KxMcpServer {
         match self.backend.apply_plan(&caller, plan_id, diff_hash).await {
             Ok(job) => Ok(text_json(job)),
             Err(ApiError::ApprovalRequired {
-                approval_url,
                 plan_id,
                 diff_hash,
+                summary,
+                challenge,
             }) => Ok(CallToolResult::success(vec![ContentBlock::text(
                 serde_json::json!({
                     "error": "approval_required",
-                    "approval_url": approval_url,
                     "plan_id": plan_id.to_hex(),
                     "diff_hash": diff_hash.to_hex(),
+                    "summary": summary,
+                    "challenge": challenge.0,
                 })
                 .to_string(),
             )])),
@@ -166,7 +175,30 @@ impl KxMcpServer {
         }
     }
 
-    #[tool(description = "Rollback a job (write scope + approval)")]
+    #[tool(
+        description = "Submit approval for a plan (approve scope; approver must differ from requester)"
+    )]
+    async fn submit_approval(
+        &self,
+        Parameters(params): Parameters<SubmitApprovalParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let caller = Self::caller()?;
+        let plan_id = PlanId::from_hex(&params.plan_id).map_err(api_err)?;
+        let diff_hash = DiffHash::from_hex(&params.diff_hash).map_err(api_err)?;
+        let approval = self
+            .backend
+            .submit_approval(
+                &caller,
+                plan_id,
+                diff_hash,
+                ApprovalChallenge(params.challenge),
+            )
+            .await
+            .map_err(api_err)?;
+        Ok(text_json(approval))
+    }
+
+    #[tool(description = "Rollback a job (write scope)")]
     async fn rollback(
         &self,
         Parameters(params): Parameters<RollbackParams>,
@@ -214,10 +246,13 @@ impl ServerHandler for KxMcpServer {
                 scopes: kxprov_api::ScopeSet::empty(),
             })
         });
+        let scopes = caller.scopes();
         let mut tools: Vec<Tool> = self.tool_router.list_all();
-        if !caller.scopes().allows_write() {
-            tools.retain(|t| !matches!(t.name.as_ref(), "apply_plan" | "rollback"));
-        }
+        tools.retain(|t| match t.name.as_ref() {
+            "apply_plan" | "rollback" => scopes.allows_write(),
+            "submit_approval" => scopes.allows_approve(),
+            _ => true,
+        });
         Ok(ListToolsResult {
             tools,
             next_cursor: None,
