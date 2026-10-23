@@ -397,7 +397,8 @@ impl SimPbx {
         self.lockup_busy_left = self.config.busy_lockup_frames.saturating_sub(1);
     }
 
-    /// PBX enters a busy lockup after malformed LEN / junk; the first busy lands after latency.
+    /// Hypothesis (design §6 / RE busy-lockup fixture): malformed LEN or trailing junk after
+    /// a bad frame triggers a busy train; counts in [`SimConfig`] are placeholders, not measured.
     fn malformed_frame(&mut self) -> Emits {
         self.start_busy_lockup();
         vec![(self.latency_ms, BUSY_FRAME.to_vec())]
@@ -756,8 +757,8 @@ impl Transport for SimTransport {
                     let n = n.min(bytes.len());
                     if n < bytes.len() {
                         bytes.truncate(n);
-                        self.link_drop_pending = true;
                     }
+                    self.link_drop_pending = true;
                 }
                 bytes
             };
@@ -777,7 +778,7 @@ impl Transport for SimTransport {
         if self.link_down {
             return Err(TransportError::LinkDown(LinkDownError {
                 detail: "sim: link dropped".into(),
-                bytes_sent: 0,
+                bytes_sent: usize::MAX,
             }));
         }
         match self.queue.front() {

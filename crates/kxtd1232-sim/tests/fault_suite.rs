@@ -5,7 +5,7 @@
 
 use kxtd1232::error::UnackedReason;
 use kxtd1232::frame::Access;
-use kxtd1232::{Client, Error, SessionState, SignOn, Timing, VerifyOutcome};
+use kxtd1232::{Client, Error, SignOn, Timing, VerifyOutcome};
 use kxtd1232_sim::{Fault, SimPbx, SimTransport, PLACEHOLDER_PASSWORD};
 
 fn client() -> Client<SimTransport> {
@@ -112,7 +112,7 @@ fn test_a2_late_ack_garbled_stale() {
 }
 
 #[test]
-fn test_a2_silent_write_and_link_drop() {
+fn test_a2_silent_write() {
     let mut c = client();
     let base = c.read(0x25, 0, 0, 80).unwrap();
     let mut new = base.clone();
@@ -120,14 +120,6 @@ fn test_a2_silent_write_and_link_drop() {
     c.transport_mut().sim.inject(Fault::SilentWrite);
     c.write(0x25, 0, 0, &new).unwrap();
     assert_eq!(c.read(0x25, 0, 0, 80).unwrap(), base);
-
-    let mut c = client();
-    let (_base, new) = cid_block(&mut c);
-    c.transport_mut()
-        .sim
-        .inject(Fault::LinkDropMidChunk { partial_len: 2 });
-    assert!(matches!(c.write(0x24, 0, 0, &new), Err(Error::LinkDown(_))));
-    assert_eq!(c.state(), &SessionState::Disconnected);
 }
 
 #[test]

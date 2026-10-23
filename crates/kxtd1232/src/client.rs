@@ -12,21 +12,14 @@ use crate::tables;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LinkDownError {
     pub detail: String,
-    /// `0` only when the transport can prove nothing was transmitted.
+    /// Bytes transmitted before the failure on **`send` only** (`0` = provably none).
+    /// Receive-side link loss sets this to `usize::MAX` (ignored by the client).
     pub bytes_sent: usize,
-}
-
-impl LinkDownError {
-    pub fn nothing_written(detail: impl Into<String>) -> Self {
-        Self {
-            detail: detail.into(),
-            bytes_sent: 0,
-        }
-    }
 }
 
 /// Transport errors.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum TransportError {
     /// Nothing arrived within the timeout.
     Timeout,
@@ -342,19 +335,25 @@ impl<T: Transport> Client<T> {
             return Err(e);
         }
         let sent_at = self.t.now_ms();
-        if let Err(e) = self.send_frame(raw) {
-            if cmd != Cmd::Write {
-                match &e {
-                    Error::LinkDown(_) if !self.needs_drain => self.note_link_down(None),
-                    Error::PreSend(inner)
-                        if matches!(inner.as_ref(), Error::LinkDown(_)) && !self.needs_drain =>
-                    {
-                        self.note_link_down(None);
+        match self.send_frame(raw) {
+            Ok(()) => {}
+            // Every send failure propagates. Writes: `write()` maps LinkDown vs PreSend and
+            // saves resume. Reads/other: record disconnect unless a pending drain owns it.
+            Err(e) => {
+                if cmd != Cmd::Write {
+                    match &e {
+                        Error::LinkDown(_) if !self.needs_drain => self.note_link_down(None),
+                        Error::PreSend(inner)
+                            if matches!(inner.as_ref(), Error::LinkDown(_))
+                                && !self.needs_drain =>
+                        {
+                            self.note_link_down(None);
+                        }
+                        _ => {}
                     }
-                    _ => {}
                 }
+                return Err(e);
             }
-            return Err(e);
         }
         let r = match self
             .drop_before_cutoff(sent_at + self.timing.reply_cutoff_ms(raw.len()))

@@ -51,8 +51,12 @@ fn test_fault_timing_fixture_matches_sim_defaults() {
         unacked["ack_timeout_ms"].as_u64(),
         Some(Timing::default().ack_timeout_ms)
     );
-    let late = &rows[3];
+    let late = rows
+        .iter()
+        .find(|r| r["fault"].as_str() == Some("late_ack"))
+        .unwrap();
     assert_eq!(late["delay_ms"].as_u64(), Some(2_300));
+    // Same delay injected in `fault_suite::test_a2_late_ack_garbled_stale`.
 }
 
 #[test]
