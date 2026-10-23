@@ -255,6 +255,7 @@ async fn synthetic_root_read_during_token_store_outage() {
     let tmp = tempfile::tempdir().unwrap();
     let uid = nix::unistd::getuid().as_raw();
     let (_d, sock) = init_test_daemon(&tmp, uid, Profile::Sim);
+    common::wait_daemon_api_ready(&sock).await;
     let path = tmp.path().join("tokens.json");
     std::fs::write(&path, b"{ corrupt").unwrap();
 
