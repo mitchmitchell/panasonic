@@ -10,7 +10,6 @@ use kxprovd::audit::AuditKind;
 use kxprovd::mode::{ModeFileBody, ModeStore, ProfileFileBody};
 use kxprovd::tokens::TokenStore;
 use serial_test::serial;
-use std::time::Duration;
 
 #[test]
 fn rolled_back_mode_json_fails_closed_to_production() {

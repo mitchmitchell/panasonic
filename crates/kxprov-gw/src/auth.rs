@@ -150,7 +150,9 @@ impl McpTokenStore {
     }
 }
 
-fn load_by_hash_from_file(mut file: &fs::File) -> anyhow::Result<HashMap<[u8; 32], McpTokenRecord>> {
+fn load_by_hash_from_file(
+    mut file: &fs::File,
+) -> anyhow::Result<HashMap<[u8; 32], McpTokenRecord>> {
     let mut raw = String::new();
     file.read_to_string(&mut raw)?;
     load_by_hash_from_raw(&raw)
