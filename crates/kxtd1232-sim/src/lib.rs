@@ -8,7 +8,7 @@
 use kxtd1232::fields::{encode_cid_name, encode_cid_number, encode_ext_name};
 use kxtd1232::frame::{checksum, Cmd, BUSY_FRAME};
 use kxtd1232::tables;
-use kxtd1232::{SignOn, Transport, TransportError};
+use kxtd1232::{SendError, SignOn, Transport, TransportError};
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -491,15 +491,15 @@ impl SimTransport {
 }
 
 impl Transport for SimTransport {
-    fn send(&mut self, data: &[u8]) -> Result<(), TransportError> {
+    fn send(&mut self, data: &[u8]) -> Result<usize, SendError> {
         if self.link_down {
-            return Err(TransportError::LinkDown("sim: link dropped".into()));
+            return Err(SendError::LinkDown("sim: link dropped".into()));
         }
         self.sent.extend_from_slice(data);
         if self.drop_link_after_write && data.get(1) == Some(&Cmd::Write.byte()) {
             self.sim.lock().expect("sim pbx lock").feed(data);
             self.link_down = true;
-            return Ok(());
+            return Ok(data.len());
         }
         // Model the 9600-baud line: the PBX acts once the request has been received, and
         // each reply lands once it has been transmitted.
@@ -510,7 +510,7 @@ impl Transport for SimTransport {
             let at = rx_done + delay + t.tx_ms(bytes.len());
             self.schedule(at, bytes);
         }
-        Ok(())
+        Ok(data.len())
     }
 
     fn recv(&mut self, timeout_ms: u64) -> Result<Vec<u8>, TransportError> {

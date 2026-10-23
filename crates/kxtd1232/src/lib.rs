@@ -23,8 +23,8 @@ pub mod signon;
 pub mod tables;
 
 pub use client::{
-    Client, SessionState, Timing, TimingConfigError, Transport, TransportError, VerifyOutcome,
-    MAX_LINK_BAUD, MIN_REPLY_GUARD_MS,
+    Client, SendError, SessionState, Timing, TimingConfigError, Transport, TransportError,
+    VerifyOutcome, MAX_LINK_BAUD, MIN_REPLY_GUARD_MS,
 };
 pub use error::Error;
 pub use fields::FieldKind;

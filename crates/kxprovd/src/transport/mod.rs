@@ -21,7 +21,7 @@ pub enum AnyTransport {
 }
 
 impl Transport for AnyTransport {
-    fn send(&mut self, data: &[u8]) -> Result<(), kxtd1232::TransportError> {
+    fn send(&mut self, data: &[u8]) -> Result<usize, kxtd1232::SendError> {
         match self {
             Self::Sim(t) => t.as_mut().send(data),
             Self::Serial(t) => t.send(data),

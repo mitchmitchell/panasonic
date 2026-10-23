@@ -8,7 +8,7 @@ use crate::session::{Login, LoginState};
 use crate::signon::SignOn;
 use crate::tables;
 
-/// Transport errors.
+/// Receive-side transport errors.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TransportError {
     /// Nothing arrived within the timeout.
@@ -17,9 +17,24 @@ pub enum TransportError {
     LinkDown(String),
 }
 
+/// Send-side failures. Distinct from [`TransportError`] so callers can tell a zero-byte
+/// write apart from a partial frame and from an I/O error with unknown bytes on the wire.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SendError {
+    /// `write` returned 0 without an error (nothing reached the line).
+    NothingWritten,
+    /// Some bytes were sent but not the full buffer; `written` is how many left the host.
+    Partial { written: usize },
+    /// The driver failed after an indeterminate send (treat like a broken link).
+    Unknown,
+    /// The link is gone and no bytes were committed.
+    LinkDown(String),
+}
+
 /// Byte transport plus clock. Implemented by the simulator and (A3) the daemon's port.
 pub trait Transport {
-    fn send(&mut self, data: &[u8]) -> Result<(), TransportError>;
+    /// Bytes accepted by the transport (may be less than `data.len()` only as [`SendError`]).
+    fn send(&mut self, data: &[u8]) -> Result<usize, SendError>;
     /// Return whatever bytes arrive within `timeout_ms` (at least one byte), or `Timeout`.
     fn recv(&mut self, timeout_ms: u64) -> Result<Vec<u8>, TransportError>;
     /// Monotonic time in milliseconds.
@@ -235,9 +250,9 @@ impl<T: Transport> Client<T> {
         &self.t
     }
 
-    /// Mutable transport access. Public only because `kxprovd` is the sole owner of the
-    /// serial port and the client (A3), and the simulator tests inject faults through it.
-    /// Bytes sent this way bypass every guard in this type; nothing else may hold it.
+    /// Mutable transport access for integration tests (fault injection). Not part of the
+    /// stable API; production code must not bypass client guards through this handle.
+    #[cfg(feature = "test-transport-access")]
     pub fn transport_mut(&mut self) -> &mut T {
         &mut self.t
     }
@@ -258,10 +273,24 @@ impl<T: Transport> Client<T> {
     }
 
     fn send(&mut self, data: &[u8]) -> Result<(), Error> {
-        self.t.send(data).map_err(|e| match e {
-            TransportError::Timeout => Error::Timeout,
-            TransportError::LinkDown(s) => Error::LinkDown(s),
-        })
+        match self.t.send(data) {
+            Ok(n) if n == data.len() => Ok(()),
+            Ok(n) => Err(Error::LinkDown(format!(
+                "partial send: {n} of {} bytes",
+                data.len()
+            ))),
+            Err(SendError::NothingWritten) => {
+                Err(Error::LinkDown("serial: nothing written".into()))
+            }
+            Err(SendError::Partial { written }) => Err(Error::LinkDown(format!(
+                "partial send: {written} of {} bytes",
+                data.len()
+            ))),
+            Err(SendError::Unknown) => {
+                Err(Error::LinkDown("send failed with unknown progress".into()))
+            }
+            Err(SendError::LinkDown(s)) => Err(Error::LinkDown(s)),
+        }
     }
 
     /// Text login to binary mode, within `login_timeout_ms` overall and at most

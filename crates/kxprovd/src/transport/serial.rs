@@ -1,6 +1,6 @@
 //! Linux serial transport via `tokio-serial` (blocking read in the worker task).
 
-use kxtd1232::{Transport, TransportError};
+use kxtd1232::{SendError, Transport, TransportError};
 use std::io::{Read, Write};
 use std::path::Path;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -26,10 +26,27 @@ impl TokioSerialTransport {
 }
 
 impl Transport for TokioSerialTransport {
-    fn send(&mut self, data: &[u8]) -> Result<(), TransportError> {
-        self.port
-            .write_all(data)
-            .map_err(|e| TransportError::LinkDown(e.to_string()))
+    fn send(&mut self, data: &[u8]) -> Result<usize, SendError> {
+        if data.is_empty() {
+            return Ok(0);
+        }
+        let mut written = 0;
+        while written < data.len() {
+            match self.port.write(&data[written..]) {
+                Ok(0) => {
+                    return if written == 0 {
+                        Err(SendError::NothingWritten)
+                    } else {
+                        Err(SendError::Partial { written })
+                    };
+                }
+                Ok(n) => written += n,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(e) if written == 0 => return Err(SendError::LinkDown(e.to_string())),
+                Err(_) => return Err(SendError::Partial { written }),
+            }
+        }
+        Ok(written)
     }
 
     fn recv(&mut self, timeout_ms: u64) -> Result<Vec<u8>, TransportError> {
