@@ -1,7 +1,9 @@
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 
-use kxprov_api::{DAEMON_SOCKET, TOKENS_JSON};
+use kxprov_api::{DAEMON_SOCKET, GATEWAY_WEB_SERVE_SOCKET, TOKENS_JSON};
+
+use crate::secret_file::resolve_secret_path;
 use kxprov_web::{WEB_SESSION_ABSOLUTE_SECS, WEB_SESSION_IDLE_SECS};
 use serde::Deserialize;
 
@@ -96,7 +98,7 @@ impl Default for GatewayConfig {
             bind: None,
             lan_ip: None,
             web_https_port: 443,
-            web_serve_socket: "/run/kx-provision/web-serve.sock".into(),
+            web_serve_socket: GATEWAY_WEB_SERVE_SOCKET.into(),
             serve_socket_group: Some("tailscale".into()),
             mcp_tailnet_bind: "127.0.0.1:8081".into(),
             mcp_tokens_path: "/etc/kx-provision/secrets/mcp-tokens.toml".into(),
@@ -372,7 +374,16 @@ impl GatewayConfig {
         config.validate_site_bind_settings()?;
         config.validate_mcp_loopback_binds()?;
         config.validate_web_xff_trust()?;
+        config.resolve_secret_paths();
         Ok(config)
+    }
+
+    /// Apply `$CREDENTIALS_DIRECTORY` overrides for secret-bearing paths (systemd `LoadCredential=`).
+    pub fn resolve_secret_paths(&mut self) {
+        self.mcp_tokens_path = resolve_secret_path(&self.mcp_tokens_path);
+        self.gateway_bearer_path = resolve_secret_path(&self.gateway_bearer_path);
+        self.admin_password_path = resolve_secret_path(&self.admin_password_path);
+        self.tls_key_path = resolve_secret_path(&self.tls_key_path);
     }
 
     /// TCP listeners must not trust XFF; Serve Unix socket may when peer uid matches.

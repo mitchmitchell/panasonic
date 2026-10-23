@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+
+use crate::secret_file::{resolve_secret_path, validate_secret_file};
 use std::sync::Mutex;
 use std::time::SystemTime;
 
@@ -27,8 +29,9 @@ pub struct AdminPassword {
 
 impl AdminPassword {
     pub fn from_file(path: &Path) -> anyhow::Result<Self> {
-        validate_secret_file(path, "admin password")?;
-        let hash = fs::read_to_string(path)?.trim().to_string();
+        let path = resolve_secret_path(path);
+        validate_secret_file(&path, "admin password")?;
+        let hash = fs::read_to_string(&path)?.trim().to_string();
         if hash.is_empty() {
             anyhow::bail!("empty password hash file");
         }
@@ -74,13 +77,14 @@ pub struct McpTokenStore {
 
 impl McpTokenStore {
     pub fn from_file(path: &Path) -> anyhow::Result<Self> {
-        validate_secret_file(path, "MCP token")?;
-        let by_hash = load_by_hash(path)?;
-        let meta = fs::metadata(path)?;
+        let path_buf = resolve_secret_path(path);
+        validate_secret_file(&path_buf, "MCP token")?;
+        let by_hash = load_by_hash(&path_buf)?;
+        let meta = fs::metadata(&path_buf)?;
         let mtime = meta.modified()?;
         let len = meta.len();
         Ok(Self {
-            path: path.to_path_buf(),
+            path: path_buf,
             cache: Mutex::new(TokenCache {
                 mtime,
                 len,
@@ -296,37 +300,6 @@ token_sha256_hex = "020202020202020202020202020202020202020202020202020202020202
     }
 }
 
-pub fn validate_secret_file(path: &Path, label: &str) -> anyhow::Result<()> {
-    if skip_secret_file_checks() {
-        return Ok(());
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        let meta = fs::metadata(path)?;
-        if meta.uid() != 0 {
-            anyhow::bail!("{label} file must be owned by root (uid 0)");
-        }
-        if meta.mode() & 0o777 != 0o600 {
-            anyhow::bail!("{label} file must be mode 0600");
-        }
-    }
-    Ok(())
-}
-
-#[cfg(any(test, feature = "test-secret-skip"))]
-fn skip_secret_file_checks() -> bool {
-    std::env::var("KXPROV_SKIP_SECRET_FILE_CHECKS")
-        .ok()
-        .as_deref()
-        == Some("1")
-}
-
-#[cfg(not(any(test, feature = "test-secret-skip")))]
-fn skip_secret_file_checks() -> bool {
-    false
-}
-
 fn load_token_entries(raw: &str) -> anyhow::Result<Vec<TokenFileEntry>> {
     if let Ok(wrapper) = toml::from_str::<TokenFileWrapper>(raw) {
         return Ok(wrapper.tokens);
@@ -351,6 +324,7 @@ pub fn hash_token_for_file(bearer: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::secret_file::skip_secret_file_checks;
     use std::os::unix::fs::PermissionsExt;
 
     #[test]

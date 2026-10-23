@@ -59,7 +59,8 @@ cat >"$etc_dir/kxprovd.json" <<JSON
   "transport": "sim",
   "goliath_target": "$data_dir/goliath",
   "gateway_uid": $uid,
-  "admin_uid": $((uid + 1))
+  "admin_uid": $((uid + 1)),
+  "daemon_socket_group": ""
 }
 JSON
 

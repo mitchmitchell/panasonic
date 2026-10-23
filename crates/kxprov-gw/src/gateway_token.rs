@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use kxprov_api::{ApiClient, RequestAuth, RequestBody, ResponseResult, Scope};
 use thiserror::Error;
 
-use crate::auth::validate_secret_file;
+use crate::secret_file::{resolve_secret_path, validate_secret_file};
 
 #[derive(Debug, Error)]
 pub enum GatewayTokenError {
@@ -24,9 +24,10 @@ pub struct GatewayDaemonToken {
 
 impl GatewayDaemonToken {
     pub async fn load(bearer_path: &Path, daemon_socket: &Path) -> Result<Self, GatewayTokenError> {
-        validate_secret_file(bearer_path, "gateway daemon bearer")
+        let bearer_path = resolve_secret_path(bearer_path);
+        validate_secret_file(&bearer_path, "gateway daemon bearer")
             .map_err(|e| GatewayTokenError::Invalid(e.to_string()))?;
-        let bearer = fs::read_to_string(bearer_path)?.trim().to_string();
+        let bearer = fs::read_to_string(&bearer_path)?.trim().to_string();
         if bearer.is_empty() {
             return Err(GatewayTokenError::Invalid("empty gateway bearer".into()));
         }

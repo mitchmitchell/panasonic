@@ -1,18 +1,24 @@
 [Unit]
 Description=kx-provision gateway (web, MCP, Tailscale Serve Unix)
-After=network-online.target tailscaled.service
+After=network-online.target kxprovd.service
 Wants=network-online.target
+Requires=kxprovd.service
 
 [Service]
 Type=simple
 User=kxprov-gw
 Group=kxprov-gw
-# tailscale: connect to web-serve.sock; kxprovision: kxprovd.sock (mode 0660).
-SupplementaryGroups=tailscale kxprovision
-RuntimeDirectory=kx-provision
+# kxprovision: reach kxprovd.sock (mode 0660, group kxprovision).
+SupplementaryGroups=kxprovision
+RuntimeDirectory=kx-provision-gw
 RuntimeDirectoryMode=0750
+UMask=0077
 
 EnvironmentFile=-/etc/kx-provision/gateway.env
+LoadCredential=gateway-daemon.bearer:/etc/kx-provision/secrets/gateway-daemon.bearer
+LoadCredential=mcp-tokens.toml:/etc/kx-provision/secrets/mcp-tokens.toml
+LoadCredential=admin-password.hash:/etc/kx-provision/secrets/admin-password.hash
+LoadCredential=lan.key:/etc/kx-provision/tls/lan.key
 ExecStart=/usr/bin/kxprov-gw --config /etc/kx-provision/gateway.toml
 Restart=on-failure
 RestartSec=5
@@ -25,10 +31,18 @@ NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+PrivateDevices=yes
+RestrictNamespaces=yes
+SystemCallFilter=@system-service
+MemoryDenyWriteExecute=yes
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 
-ReadOnlyPaths=/etc/kx-provision /var/lib/kx-provision
-ReadWritePaths=/run/kx-provision
+ReadOnlyPaths=/etc/kx-provision /var/lib/kx-provision /run/kx-provision
+ReadWritePaths=/run/kx-provision-gw
 
 [Install]
 WantedBy=multi-user.target

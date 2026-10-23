@@ -46,6 +46,43 @@ use tokens::TokenStore;
 use tokio::net::UnixListener;
 use tokio::sync::{mpsc, RwLock};
 
+#[cfg(unix)]
+fn set_daemon_socket_permissions(
+    path: &std::path::Path,
+    group_name: &str,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o660))?;
+    if group_name.is_empty() {
+        return Ok(());
+    }
+    let gid = nix::unistd::Group::from_name(group_name)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::NotFound, e.to_string()))?
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("daemon socket group {group_name:?} not found"),
+            )
+        })?
+        .gid;
+    let owner = if nix::unistd::geteuid().is_root() {
+        nix::unistd::Uid::from_raw(0)
+    } else {
+        nix::unistd::geteuid()
+    };
+    nix::unistd::chown(path, Some(owner), Some(gid))
+        .map_err(|e| std::io::Error::other(e.to_string()))?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn set_daemon_socket_permissions(
+    _path: &std::path::Path,
+    _group_name: &str,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    Ok(())
+}
+
 pub struct Daemon {
     _process_lock: lock::ProcessLock,
     _thread: std::thread::JoinHandle<()>,
@@ -137,6 +174,7 @@ impl Daemon {
         });
 
         let socket_path = config.socket_path.clone();
+        let daemon_socket_group = config.daemon_socket_group.clone();
         if socket_path.exists() {
             let _ = std::fs::remove_file(&socket_path);
         }
@@ -154,13 +192,9 @@ impl Daemon {
                         return;
                     }
                 };
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    let _ = std::fs::set_permissions(
-                        &socket_path,
-                        std::fs::Permissions::from_mode(0o660),
-                    );
+                if let Err(e) = set_daemon_socket_permissions(&socket_path, &daemon_socket_group) {
+                    tracing::error!("daemon socket permissions {socket_path:?}: {e}");
+                    return;
                 }
                 let tokens_worker = api_state.tokens.clone();
                 let ((), serve_res) = tokio::join!(
@@ -333,6 +367,7 @@ impl Daemon {
         });
 
         let socket_path = config.socket_path.clone();
+        let daemon_socket_group = config.daemon_socket_group.clone();
         if socket_path.exists() {
             let _ = std::fs::remove_file(&socket_path);
         }
@@ -350,13 +385,9 @@ impl Daemon {
                         return;
                     }
                 };
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    let _ = std::fs::set_permissions(
-                        &socket_path,
-                        std::fs::Permissions::from_mode(0o660),
-                    );
+                if let Err(e) = set_daemon_socket_permissions(&socket_path, &daemon_socket_group) {
+                    tracing::error!("daemon socket permissions {socket_path:?}: {e}");
+                    return;
                 }
                 let tokens_worker = api_state.tokens.clone();
                 let ((), serve_res) = tokio::join!(

@@ -17,7 +17,8 @@ pub use ids::{Approval, DiffHash, PlanId, Profile, TokenId};
 pub use paths::{
     goliath_dir, mode_counter_path, production_layout, profile_data_dir, profile_dir_name,
     profile_epoch_counter_path, resolve_profile_data_dir, sim_passed_path, DAEMON_ETC_CONFIG,
-    DAEMON_SOCKET, DATA_DIR, EPOCH_DIR_NAME, MODE_COUNTER, SIM_PASSED_JSON, TOKENS_JSON,
+    DAEMON_RUNTIME_DIR, DAEMON_SOCKET, DATA_DIR, EPOCH_DIR_NAME, GATEWAY_RUNTIME_DIR,
+    GATEWAY_WEB_SERVE_SOCKET, MODE_COUNTER, SIM_PASSED_JSON, TOKENS_JSON,
 };
 pub use plan_hash::{diff_hash, CanonicalPlan, CanonicalWrite};
 pub use protocol::*;

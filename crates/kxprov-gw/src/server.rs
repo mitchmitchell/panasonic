@@ -26,6 +26,7 @@ use crate::auth::{AdminPassword, McpTokenStore};
 use crate::config::GatewayConfig;
 use crate::host_origin::HostOriginConfig;
 use crate::ratelimit::RateLimiter;
+use crate::secret_file::validate_secret_file;
 use crate::serve_peer;
 use crate::web_stack::production_web_router;
 pub struct GatewayHandles {
@@ -241,6 +242,7 @@ async fn load_tls_config(cert: &Path, key: &Path) -> anyhow::Result<RustlsConfig
             key.display()
         );
     }
+    validate_secret_file(key, "TLS private key")?;
     RustlsConfig::from_pem_file(cert, key).await.map_err(|e| {
         anyhow::anyhow!(
             "failed to load TLS certificate from {} and key from {}: {e}",

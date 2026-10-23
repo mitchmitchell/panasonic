@@ -150,9 +150,13 @@ fn default_production_paths() {
     let pass = p.path().join("password");
     std::fs::write(&pass, "0000").unwrap();
     let cfg_path = p.path().join("kxprovd.json");
+    let gateway_uid = nix::unistd::getuid().as_raw();
     std::fs::write(
         &cfg_path,
-        format!(r#"{{"password_path":"{}"}}"#, pass.display()),
+        format!(
+            r#"{{"password_path":"{}","gateway_uid":{gateway_uid}}}"#,
+            pass.display()
+        ),
     )
     .unwrap();
     let cfg = Config::load_from_etc(&cfg_path).unwrap();
@@ -180,10 +184,11 @@ fn profile_data_dir_honors_configured_provision_root() {
     let pass = p.path().join("password");
     std::fs::write(&pass, "0000").unwrap();
     let cfg_path = p.path().join("kxprovd.json");
+    let gateway_uid = nix::unistd::getuid().as_raw();
     std::fs::write(
         &cfg_path,
         format!(
-            r#"{{"password_path":"{}","provision_root":"{}"}}"#,
+            r#"{{"password_path":"{}","provision_root":"{}","gateway_uid":{gateway_uid}}}"#,
             pass.display(),
             root.display()
         ),
@@ -228,10 +233,11 @@ fn custom_data_dir_is_provision_root_with_profile_subdirs() {
     let pass = p.path().join("password");
     std::fs::write(&pass, "0000").unwrap();
     let cfg_path = p.path().join("kxprovd.json");
+    let gateway_uid = nix::unistd::getuid().as_raw();
     std::fs::write(
         &cfg_path,
         format!(
-            r#"{{"password_path":"{}","data_dir":"{}"}}"#,
+            r#"{{"password_path":"{}","data_dir":"{}","gateway_uid":{gateway_uid}}}"#,
             pass.display(),
             data_root.display()
         ),

@@ -21,6 +21,10 @@ path = "tests/daemon_e2e.rs"
 required-features = ["test-secret-skip"]
 
 [[test]]
+name = "non_root_gateway_daemon"
+path = "tests/non_root_gateway_daemon.rs"
+
+[[test]]
 name = "host_allowlist"
 path = "tests/host_allowlist.rs"
 required-features = ["test-secret-skip"]

@@ -5,6 +5,7 @@ use axum::extract::{ConnectInfo, Request};
 use axum::middleware::Next;
 use axum::response::Response;
 use axum::serve::IncomingStream;
+use kxprov_api::GATEWAY_RUNTIME_DIR;
 use kxprov_web::WebConnectInfo;
 use std::io;
 use std::net::SocketAddr;
@@ -16,7 +17,7 @@ use tokio::net::{UnixListener, UnixStream};
 static TAILNET_SERVE_TRUST: OnceLock<ServeTrustConfig> = OnceLock::new();
 
 /// Production runtime directory for Serve socket and related state (`0750`).
-pub const PROVISION_RUNTIME_DIR: &str = "/run/kx-provision";
+pub const PROVISION_RUNTIME_DIR: &str = GATEWAY_RUNTIME_DIR;
 
 const RUNTIME_DIR_MODE: u32 = 0o750;
 const SOCKET_MODE: u32 = 0o660;
@@ -33,7 +34,9 @@ pub enum ServeListenerError {
     Io(#[from] io::Error),
     #[error("serve socket group {name:?} not found")]
     GroupMissing { name: String },
-    #[error("serve runtime directory {path} is missing (systemd RuntimeDirectory=kx-provision?)")]
+    #[error(
+        "serve runtime directory {path} is missing (systemd RuntimeDirectory=kx-provision-gw?)"
+    )]
     RuntimeDirMissing { path: PathBuf },
     #[error("serve runtime directory {path} must be mode 0750")]
     RuntimeDirMode { path: PathBuf },

@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use kxprov_api::{
     goliath_dir, mode_counter_path, profile_data_dir, sim_passed_path, DAEMON_SOCKET, DATA_DIR,
-    MODE_COUNTER, SIM_PASSED_JSON, TOKENS_JSON,
+    GATEWAY_WEB_SERVE_SOCKET, MODE_COUNTER, SIM_PASSED_JSON, TOKENS_JSON,
 };
 use kxprov_gw::config::GatewayConfig;
 use kxprovd::config::production_path_defaults;
@@ -31,6 +31,7 @@ fn gateway_defaults_match_shared_paths() {
     let gw = GatewayConfig::default();
     assert_eq!(gw.daemon_socket_path, PathBuf::from(DAEMON_SOCKET));
     assert_eq!(gw.daemon_tokens_path, PathBuf::from(TOKENS_JSON));
+    assert_eq!(gw.web_serve_socket, PathBuf::from(GATEWAY_WEB_SERVE_SOCKET));
 }
 
 #[test]

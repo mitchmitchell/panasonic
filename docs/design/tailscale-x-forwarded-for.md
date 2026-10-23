@@ -6,18 +6,18 @@ Tailscale **Serve** forwards tailnet HTTPS to a **Unix socket** on the gateway h
 
 Production defaults:
 
-- Runtime directory: `/run/kx-provision` (mode **0750**, root-owned in production)
-- Socket path: `/run/kx-provision/web-serve.sock`
+- Gateway runtime directory: `/run/kx-provision-gw` (mode **0750**, owned by **`kxprov-gw`** via systemd `RuntimeDirectory=kx-provision-gw`)
+- Serve socket path: `/run/kx-provision-gw/web-serve.sock`
+- Daemon socket (separate dir): `/run/kx-provision/kxprovd.sock` on **`RuntimeDirectory=kx-provision`** (daemon unit); stopping the gateway does not remove the daemon socket.
 - Mode: **0660** (umask tightened before `bind`, then explicit `chmod`)
-- Owner: **`kxprov-gw`** (systemd `User=`; `RuntimeDirectory=` creates `/run/kx-provision` owned by that uid)
-- Group on Serve socket: **`tailscale`** (configurable via `serve_socket_group`; startup **fails** if the group name is missing). Gateway user is in `SupplementaryGroups=tailscale kxprovision` to reach `web-serve.sock` and `kxprovd.sock`.
+- Group on Serve socket: **`tailscale`** (configurable via `serve_socket_group`; startup **fails** if the group name is missing). Gateway user is in `SupplementaryGroups=kxprovision` to reach `kxprovd.sock` (group **`kxprovision`** on the daemon socket).
 
 Stale sockets are removed only after **`lstat`**: symlinks and non-socket paths are rejected.
 
 `gateway.toml`:
 
 ```toml
-web_serve_socket = "/run/kx-provision/web-serve.sock"
+web_serve_socket = "/run/kx-provision-gw/web-serve.sock"
 serve_socket_group = "tailscale"
 
 [web_tailnet]

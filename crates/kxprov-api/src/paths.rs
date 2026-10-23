@@ -7,8 +7,17 @@ use std::path::{Path, PathBuf};
 
 use crate::Profile;
 
+/// Daemon runtime directory (systemd `RuntimeDirectory=kx-provision`).
+pub const DAEMON_RUNTIME_DIR: &str = "/run/kx-provision";
+
+/// Gateway runtime directory (systemd `RuntimeDirectory=kx-provision-gw`).
+pub const GATEWAY_RUNTIME_DIR: &str = "/run/kx-provision-gw";
+
 /// Unix socket for admin and gateway API clients.
 pub const DAEMON_SOCKET: &str = "/run/kx-provision/kxprovd.sock";
+
+/// Tailscale Serve front door (gateway-owned runtime dir).
+pub const GATEWAY_WEB_SERVE_SOCKET: &str = "/run/kx-provision-gw/web-serve.sock";
 
 /// Repository root for daemon state (not per-profile payload dirs).
 pub const DATA_DIR: &str = "/var/lib/kx-provision";
@@ -50,6 +59,9 @@ pub fn goliath_dir(profile: Profile) -> String {
 /// Whether `base` uses the production v2.12 layout (profile subdirs under [`DATA_DIR`]).
 pub fn production_layout(base: &Path) -> bool {
     base == Path::new(DATA_DIR)
+        && DAEMON_SOCKET.starts_with(DAEMON_RUNTIME_DIR)
+        && GATEWAY_WEB_SERVE_SOCKET.starts_with(GATEWAY_RUNTIME_DIR)
+        && DAEMON_RUNTIME_DIR != GATEWAY_RUNTIME_DIR
 }
 
 /// Profile-scoped data directory (plans, backups, mode.json, …): `{base}/<profile>/`.
@@ -87,6 +99,9 @@ mod tests {
         assert!(MODE_COUNTER.starts_with(DATA_DIR));
         assert!(SIM_PASSED_JSON.starts_with(DATA_DIR));
         assert!(profile_data_dir(Profile::Sim).starts_with(DATA_DIR));
+        assert!(DAEMON_SOCKET.starts_with(DAEMON_RUNTIME_DIR));
+        assert!(GATEWAY_WEB_SERVE_SOCKET.starts_with(GATEWAY_RUNTIME_DIR));
+        assert_ne!(DAEMON_RUNTIME_DIR, GATEWAY_RUNTIME_DIR);
     }
 
     #[test]

@@ -1,0 +1,34 @@
+[Unit]
+Description=kx-provision daemon (serial owner, job queue)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+RuntimeDirectory=kx-provision
+RuntimeDirectoryMode=0750
+UMask=0077
+
+EnvironmentFile=-/etc/kx-provision/daemon.env
+ExecStart=/usr/bin/kxprovd --config /etc/kx-provision/kxprovd.json
+Restart=on-failure
+RestartSec=5
+
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+PrivateDevices=yes
+RestrictNamespaces=yes
+SystemCallFilter=@system-service
+MemoryDenyWriteExecute=yes
+NoNewPrivileges=yes
+
+ReadOnlyPaths=/etc/kx-provision
+ReadWritePaths=/var/lib/kx-provision /run/kx-provision
+
+[Install]
+WantedBy=multi-user.target

@@ -41,6 +41,8 @@ pub struct Config {
     pub serial_device: PathBuf,
     pub gateway_uid: u32,
     pub admin_uid: u32,
+    /// Group on the daemon Unix socket (`0660`), e.g. `kxprovision`.
+    pub daemon_socket_group: String,
     pub totp_enabled: bool,
     pub totp_secret_path: Option<PathBuf>,
     pub timing: Timing,
@@ -62,10 +64,14 @@ struct EtcConfigFile {
     goliath_target: Option<PathBuf>,
     #[serde(default = "default_serial")]
     serial_device: PathBuf,
-    #[serde(default = "default_gateway_uid")]
-    gateway_uid: u32,
+    #[serde(default)]
+    gateway_uid: Option<u32>,
+    #[serde(default = "default_gateway_user")]
+    gateway_user: String,
     #[serde(default = "default_admin_uid")]
     admin_uid: u32,
+    #[serde(default = "default_daemon_socket_group")]
+    daemon_socket_group: String,
     #[serde(default)]
     profile: Profile,
     #[serde(default)]
@@ -139,8 +145,30 @@ fn default_serial() -> PathBuf {
     PathBuf::from("/dev/kxpbx")
 }
 
-fn default_gateway_uid() -> u32 {
-    1000
+fn default_gateway_user() -> String {
+    "kxprov-gw".into()
+}
+
+fn default_daemon_socket_group() -> String {
+    "kxprovision".into()
+}
+
+fn resolve_gateway_uid(explicit: Option<u32>, user_name: &str) -> Result<u32, ConfigError> {
+    if let Some(uid) = explicit {
+        return Ok(uid);
+    }
+    #[cfg(unix)]
+    {
+        use nix::unistd::User;
+        let user = User::from_name(user_name).map_err(|e| ConfigError::Io(e.into()))?;
+        user.ok_or_else(|| ConfigError::UnknownGatewayUser(user_name.to_string()))
+            .map(|u| u.uid.as_raw())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = user_name;
+        Err(ConfigError::Missing)
+    }
 }
 
 fn default_admin_uid() -> u32 {
@@ -157,6 +185,8 @@ pub enum ConfigError {
     Timing(#[from] TimingConfigError),
     #[error("gateway_uid must differ from admin_uid")]
     UidsMustDiffer,
+    #[error("gateway user {0} not found (set gateway_uid explicitly)")]
+    UnknownGatewayUser(String),
     #[error("missing config")]
     Missing,
 }
@@ -211,6 +241,7 @@ impl Config {
         } else {
             None
         };
+        let gateway_uid = resolve_gateway_uid(file.gateway_uid, &file.gateway_user)?;
         let cfg = Self {
             profile: file.profile,
             transport,
@@ -219,11 +250,12 @@ impl Config {
             socket_path: file.socket_path,
             password: password.trim().to_string(),
             gates: file.gates,
-            peer_policy: PeerPolicy::new(file.gateway_uid, file.admin_uid),
+            peer_policy: PeerPolicy::new(gateway_uid, file.admin_uid),
             goliath_target,
             serial_device: file.serial_device,
-            gateway_uid: file.gateway_uid,
+            gateway_uid,
             admin_uid: file.admin_uid,
+            daemon_socket_group: file.daemon_socket_group,
             totp_enabled: file.totp_enabled,
             totp_secret_path: file.totp_secret_path,
             timing,
@@ -251,6 +283,7 @@ impl Config {
             serial_device: PathBuf::from("/dev/kxpbx"),
             gateway_uid: peer_uid.wrapping_add(1),
             admin_uid: peer_uid,
+            daemon_socket_group: String::new(),
             totp_enabled: false,
             totp_secret_path: None,
             timing: Timing::default(),
@@ -281,6 +314,7 @@ impl Config {
             serial_device: PathBuf::from("/dev/kxpbx"),
             gateway_uid,
             admin_uid,
+            daemon_socket_group: String::new(),
             totp_enabled: false,
             totp_secret_path: None,
             timing: Timing::default(),
