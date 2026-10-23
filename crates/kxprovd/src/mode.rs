@@ -14,6 +14,8 @@ pub enum ModeError {
     Io(#[from] std::io::Error),
     #[error("json: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("epoch storage")]
+    Epoch(#[from] epoch_store::EpochError),
     #[error("counter rollback")]
     CounterRollback,
     #[error("mode.counter corrupt or unreadable")]
@@ -84,39 +86,35 @@ impl ModeStore {
     }
 
     pub fn load_profile(&self) -> Profile {
-        let last = match self.last_counter(self.boot_profile) {
+        let stored = match std::fs::read_to_string(&self.profile_path) {
+            Ok(raw) => match serde_json::from_str::<ProfileFileBody>(&raw) {
+                Ok(body) => Some(body),
+                Err(e) => {
+                    self.fail_closed(AuditKind::ModeCorrupt, format!("profile.json: {e}"));
+                    return Profile::Prod;
+                }
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => {
+                self.fail_closed(AuditKind::ModeCorrupt, e.to_string());
+                return Profile::Prod;
+            }
+        };
+
+        let epoch_profile = stored
+            .as_ref()
+            .map(|b| b.profile)
+            .unwrap_or(self.boot_profile);
+        let last = match self.last_counter(epoch_profile) {
             Ok(n) => n,
             Err(e) => {
                 self.fail_closed(AuditKind::ModeCorrupt, format!("mode.counter: {e}"));
                 return Profile::Prod;
             }
         };
-        match std::fs::read_to_string(&self.profile_path) {
-            Ok(raw) => match serde_json::from_str::<ProfileFileBody>(&raw) {
-                Ok(body) if body.counter < last => {
-                    self.fail_closed_profile_rollback(body.counter, last);
-                    Profile::Prod
-                }
-                Ok(body) => {
-                    if self.boot_profile == Profile::Prod && body.profile != Profile::Prod {
-                        self.fail_closed(
-                            AuditKind::ModeCorrupt,
-                            format!(
-                                "profile.json {:?} disagrees with prod data directory",
-                                body.profile
-                            ),
-                        );
-                        Profile::Prod
-                    } else {
-                        body.profile
-                    }
-                }
-                Err(e) => {
-                    self.fail_closed(AuditKind::ModeCorrupt, format!("profile.json: {e}"));
-                    Profile::Prod
-                }
-            },
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+
+        match stored {
+            None => {
                 if last > 0 {
                     self.fail_closed(
                         AuditKind::ModeCorrupt,
@@ -127,9 +125,23 @@ impl ModeStore {
                     self.boot_profile
                 }
             }
-            Err(e) => {
-                self.fail_closed(AuditKind::ModeCorrupt, e.to_string());
+            Some(body) if body.counter < last => {
+                self.fail_closed_profile_rollback(body.counter, last);
                 Profile::Prod
+            }
+            Some(body) => {
+                if self.boot_profile == Profile::Prod && body.profile != Profile::Prod {
+                    self.fail_closed(
+                        AuditKind::ModeCorrupt,
+                        format!(
+                            "profile.json {:?} disagrees with prod data directory",
+                            body.profile
+                        ),
+                    );
+                    Profile::Prod
+                } else {
+                    body.profile
+                }
             }
         }
     }
@@ -160,7 +172,7 @@ impl ModeStore {
     }
 
     fn last_counter(&self, profile: Profile) -> Result<u64, ModeError> {
-        match epoch_store::read_counter(&self.provision_root, profile).map_err(map_epoch_err)? {
+        match epoch_store::read_counter(&self.provision_root, profile)? {
             None => {
                 if self.missing_counter_with_stored_epoch() {
                     return Err(ModeError::CounterCorrupt);
@@ -172,7 +184,8 @@ impl ModeStore {
     }
 
     fn save_counter(&self, profile: Profile, counter: u64) -> Result<(), ModeError> {
-        epoch_store::write_counter(&self.provision_root, profile, counter).map_err(map_epoch_err)
+        epoch_store::write_counter(&self.provision_root, profile, counter)?;
+        Ok(())
     }
 
     fn fail_closed(&self, kind: AuditKind, detail: impl Into<String>) -> EffectiveMode {
@@ -204,7 +217,7 @@ impl ModeStore {
                 return self.fail_closed(AuditKind::ModeCorrupt, e.to_string());
             }
         };
-        let last = match self.last_counter(self.boot_profile) {
+        let last = match self.last_counter(profile) {
             Ok(n) => n,
             Err(e) => {
                 return self.fail_closed(AuditKind::ModeCorrupt, format!("mode.counter: {e}"));
@@ -289,12 +302,55 @@ pub fn write_approval_required(profile: Profile, _operational: OperationalMode) 
     profile == Profile::Prod
 }
 
-fn map_epoch_err(e: epoch_store::EpochError) -> ModeError {
-    match e {
-        epoch_store::EpochError::Io(e) => ModeError::Io(e),
-        epoch_store::EpochError::InsecureDir | epoch_store::EpochError::InsecureCounter => {
-            ModeError::CounterCorrupt
-        }
-        epoch_store::EpochError::Corrupt => ModeError::CounterCorrupt,
+#[cfg(all(test, feature = "test-util"))]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::*;
+    use kxprov_api::OperationalMode;
+
+    #[test]
+    fn restart_keeps_testing_after_set_mode_switches_profile_epoch() {
+        let root = tempfile::tempdir().unwrap();
+        let sim_dir = root.path().join("sim");
+        std::fs::create_dir_all(&sim_dir).unwrap();
+        let store = ModeStore::new_with_epoch_root(&sim_dir, root.path(), Profile::Sim);
+        store
+            .set_operational(OperationalMode::Testing, Profile::Test, true)
+            .unwrap();
+        let restarted = ModeStore::new_with_epoch_root(&sim_dir, root.path(), Profile::Sim);
+        assert_eq!(restarted.load_profile(), Profile::Test);
+        assert_eq!(
+            restarted.effective(Profile::Test).operational,
+            OperationalMode::Testing
+        );
+    }
+
+    #[test]
+    fn rolled_back_mode_json_fail_closed_to_production() {
+        let root = tempfile::tempdir().unwrap();
+        let sim_dir = root.path().join("sim");
+        std::fs::create_dir_all(&sim_dir).unwrap();
+        let store = ModeStore::new_with_epoch_root(&sim_dir, root.path(), Profile::Sim);
+        store
+            .set_operational(OperationalMode::Testing, Profile::Test, true)
+            .unwrap();
+        store
+            .set_operational(OperationalMode::Testing, Profile::Test, true)
+            .unwrap();
+        std::fs::write(
+            sim_dir.join("mode.json"),
+            serde_json::to_vec_pretty(&ModeFileBody {
+                mode: OperationalMode::Testing,
+                counter: 1,
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        let restarted = ModeStore::new_with_epoch_root(&sim_dir, root.path(), Profile::Sim);
+        assert_eq!(
+            restarted.effective(Profile::Test).operational,
+            OperationalMode::Production
+        );
     }
 }
