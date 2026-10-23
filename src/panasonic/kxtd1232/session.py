@@ -59,6 +59,9 @@ class Login:
         self._buf += data
         while b"\n" in self._buf and self.state not in (State.BINARY, State.FAILED):
             line, self._buf = self._buf.split(b"\n", 1)
+            if len(line) > MAX_LINE:
+                self._fail(f"text line longer than {MAX_LINE} bytes")
+                break
             self._lines += 1
             if self._lines > MAX_LOGIN_LINES:
                 self._fail(f"more than {MAX_LOGIN_LINES} text lines before binary mode")

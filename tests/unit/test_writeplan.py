@@ -47,3 +47,17 @@ def test_rejects_bad_tables_and_ranges():
         build_plan(0x0B, 2, b"\x00" * 4, [])
     with pytest.raises(ValueError):
         build_plan(0x24, 6, b"\x00" * 6, [Patch(0x24, 4, b"\x00\x00\x00")])
+
+
+def test_plan_errors_are_plan_error():
+    # Claude PRRT_kwDOVUJjDM6vdZ5x: typed PlanError carrying table / chunk size.
+    from panasonic.kxtd1232.writeplan import PlanError
+
+    base = bytes(synthetic_db()[0x25])
+    with pytest.raises(PlanError) as ei:
+        build_plan(0x25, 16, base, [], records_per_chunk=13)
+    assert ei.value.table == 0x25 and ei.value.chunk == 208
+    with pytest.raises(PlanError):
+        build_plan(0x25, 16, base, [], granularity="whole")
+    with pytest.raises(PlanError):
+        build_plan(0x24, 6, b"\x00" * 6, [Patch(0x24, 4, b"\x00\x00\x00")])

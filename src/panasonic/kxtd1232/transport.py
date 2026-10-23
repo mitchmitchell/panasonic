@@ -6,6 +6,10 @@ from typing import Protocol
 
 
 class Transport(Protocol):
+    #: True for in-process transports whose replies appear synchronously (no line timing,
+    #: so the client skips its post-send cutoff). Required: real transports set False.
+    instant: bool
+
     def send(self, data: bytes) -> None: ...
 
     def recv(self, timeout: float) -> bytes:

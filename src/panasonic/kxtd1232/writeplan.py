@@ -13,6 +13,15 @@ from .frame import MAX_WRITE_PAYLOAD
 from .tables import check_writable
 
 
+class PlanError(ValueError):
+    """A write plan cannot be built. Distinct from field-decode ``ValueError``s; carries
+    the table and, for size failures, the chunk size in bytes."""
+
+    def __init__(self, msg: str, table: int, chunk: int | None = None) -> None:
+        super().__init__(msg)
+        self.table, self.chunk = table, chunk
+
+
 class Granularity(StrEnum):
     CHUNK = "chunk"  # only changed record groups (PC (a))
     TABLE = "table"  # the whole table (PC (b))
@@ -69,23 +78,28 @@ def build_plan(
     granularity: Granularity | str = Granularity.CHUNK,
     records_per_chunk: int | None = None,
 ) -> WritePlan:
-    """Build a dry-run plan. Raises ValueError for an unknown granularity or a chunk that
-    would not fit one write frame."""
-    granularity = Granularity(granularity)
+    """Build a dry-run plan. Raises PlanError for an unknown granularity, a bad record
+    size, a patch that does not fit, or a chunk that would not fit one write frame."""
+    try:
+        granularity = Granularity(granularity)
+    except ValueError as e:
+        raise PlanError(f"unknown granularity {granularity!r}", table) from e
     if record_size <= 0 or record_size % 2:
-        raise ValueError("record size must be a positive whole number of words")
+        raise PlanError("record size must be a positive whole number of words", table)
     check_writable(table)
     new = bytearray(base)
     for p in patches:
         if p.table != table:
-            raise ValueError("patch for another table")
+            raise PlanError("patch for another table", table)
         if p.offset < 0 or p.offset + len(p.data) > len(base):
-            raise ValueError("patch outside table image")
+            raise PlanError("patch outside table image", table)
         new[p.offset : p.offset + len(p.data)] = p.data
     per = records_per_chunk or max(1, MAX_WRITE_PAYLOAD // record_size)
     chunk = per * record_size
     if per <= 0 or chunk > MAX_WRITE_PAYLOAD:
-        raise ValueError(f"chunk of {chunk} bytes exceeds {MAX_WRITE_PAYLOAD}-byte write limit")
+        raise PlanError(
+            f"chunk of {chunk} bytes exceeds {MAX_WRITE_PAYLOAD}-byte write limit", table, chunk
+        )
     plan = WritePlan(table, record_size)
     for start in range(0, len(base), chunk):
         b, n = base[start : start + chunk], bytes(new[start : start + chunk])

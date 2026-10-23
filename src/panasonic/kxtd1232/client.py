@@ -111,9 +111,10 @@ class Client:
         """Send once and return the reply. Busy frames are waited out, never answered with a
         resend (design §3), for at most ``busy_limit`` seconds (BusyTimeoutError)."""
         self._wait_quiet(RECOVER_QUIET_S if self._dirty else PRE_SEND_QUIET_S)
+        sent_at = self.clock()
         self.t.send(raw)
         try:
-            self._guard(len(raw))
+            self._guard(sent_at, len(raw))
             reply = self._await_reply(raw[1], timeout)
             self._expect_quiet()
             self._dirty = False
@@ -136,16 +137,22 @@ class Client:
                 return
         raise PreSendError(f"line not quiet for {quiet_s} s before send")
 
-    def _guard(self, nbytes: int) -> None:
-        """Drop anything arriving before the request could even have been transmitted
-        (10 bits/byte at LINK_BAUD): it cannot be the reply. Skipped for instant
-        in-process transports, which have no timing."""
-        if getattr(self.t, "instant", False):
+    def _guard(self, sent_at: float, nbytes: int) -> None:
+        """Drop anything arriving before a fixed cutoff, ``sent_at`` plus the request's
+        transmit time (10 bits/byte at LINK_BAUD): no genuine reply can be complete
+        sooner. The cutoff is a lower bound measured from the send and never restarts
+        while stale bytes are dropped. If it ever drops a real ack, the write is reported
+        unacked and verified by re-read, never resent. Skipped for transports that declare
+        ``instant = True`` (in-process, no timing)."""
+        if self.t.instant:
             return
-        window = nbytes * 10 / LINK_BAUD
+        cutoff = sent_at + nbytes * 10 / LINK_BAUD
         for _ in range(MAX_DRAIN_READS + 1):
+            left = cutoff - self.clock()
+            if left <= 0:
+                return
             try:
-                self.t.recv(window)
+                self.t.recv(left)
             except TimeoutError:
                 return
         raise ProtocolError("line not quiet after send")

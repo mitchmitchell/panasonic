@@ -32,3 +32,12 @@ def test_failures(reply):
 
 def test_repr_hides_password():
     assert "secretpw" not in repr(Login("secretpw"))
+
+
+def test_terminated_overlong_line_fails():
+    # Claude PRRT_kwDOVUJjDM6vdZ4H: a long line ending in LF inside one feed is capped too.
+    from panasonic.kxtd1232.session import MAX_LINE, XON, Login, State
+
+    s = Login("0000")
+    s.feed(bytes([XON]) + b"A" * (MAX_LINE + 1) + b"\r\n")
+    assert s.state is State.FAILED and "longer than" in (s.failure or "")
