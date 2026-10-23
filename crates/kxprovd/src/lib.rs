@@ -49,7 +49,9 @@ pub struct Daemon {
 }
 
 impl Daemon {
-    fn load_tokens(config: &Config) -> Result<TokenStore, Box<dyn std::error::Error + Send + Sync>> {
+    fn load_tokens(
+        config: &Config,
+    ) -> Result<TokenStore, Box<dyn std::error::Error + Send + Sync>> {
         let map_err = |e: tokens::TokenError| {
             Box::new(std::io::Error::new(
                 std::io::ErrorKind::PermissionDenied,
@@ -67,20 +69,22 @@ impl Daemon {
 
     pub fn start(config: Config) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         config.validate()?;
+        let profile_dir = config.profile_data_dir();
         let process_lock = lock::ProcessLock::acquire(&config.data_dir)?;
         std::fs::create_dir_all(&config.data_dir)?;
-        std::fs::create_dir_all(config.data_dir.join("plans"))?;
-        std::fs::create_dir_all(config.data_dir.join("backups"))?;
+        std::fs::create_dir_all(&profile_dir)?;
+        std::fs::create_dir_all(profile_dir.join("plans"))?;
+        std::fs::create_dir_all(profile_dir.join("backups"))?;
 
-        let journal = Journal::new(&config.data_dir);
-        journal.replay(config.data_dir.join("backups").as_path())?;
+        let journal = Journal::new(&profile_dir);
+        journal.replay(profile_dir.join("backups").as_path())?;
 
-        let plans = PlanStore::new(config.data_dir.join("plans"))?;
-        let backups = BackupStore::new(config.data_dir.join("backups"))?;
+        let plans = PlanStore::new(profile_dir.join("plans"))?;
+        let backups = BackupStore::new(profile_dir.join("backups"))?;
         let goliath = GoliathQueue::new(config.goliath_target.clone())?;
-        let approvals = ApprovalBook::new(&config.data_dir);
-        let locked = LockedStore::new(&config.data_dir);
-        let transition = transition::TransitionBlockStore::new(&config.data_dir);
+        let approvals = ApprovalBook::new(&profile_dir);
+        let locked = LockedStore::new(&profile_dir);
+        let transition = transition::TransitionBlockStore::new(&profile_dir);
         let mode = mode::ModeStore::new(&config.data_dir, config.profile);
         let _ = sim_mark::SimMarkStore::new(&config.data_dir).clear_if_stale();
         let profile = Arc::new(RwLock::new(mode.load_profile()));
@@ -102,11 +106,11 @@ impl Daemon {
         let worker_ctx = Arc::new(worker::WorkerCtx {
             config: config.clone(),
             profile: Arc::clone(&profile),
-            plans: PlanStore::new(config.data_dir.join("plans"))?,
-            backups: BackupStore::new(config.data_dir.join("backups"))?,
-            journal: Journal::new(&config.data_dir),
+            plans: PlanStore::new(profile_dir.join("plans"))?,
+            backups: BackupStore::new(profile_dir.join("backups"))?,
+            journal: Journal::new(&profile_dir),
             goliath: goliath.clone(),
-            locked: LockedStore::new(&config.data_dir),
+            locked: LockedStore::new(&profile_dir),
         });
 
         let q = Arc::clone(&queue);
@@ -232,20 +236,22 @@ impl Daemon {
     #[cfg(feature = "test-util")]
     fn start_test(config: Config) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         config.validate()?;
+        let profile_dir = config.profile_data_dir();
         let process_lock = lock::ProcessLock::acquire(&config.data_dir)?;
         std::fs::create_dir_all(&config.data_dir)?;
-        std::fs::create_dir_all(config.data_dir.join("plans"))?;
-        std::fs::create_dir_all(config.data_dir.join("backups"))?;
+        std::fs::create_dir_all(&profile_dir)?;
+        std::fs::create_dir_all(profile_dir.join("plans"))?;
+        std::fs::create_dir_all(profile_dir.join("backups"))?;
 
-        let journal = Journal::new(&config.data_dir);
-        journal.replay(config.data_dir.join("backups").as_path())?;
+        let journal = Journal::new(&profile_dir);
+        journal.replay(profile_dir.join("backups").as_path())?;
 
-        let plans = PlanStore::new(config.data_dir.join("plans"))?;
-        let backups = BackupStore::new(config.data_dir.join("backups"))?;
+        let plans = PlanStore::new(profile_dir.join("plans"))?;
+        let backups = BackupStore::new(profile_dir.join("backups"))?;
         let goliath = GoliathQueue::new(config.goliath_target.clone())?;
-        let approvals = ApprovalBook::new(&config.data_dir);
-        let locked = LockedStore::new(&config.data_dir);
-        let transition = transition::TransitionBlockStore::new(&config.data_dir);
+        let approvals = ApprovalBook::new(&profile_dir);
+        let locked = LockedStore::new(&profile_dir);
+        let transition = transition::TransitionBlockStore::new(&profile_dir);
         let mode = mode::ModeStore::new(&config.data_dir, config.profile);
         let _ = sim_mark::SimMarkStore::new(&config.data_dir).clear_if_stale();
         let profile = Arc::new(RwLock::new(mode.load_profile()));
@@ -267,11 +273,11 @@ impl Daemon {
         let worker_ctx = Arc::new(worker::WorkerCtx {
             config: config.clone(),
             profile: Arc::clone(&profile),
-            plans: PlanStore::new(config.data_dir.join("plans"))?,
-            backups: BackupStore::new(config.data_dir.join("backups"))?,
-            journal: Journal::new(&config.data_dir),
+            plans: PlanStore::new(profile_dir.join("plans"))?,
+            backups: BackupStore::new(profile_dir.join("backups"))?,
+            journal: Journal::new(&profile_dir),
             goliath: goliath.clone(),
-            locked: LockedStore::new(&config.data_dir),
+            locked: LockedStore::new(&profile_dir),
         });
 
         let q = Arc::clone(&queue);

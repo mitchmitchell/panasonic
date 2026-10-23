@@ -2,7 +2,7 @@
 
 use crate::audit::{alert_mode_failure, AuditEntry, AuditKind, AuditLog};
 use crate::time::now_ms;
-use kxprov_api::{OperationalMode, Profile};
+use kxprov_api::{mode_counter_path, resolve_profile_data_dir, OperationalMode, Profile};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
@@ -45,12 +45,13 @@ pub struct ModeStore {
 }
 
 impl ModeStore {
-    pub fn new(data_dir: &Path, boot_profile: Profile) -> Self {
+    pub fn new(state_base: &Path, boot_profile: Profile) -> Self {
+        let profile_root = resolve_profile_data_dir(state_base, boot_profile);
         Self {
-            mode_path: data_dir.join("mode.json"),
-            profile_path: data_dir.join("profile.json"),
-            counter_path: data_dir.join("mode.counter"),
-            audit: AuditLog::new(data_dir),
+            mode_path: profile_root.join("mode.json"),
+            profile_path: profile_root.join("profile.json"),
+            counter_path: mode_counter_path(state_base),
+            audit: AuditLog::new(&profile_root),
             boot_profile,
         }
     }

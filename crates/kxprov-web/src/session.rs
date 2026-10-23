@@ -27,19 +27,12 @@ pub async fn require_web_session(session: Session, req: Request<Body>, next: Nex
     }
 }
 
-pub fn absolute_session_valid(
-    started_ms: u64,
-    now_ms: u64,
-    max_lifetime_secs: u64,
-) -> bool {
+pub fn absolute_session_valid(started_ms: u64, now_ms: u64, max_lifetime_secs: u64) -> bool {
     now_ms.saturating_sub(started_ms) <= max_lifetime_secs.saturating_mul(1000)
 }
 
 pub fn now_unix_ms() -> u64 {
-    time::OffsetDateTime::now_utc()
-        .unix_timestamp()
-        .max(0) as u64
-        * 1000
+    time::OffsetDateTime::now_utc().unix_timestamp().max(0) as u64 * 1000
 }
 
 pub async fn enforce_absolute_session_limit(
@@ -52,12 +45,7 @@ pub async fn enforce_absolute_session_limit(
     if is_public_web_path(path) {
         return next.run(req).await;
     }
-    let authenticated = session
-        .get::<bool>(SESSION_AUTH_KEY)
-        .await
-        .ok()
-        .flatten()
-        == Some(true);
+    let authenticated = session.get::<bool>(SESSION_AUTH_KEY).await.ok().flatten() == Some(true);
     if !authenticated {
         return next.run(req).await;
     }

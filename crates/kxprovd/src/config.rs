@@ -1,7 +1,10 @@
 use crate::gates::GateConfig;
 use crate::peer::PeerPolicy;
 use kxprov_api::Profile;
-use kxprov_api::{DAEMON_ETC_CONFIG, DAEMON_SOCKET, DATA_DIR, GOLIATH_DIR, TOKENS_JSON};
+use kxprov_api::{
+    goliath_dir, resolve_profile_data_dir, sim_passed_path, DAEMON_ETC_CONFIG, DAEMON_SOCKET,
+    DATA_DIR, TOKENS_JSON,
+};
 use kxtd1232::{Timing, TimingConfigError};
 use kxtd1232_sim::SimPbx;
 use serde::Deserialize;
@@ -46,8 +49,7 @@ struct EtcConfigFile {
     #[serde(default = "default_tokens_path")]
     tokens_path: PathBuf,
     password_path: PathBuf,
-    #[serde(default = "default_goliath")]
-    goliath_target: PathBuf,
+    goliath_target: Option<PathBuf>,
     #[serde(default = "default_serial")]
     serial_device: PathBuf,
     #[serde(default = "default_gateway_uid")]
@@ -89,10 +91,6 @@ fn default_tokens_path() -> PathBuf {
     PathBuf::from(TOKENS_JSON)
 }
 
-fn default_goliath() -> PathBuf {
-    PathBuf::from(GOLIATH_DIR)
-}
-
 /// Production path defaults (serde defaults and package layout).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProductionPathDefaults {
@@ -103,11 +101,24 @@ pub struct ProductionPathDefaults {
 }
 
 pub fn production_path_defaults() -> ProductionPathDefaults {
+    let profile = Profile::Sim;
     ProductionPathDefaults {
         socket_path: default_socket(),
         data_dir: default_data_dir(),
         tokens_path: default_tokens_path(),
-        goliath_target: default_goliath(),
+        goliath_target: PathBuf::from(goliath_dir(profile)),
+    }
+}
+
+impl Config {
+    /// Profile-scoped state directory (plans, backups, mode.json, …).
+    pub fn profile_data_dir(&self) -> PathBuf {
+        resolve_profile_data_dir(&self.data_dir, self.profile)
+    }
+
+    /// Simulator pass marker path (same resolution as `kxprov sim-mark`).
+    pub fn sim_passed_path(&self) -> PathBuf {
+        sim_passed_path(&self.data_dir)
     }
 }
 
@@ -178,6 +189,9 @@ impl Config {
         } else {
             None
         };
+        let goliath_target = file.goliath_target.unwrap_or_else(|| {
+            resolve_profile_data_dir(&file.data_dir, file.profile).join("goliath")
+        });
         let cfg = Self {
             profile: file.profile,
             transport,
@@ -186,7 +200,7 @@ impl Config {
             password: password.trim().to_string(),
             gates: file.gates,
             peer_policy: PeerPolicy::new(file.gateway_uid, file.admin_uid),
-            goliath_target: file.goliath_target,
+            goliath_target,
             serial_device: file.serial_device,
             gateway_uid: file.gateway_uid,
             admin_uid: file.admin_uid,

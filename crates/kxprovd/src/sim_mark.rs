@@ -1,5 +1,6 @@
 //! Simulator test pass marker per build hash (v2.7 F1).
 
+use kxprov_api::sim_passed_path;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
@@ -25,10 +26,14 @@ pub struct SimMarkStore {
 }
 
 impl SimMarkStore {
-    pub fn new(data_dir: &Path) -> Self {
+    pub fn new(state_base: &Path) -> Self {
         Self {
-            path: data_dir.join("sim-mark.json"),
+            path: sim_passed_path(state_base),
         }
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
     }
 
     pub fn current_build_hash() -> &'static str {

@@ -165,7 +165,7 @@ fn sim_mark_file_mode_0600() {
     let tmp = tempfile::tempdir().unwrap();
     let store = SimMarkStore::new(tmp.path());
     store.write(1).unwrap();
-    let mode = std::fs::metadata(tmp.path().join("sim-mark.json"))
+    let mode = std::fs::metadata(tmp.path().join("sim-passed.json"))
         .unwrap()
         .permissions()
         .mode()

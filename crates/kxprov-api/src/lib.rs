@@ -14,7 +14,11 @@ mod types;
 
 pub use client::{ApiClient, ApiError};
 pub use ids::{Approval, DiffHash, PlanId, Profile, TokenId};
-pub use paths::{DAEMON_ETC_CONFIG, DAEMON_SOCKET, DATA_DIR, GOLIATH_DIR, TOKENS_JSON};
+pub use paths::{
+    goliath_dir, mode_counter_path, production_layout, profile_data_dir, profile_dir_name,
+    resolve_profile_data_dir, sim_passed_path, DAEMON_ETC_CONFIG, DAEMON_SOCKET, DATA_DIR,
+    MODE_COUNTER, SIM_PASSED_JSON, TOKENS_JSON,
+};
 pub use plan_hash::{diff_hash, CanonicalPlan, CanonicalWrite};
 pub use protocol::*;
 pub use surface::*;

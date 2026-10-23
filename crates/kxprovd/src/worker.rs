@@ -190,7 +190,10 @@ async fn run_plan(
 
 async fn run_backup(ctx: &WorkerCtx, operational_mode: OperationalMode) -> JobOutcome {
     let job_id = crate::queue::next_job_id();
-    let temp = ctx.config.data_dir.join(format!("{job_id}.partial.dbh"));
+    let temp = ctx
+        .config
+        .profile_data_dir()
+        .join(format!("{job_id}.partial.dbh"));
     let _ = ctx.journal.append(&JournalEntry::BackupStart {
         job_id: job_id.clone(),
         temp_path: temp.display().to_string(),

@@ -183,6 +183,6 @@ fn sim_mark_cleared_on_build_change() {
     let tmp = tempfile::tempdir().unwrap();
     let store = SimMarkStore::new(tmp.path());
     let stale = serde_json::json!({"build_hash":"old-build","marked_at_ms":1});
-    std::fs::write(tmp.path().join("sim-mark.json"), stale.to_string()).unwrap();
+    std::fs::write(tmp.path().join("sim-passed.json"), stale.to_string()).unwrap();
     assert!(store.load_valid().unwrap().is_none());
 }

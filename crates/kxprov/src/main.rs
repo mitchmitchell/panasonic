@@ -6,8 +6,8 @@
 //! `kxprov: error: ...`, with no backtrace.
 
 use clap::{Parser, Subcommand, ValueEnum};
+use kxprov_api::{sim_passed_path, DAEMON_SOCKET, DATA_DIR, TOKENS_JSON};
 use kxprov_api::{OperationalMode, Profile, SetModeParams};
-use kxprov_api::{DAEMON_SOCKET, DATA_DIR, TOKENS_JSON};
 use kxtd1232::error::NotAllowed;
 use kxtd1232::{build_plan, field_patch, Client, Error, FieldKind, Granularity};
 use kxtd1232_sim::{SimPbx, SimTransport, PLACEHOLDER_PASSWORD};
@@ -362,7 +362,7 @@ fn sim_mark(cli: &Cli) -> Result<(), CliError> {
     };
     match cmd {
         SimMarkCommand::Status { data_dir } => {
-            let path = data_dir.join("sim-mark.json");
+            let path = sim_passed_path(data_dir);
             if !path.exists() {
                 println!("marked=false build={}", env!("KXPROV_BUILD_HASH"));
                 return Ok(());
@@ -384,7 +384,7 @@ fn sim_mark(cli: &Cli) -> Result<(), CliError> {
                 use nix::unistd::geteuid;
                 if !geteuid().is_root() {
                     return Err(CliError::Usage(
-                        "sim-mark write requires root (root-owned sim-mark.json)".into(),
+                        "sim-mark write requires root (root-owned sim-passed.json)".into(),
                     ));
                 }
             }
@@ -415,7 +415,7 @@ fn sim_mark(cli: &Cli) -> Result<(), CliError> {
             });
             let bytes =
                 serde_json::to_vec_pretty(&mark).map_err(|e| CliError::Usage(e.to_string()))?;
-            let path = data_dir.join("sim-mark.json");
+            let path = sim_passed_path(data_dir);
             std::fs::write(&path, bytes).map_err(|e| CliError::Usage(e.to_string()))?;
             #[cfg(unix)]
             {
