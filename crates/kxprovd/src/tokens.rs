@@ -7,6 +7,8 @@ use kxprov_api::{
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+#[cfg(feature = "test-util")]
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, Weak};
 use std::time::{Duration, Instant};
 use thiserror::Error;
@@ -73,6 +75,8 @@ struct ReloadPlan {
     outage_start: Option<Instant>,
     transient_done: bool,
     failed_fp: Option<DiskFingerprint>,
+    #[cfg(feature = "test-util")]
+    probe_hang: Arc<AtomicBool>,
 }
 
 #[derive(Clone)]
@@ -100,6 +104,8 @@ pub struct TokenStore {
     inner: Arc<Mutex<TokenState>>,
     job_queue: Arc<Mutex<Option<Weak<JobQueue>>>>,
     transient_flight: Arc<TransientReloadFlight>,
+    #[cfg(feature = "test-util")]
+    reload_probe_hang: Arc<AtomicBool>,
 }
 
 struct TokenRefreshDelta {
@@ -114,6 +120,8 @@ impl Clone for TokenStore {
             inner: Arc::clone(&self.inner),
             job_queue: Arc::clone(&self.job_queue),
             transient_flight: Arc::clone(&self.transient_flight),
+            #[cfg(feature = "test-util")]
+            reload_probe_hang: Arc::clone(&self.reload_probe_hang),
         }
     }
 }
@@ -163,15 +171,26 @@ impl TokenStore {
             .enforce_secure_reload = enforce;
     }
 
+    #[cfg(feature = "test-util")]
+    pub fn set_reload_probe_hang_for_test(&self, hang: bool) {
+        self.reload_probe_hang.store(hang, Ordering::Relaxed);
+    }
+
+    fn wrap_state(state: TokenState) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(state)),
+            job_queue: Arc::new(Mutex::new(None)),
+            transient_flight: Arc::new(TransientReloadFlight::new()),
+            #[cfg(feature = "test-util")]
+            reload_probe_hang: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
     fn load_unchecked(path: PathBuf) -> Result<Self, TokenError> {
         let mut state = Self::read_state(&path)?;
         state.enforce_secure_reload = true;
         Self::validate_file(&state.entries, &state.approver_token_id)?;
-        Ok(Self {
-            inner: Arc::new(Mutex::new(state)),
-            job_queue: Arc::new(Mutex::new(None)),
-            transient_flight: Arc::new(TransientReloadFlight::new()),
-        })
+        Ok(Self::wrap_state(state))
     }
 
     #[cfg(feature = "test-util")]
@@ -179,11 +198,7 @@ impl TokenStore {
         let mut state = Self::read_state(&path)?;
         state.enforce_secure_reload = false;
         Self::validate_file(&state.entries, &state.approver_token_id)?;
-        Ok(Self {
-            inner: Arc::new(Mutex::new(state)),
-            job_queue: Arc::new(Mutex::new(None)),
-            transient_flight: Arc::new(TransientReloadFlight::new()),
-        })
+        Ok(Self::wrap_state(state))
     }
 
     pub fn attach_job_queue(&self, queue: Weak<JobQueue>) {
@@ -273,31 +288,64 @@ impl TokenStore {
         flight.reset();
     }
 
+    fn timed_out_disk_probe() -> DiskProbe {
+        DiskProbe::StillBad {
+            fp: DiskFingerprint::Unreadable,
+            outage_start: Instant::now() - Self::RELOAD_GRACE,
+        }
+    }
+
     fn run_disk_probe_off_thread(plan: ReloadPlan) -> DiskProbe {
+        let deadline = Instant::now() + Self::RELOAD_GRACE;
         let (tx, rx) = std::sync::mpsc::sync_channel(1);
-        let worker = std::thread::Builder::new()
+        std::thread::Builder::new()
             .name("token-reload-probe".into())
             .spawn(move || {
                 let _ = tx.send(Self::execute_disk_probe(&plan));
             })
             .expect("spawn token reload probe thread");
-        let probe = rx.recv().expect("token reload probe result");
-        let _ = worker.join();
-        probe
+        let timeout = deadline
+            .saturating_duration_since(Instant::now())
+            .saturating_add(Duration::from_millis(300));
+        if timeout.is_zero() {
+            return Self::timed_out_disk_probe();
+        }
+        match rx.recv_timeout(timeout) {
+            Ok(probe) => probe,
+            Err(_) => Self::timed_out_disk_probe(),
+        }
     }
 
     fn coordinated_transient_probe(flight: &TransientReloadFlight, plan: ReloadPlan) -> DiskProbe {
+        let wait_until = plan.outage_start.unwrap_or_else(Instant::now) + Self::RELOAD_GRACE;
         let mut guard = flight.inner.lock().expect("transient flight lock");
         loop {
             match &*guard {
                 TransientFlightState::Done(probe) => return probe.clone(),
                 TransientFlightState::Running => {
-                    guard = flight.cv.wait(guard).expect("transient flight wait");
+                    let remaining = wait_until.saturating_duration_since(Instant::now());
+                    if remaining.is_zero() {
+                        let probe = Self::timed_out_disk_probe();
+                        *guard = TransientFlightState::Done(probe.clone());
+                        flight.cv.notify_all();
+                        return probe;
+                    }
+                    let (g, wait) = flight
+                        .cv
+                        .wait_timeout(guard, remaining)
+                        .expect("transient flight wait");
+                    guard = g;
+                    if wait.timed_out() && matches!(*guard, TransientFlightState::Running) {
+                        let probe = Self::timed_out_disk_probe();
+                        *guard = TransientFlightState::Done(probe.clone());
+                        flight.cv.notify_all();
+                        return probe;
+                    }
                 }
                 TransientFlightState::Idle => {
                     *guard = TransientFlightState::Running;
                     drop(guard);
-                    let probe = Self::run_disk_probe_off_thread(plan);
+                    let probe = Self::run_disk_probe_off_thread(plan.clone());
                     let mut guard = flight.inner.lock().expect("transient flight lock");
                     *guard = TransientFlightState::Done(probe.clone());
                     flight.cv.notify_all();
@@ -312,6 +360,10 @@ impl TokenStore {
     }
 
     fn execute_disk_probe(plan: &ReloadPlan) -> DiskProbe {
+        #[cfg(feature = "test-util")]
+        while plan.probe_hang.load(Ordering::Relaxed) {
+            std::thread::sleep(Duration::from_millis(50));
+        }
         if plan.transient_done {
             if let Some(fp) = plan.failed_fp {
                 if Self::fingerprint_unchanged(fp, &plan.path) {
@@ -488,6 +540,8 @@ impl TokenStore {
                 outage_start: state.reload_failure_since,
                 transient_done: state.reload_transient_done,
                 failed_fp: state.reload_failed_disk_fingerprint,
+                #[cfg(feature = "test-util")]
+                probe_hang: Arc::clone(&self.reload_probe_hang),
             }
         };
 
@@ -649,11 +703,7 @@ impl TokenStore {
             reload_transient_done: false,
             reload_failed_disk_fingerprint: None,
         };
-        Self {
-            inner: Arc::new(Mutex::new(state)),
-            job_queue: Arc::new(Mutex::new(None)),
-            transient_flight: Arc::new(TransientReloadFlight::new()),
-        }
+        Self::wrap_state(state)
     }
 
     pub fn is_revoked(&self, token_id: &TokenId) -> Result<bool, TokenError> {
@@ -790,6 +840,33 @@ mod tests {
             store.verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan),
             Err(TokenError::StoreUnavailable)
         ));
+    }
+
+    #[test]
+    fn reload_hung_probe_fails_closed_and_recovers() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("tokens.json");
+        write_tokens_revoking_writer(&path, false);
+        let store = TokenStore::load_insecure(path.clone()).expect("load");
+        store
+            .verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan)
+            .expect("warm");
+        std::fs::write(&path, b"{bad").unwrap();
+        store.set_reload_probe_hang_for_test(true);
+        let wall = Instant::now();
+        assert!(matches!(
+            store.verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan),
+            Err(TokenError::StoreUnavailable)
+        ));
+        assert!(
+            wall.elapsed() <= Duration::from_secs(2) + Duration::from_millis(400),
+            "hung probe must fail closed within the reload window"
+        );
+        store.set_reload_probe_hang_for_test(false);
+        write_tokens_revoking_writer(&path, false);
+        store
+            .verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan)
+            .expect("reload recovers after hung probe");
     }
 
     #[test]

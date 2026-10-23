@@ -19,7 +19,9 @@ pub enum EpochError {
 }
 
 #[cfg(feature = "test-util")]
-static EPOCH_SECURE_CHECKS: AtomicBool = AtomicBool::new(false);
+thread_local! {
+    static EPOCH_SECURE_CHECKS: AtomicBool = const { AtomicBool::new(false) };
+}
 
 pub fn epoch_dir(provision_root: &Path) -> PathBuf {
     provision_root.join(EPOCH_DIR_NAME)
@@ -27,12 +29,31 @@ pub fn epoch_dir(provision_root: &Path) -> PathBuf {
 
 #[cfg(feature = "test-util")]
 pub fn set_epoch_secure_checks_for_test(enforce: bool) {
-    EPOCH_SECURE_CHECKS.store(enforce, Ordering::Relaxed);
+    EPOCH_SECURE_CHECKS.with(|c| c.store(enforce, Ordering::Relaxed));
+}
+
+/// Enables epoch secure checks for the rest of this scope (test-util only).
+#[cfg(feature = "test-util")]
+pub struct EpochSecureChecksGuard(());
+
+#[cfg(feature = "test-util")]
+impl EpochSecureChecksGuard {
+    pub fn enable() -> Self {
+        set_epoch_secure_checks_for_test(true);
+        Self(())
+    }
+}
+
+#[cfg(feature = "test-util")]
+impl Drop for EpochSecureChecksGuard {
+    fn drop(&mut self) {
+        set_epoch_secure_checks_for_test(false);
+    }
 }
 
 fn secure_checks_enabled() -> bool {
     #[cfg(feature = "test-util")]
-    if EPOCH_SECURE_CHECKS.load(Ordering::Relaxed) {
+    if EPOCH_SECURE_CHECKS.with(|c| c.load(Ordering::Relaxed)) {
         return true;
     }
     #[cfg(unix)]
@@ -48,7 +69,7 @@ fn secure_checks_enabled() -> bool {
 #[cfg(unix)]
 fn required_owner_uid() -> u32 {
     #[cfg(feature = "test-util")]
-    if EPOCH_SECURE_CHECKS.load(Ordering::Relaxed) {
+    if EPOCH_SECURE_CHECKS.with(|c| c.load(Ordering::Relaxed)) {
         return nix::unistd::geteuid().as_raw();
     }
     0
@@ -136,9 +157,17 @@ fn check_counter_secure(_path: &Path) -> Result<(), EpochError> {
     Ok(())
 }
 
-pub fn read_counter(provision_root: &Path, profile: Profile) -> Result<Option<u64>, EpochError> {
+fn check_epoch_dir_if_present(provision_root: &Path) -> Result<(), EpochError> {
     let dir = epoch_dir(provision_root);
-    check_epoch_dir_secure(&dir)?;
+    match dir.symlink_metadata() {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(EpochError::Io(e)),
+        Ok(_) => check_epoch_dir_secure(&dir),
+    }
+}
+
+pub fn read_counter(provision_root: &Path, profile: Profile) -> Result<Option<u64>, EpochError> {
+    check_epoch_dir_if_present(provision_root)?;
     let path = profile_epoch_counter_path(provision_root, profile);
     check_counter_secure(&path)?;
     if !path.exists() {
@@ -172,8 +201,16 @@ mod tests {
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
     #[test]
+    fn read_treats_missing_epoch_dir_as_no_counter_yet() {
+        let _secure = EpochSecureChecksGuard::enable();
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(!epoch_dir(tmp.path()).exists());
+        assert_eq!(read_counter(tmp.path(), Profile::Prod).unwrap(), None);
+    }
+
+    #[test]
     fn fresh_install_creates_epoch_dir_mode_0700() {
-        set_epoch_secure_checks_for_test(true);
+        let _secure = EpochSecureChecksGuard::enable();
         let tmp = tempfile::tempdir().unwrap();
         assert!(!epoch_dir(tmp.path()).exists());
         write_counter(tmp.path(), Profile::Sim, 1).unwrap();
@@ -185,7 +222,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn read_rejects_world_writable_epoch_dir() {
-        set_epoch_secure_checks_for_test(true);
+        let _secure = EpochSecureChecksGuard::enable();
         let tmp = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(tmp.path()).unwrap();
         let dir = epoch_dir(tmp.path());
@@ -200,7 +237,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn read_rejects_symlink_epoch_dir() {
-        set_epoch_secure_checks_for_test(true);
+        let _secure = EpochSecureChecksGuard::enable();
         let tmp = tempfile::tempdir().unwrap();
         let real = tmp.path().join("epoch-real");
         std::fs::create_dir(&real).unwrap();
