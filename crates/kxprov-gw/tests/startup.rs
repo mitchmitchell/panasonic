@@ -54,12 +54,19 @@ fn sample_config(dir: &TempDir) -> GatewayConfig {
     let tokens_path = dir.path().join("tokens.toml");
     write_admin_hash(&admin_path);
     write_tokens(&tokens_path);
+    let runtime = dir.path().join("run");
+    std::fs::create_dir_all(&runtime).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o750)).unwrap();
+    }
     GatewayConfig {
         bind: Some("127.0.0.1:0".into()),
         lan_ip: None,
         serve_hostname: None,
         web_https_port: 8443,
-        web_serve_socket: dir.path().join("web-serve.sock"),
+        web_serve_socket: runtime.join("web-serve.sock"),
         serve_socket_group: None,
         mcp_tailnet_bind: "127.0.0.1:0".into(),
         mcp_tokens_path: tokens_path.clone(),

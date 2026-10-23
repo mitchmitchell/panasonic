@@ -9,6 +9,7 @@ etc_dir="$run_dir/etc"
 secrets_dir="$run_dir/secrets"
 tls_dir="$run_dir/tls"
 mkdir -p "$data_dir"/{plans,backups,goliath,.epoch} "$etc_dir" "$secrets_dir" "$tls_dir"
+chmod 0750 "$run_dir"
 
 uid="$(id -u)"
 gid="$(id -g)"

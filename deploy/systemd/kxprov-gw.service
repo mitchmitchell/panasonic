@@ -1,0 +1,20 @@
+[Unit]
+Description=kx-provision gateway (web, MCP, Tailscale Serve Unix)
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+RuntimeDirectory=kx-provision
+RuntimeDirectoryMode=0750
+EnvironmentFile=-/etc/kx-provision/gateway.env
+ExecStart=/usr/bin/kxprov-gw --config /etc/kx-provision/gateway.toml
+Restart=on-failure
+RestartSec=5
+
+# Gateway binds Serve Unix socket as root; drops only after listeners are up.
+User=root
+Group=root
+
+[Install]
+WantedBy=multi-user.target

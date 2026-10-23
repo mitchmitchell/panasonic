@@ -5,6 +5,19 @@ use kxprov_web::login_rate_ip_key;
 use std::net::SocketAddr;
 use tokio::net::{TcpListener, TcpStream, UnixListener, UnixStream};
 
+fn prep_runtime_dir(dir: &std::path::Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o750)).unwrap();
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::create_dir_all(dir).unwrap();
+    }
+}
+
 async fn accept_unix_pair(path: &std::path::Path) -> (UnixStream, UnixStream) {
     let listener = UnixListener::bind(path).unwrap();
     let client = UnixStream::connect(path).await.unwrap();
@@ -71,9 +84,10 @@ async fn tcp_loopback_connection_never_trusts_xff() {
 }
 
 #[tokio::test]
-async fn web_serve_bind_sets_socket_mode_0660() {
+async fn web_serve_bind_sets_runtime_dir_0750_and_socket_mode_0660() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("web-serve.sock");
+    let runtime = dir.path().join("run");
+    let path = runtime.join("web-serve.sock");
     let _listener = kxprov_gw::serve_peer::bind_web_serve_listener(&path, None)
         .await
         .unwrap();
@@ -81,10 +95,43 @@ async fn web_serve_bind_sets_socket_mode_0660() {
     {
         use std::os::unix::fs::PermissionsExt;
         assert_eq!(
+            std::fs::metadata(&runtime).unwrap().permissions().mode() & 0o777,
+            0o750
+        );
+        assert_eq!(
             std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
             0o660
         );
     }
+}
+
+#[tokio::test]
+async fn bind_fails_when_serve_socket_group_missing() {
+    let dir = tempfile::tempdir().unwrap();
+    let runtime = dir.path().join("run");
+    prep_runtime_dir(&runtime);
+    let path = runtime.join("web-serve.sock");
+    let err = kxprov_gw::serve_peer::bind_web_serve_listener(
+        &path,
+        Some("nonexistent-kxprov-group-name"),
+    )
+    .await
+    .unwrap_err();
+    assert!(err.to_string().contains("not found"), "{err}");
+}
+
+#[tokio::test]
+async fn bind_rejects_symlink_at_socket_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let runtime = dir.path().join("run");
+    prep_runtime_dir(&runtime);
+    let real = runtime.join("real.sock");
+    let link = runtime.join("web-serve.sock");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let err = kxprov_gw::serve_peer::bind_web_serve_listener(&link, None)
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("symlink"), "{err}");
 }
 
 #[test]

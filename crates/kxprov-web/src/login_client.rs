@@ -22,7 +22,19 @@ impl WebConnectInfo {
     }
 }
 
-/// Last non-empty hop in `X-Forwarded-For` (the hop appended by the trusted proxy).
+/// Tailscale Serve identity header (set by tailscaled when proxying tailnet traffic).
+pub fn tailscale_user_login(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get("Tailscale-User-Login")
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+}
+
+/// Last non-empty hop in `X-Forwarded-For`.
+///
+/// Tailscale Serve **sets** (replaces) this header with the observed client address rather than
+/// appending to a client-supplied chain; with a single hop, first and last are equivalent.
 pub fn x_forwarded_for_last(headers: &HeaderMap) -> Option<IpAddr> {
     let v = headers.get("x-forwarded-for")?.to_str().ok()?;
     let last = v
@@ -33,7 +45,7 @@ pub fn x_forwarded_for_last(headers: &HeaderMap) -> Option<IpAddr> {
     last.parse().ok()
 }
 
-/// Key for hard IP login backoff (`ip:…` prefix matches [`LoginRateLimiter`](crate::LoginRateLimiter)).
+/// Key for hard IP login backoff (`ip:…` / `ts-login:…` prefixes).
 pub fn login_rate_ip_key(
     headers: &HeaderMap,
     peer: SocketAddr,
@@ -43,9 +55,11 @@ pub fn login_rate_ip_key(
     if !trust_x_forwarded_for {
         return format!("ip:{}", peer.ip());
     }
-    let xff_last = x_forwarded_for_last(headers).map(|ip| ip.to_string());
     if serve_proxy_trusted {
-        if let Some(ip) = xff_last {
+        if let Some(login) = tailscale_user_login(headers) {
+            return format!("ts-login:{login}");
+        }
+        if let Some(ip) = x_forwarded_for_last(headers) {
             return format!("ip:{ip}");
         }
         return format!("ip:{}", peer.ip());
@@ -53,7 +67,7 @@ pub fn login_rate_ip_key(
     if peer.ip().is_loopback() {
         return format!("ip:{}", peer.ip());
     }
-    if let Some(ip) = xff_last {
+    if let Some(ip) = x_forwarded_for_last(headers) {
         return format!("ip:{ip}");
     }
     format!("ip:{}", peer.ip())
@@ -65,7 +79,19 @@ mod tests {
     use axum::http::HeaderMap;
 
     #[test]
-    fn uses_last_xff_hop_when_serve_proxy_trusted() {
+    fn trusted_serve_prefers_tailscale_user_login_over_xff() {
+        let mut headers = HeaderMap::new();
+        headers.insert("Tailscale-User-Login", "alice@example.com".parse().unwrap());
+        headers.insert("x-forwarded-for", "203.0.113.5".parse().unwrap());
+        let peer = "127.0.0.1:8080".parse().unwrap();
+        assert_eq!(
+            login_rate_ip_key(&headers, peer, true, true),
+            "ts-login:alice@example.com"
+        );
+    }
+
+    #[test]
+    fn uses_last_xff_hop_when_serve_proxy_trusted_without_identity_header() {
         let mut headers = HeaderMap::new();
         headers.insert(
             "x-forwarded-for",

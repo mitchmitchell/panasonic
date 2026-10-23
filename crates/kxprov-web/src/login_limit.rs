@@ -16,6 +16,8 @@ pub enum LoginGateError {
     AccountQueueFull,
     /// Waited too long for the account verify slot (not an auth failure).
     AccountQueueTimeout,
+    /// Account verify slot is farther out than [`MAX_SOFT_PACE`] (not an auth failure).
+    AccountPaceRejected,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -101,14 +103,30 @@ impl LoginRateLimiter {
         let soft = if privileged {
             Duration::ZERO
         } else {
-            let soft = {
+            let reserve = {
                 let _slot = verify.lock().await;
                 self.reserve_account_soft_delay(account_key).await
             };
-            if soft > Duration::ZERO {
-                tokio::time::sleep(soft.min(MAX_SOFT_PACE)).await;
+            match reserve {
+                Err(()) => {
+                    if !bypass_waiter_cap {
+                        let mut waiters = self.account_waiters.lock().await;
+                        if let Some(n) = waiters.get_mut(account_key) {
+                            *n = n.saturating_sub(1);
+                            if *n == 0 {
+                                waiters.remove(account_key);
+                            }
+                        }
+                    }
+                    return Err(LoginGateError::AccountPaceRejected);
+                }
+                Ok(wait) => {
+                    if wait > Duration::ZERO {
+                        tokio::time::sleep(wait).await;
+                    }
+                    wait
+                }
             }
-            soft
         };
 
         let lock_result = tokio::time::timeout(MAX_ACCOUNT_QUEUE_WAIT, verify.lock()).await;
@@ -152,21 +170,21 @@ impl LoginRateLimiter {
             .clone()
     }
 
-    async fn reserve_account_soft_delay(&self, account_key: &str) -> Duration {
-        const SLOT_TAIL: Duration = Duration::from_millis(1);
+    async fn reserve_account_soft_delay(&self, account_key: &str) -> Result<Duration, ()> {
+        let pace_key = format!("pace:{account_key}");
         let mut map = self.by_key.lock().await;
         let now = Instant::now();
-        let entry = map.entry(account_key.to_string()).or_insert(Entry {
+        let entry = map.entry(pace_key).or_insert(Entry {
             failures: 0,
             next_allowed: now,
         });
         let scheduled = now.max(entry.next_allowed);
-        let mut wait = scheduled.saturating_duration_since(now);
+        let wait = scheduled.saturating_duration_since(now);
         if wait > MAX_SOFT_PACE {
-            wait = MAX_SOFT_PACE;
+            return Err(());
         }
-        entry.next_allowed = scheduled + wait + SLOT_TAIL;
-        wait
+        entry.next_allowed = scheduled + MAX_SOFT_PACE;
+        Ok(wait)
     }
 
     pub async fn delay_before_attempt(&self, account_key: &str, ip_key: &str) -> Duration {
@@ -454,6 +472,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ten_concurrent_clean_ips_only_one_or_two_verify_within_two_seconds() {
+        let limiter = Arc::new(LoginRateLimiter::new(
+            Duration::from_secs(2),
+            Duration::from_secs(30),
+            Duration::from_secs(300),
+        ));
+        let n = 10;
+        let barrier = Arc::new(tokio::sync::Barrier::new(n));
+        let verified = Arc::new(AtomicU32::new(0));
+        let rejected = Arc::new(AtomicU32::new(0));
+        let mut handles = Vec::new();
+        for i in 0..n {
+            let limiter = Arc::clone(&limiter);
+            let barrier = Arc::clone(&barrier);
+            let verified = Arc::clone(&verified);
+            let rejected = Arc::clone(&rejected);
+            let ip = format!("ip:clean-{i}");
+            handles.push(tokio::spawn(async move {
+                barrier.wait().await;
+                match limiter
+                    .enter_account_login("acct:admin", &ip, None, || async {
+                        verified.fetch_add(1, Ordering::SeqCst);
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                    })
+                    .await
+                {
+                    Ok(()) => {}
+                    Err(LoginGateError::AccountPaceRejected) => {
+                        rejected.fetch_add(1, Ordering::SeqCst);
+                    }
+                    Err(e) => panic!("unexpected gate error: {e:?}"),
+                }
+            }));
+        }
+        let started = Instant::now();
+        for h in handles {
+            h.await.unwrap();
+        }
+        assert!(
+            started.elapsed() <= Duration::from_secs(2) + Duration::from_millis(500),
+            "burst took {:?}",
+            started.elapsed()
+        );
+        let ok = verified.load(Ordering::SeqCst);
+        let deny = rejected.load(Ordering::SeqCst);
+        assert!(
+            ok >= 1 && ok <= 2,
+            "expected 1-2 verifies, got {ok} (rejected {deny})"
+        );
+        assert!(deny >= 8, "expected most attempts rejected, got {deny}");
+    }
+
+    #[tokio::test]
     async fn parallel_login_attempts_serialize_account_pacing() {
         let limiter = Arc::new(LoginRateLimiter::new(
             Duration::from_millis(80),
@@ -461,29 +532,20 @@ mod tests {
             Duration::from_secs(300),
         ));
         limiter.record_failure("acct:admin", "ip:attacker").await;
-        let n = 3;
-        let barrier = Arc::new(tokio::sync::Barrier::new(n));
-        let order = Arc::new(AtomicU32::new(0));
-        let mut handles = Vec::new();
-        for _ in 0..n {
-            let limiter = Arc::clone(&limiter);
-            let barrier = Arc::clone(&barrier);
-            let order = Arc::clone(&order);
-            handles.push(tokio::spawn(async move {
-                barrier.wait().await;
-                limiter
-                    .enter_account_login("acct:admin", "ip:clean", None, || async {
-                        order.fetch_add(1, Ordering::SeqCst)
-                    })
-                    .await
-                    .expect("enter")
-            }));
-        }
-        let mut seq = Vec::new();
-        for h in handles {
-            seq.push(h.await.unwrap());
-        }
-        seq.sort();
-        assert_eq!(seq, (0..n as u32).collect::<Vec<_>>());
+        let started = Instant::now();
+        limiter
+            .enter_account_login("acct:admin", "ip:clean-0", None, || async {})
+            .await
+            .expect("first slot");
+        limiter
+            .enter_account_login("acct:admin", "ip:clean-1", None, || async {})
+            .await
+            .expect("second slot after 2s pacing");
+        assert!(started.elapsed() >= Duration::from_secs(2));
+        limiter
+            .enter_account_login("acct:admin", "ip:clean-2", None, || async {})
+            .await
+            .expect("third slot after another 2s pacing");
+        assert!(started.elapsed() >= Duration::from_secs(4));
     }
 }
