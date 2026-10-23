@@ -30,6 +30,7 @@ async fn test_apply_without_backup_when_not_prod() {
         tmp.path().join("mode.json"),
         serde_json::to_vec_pretty(&ModeFileBody {
             mode: OperationalMode::Testing,
+            counter: 0,
         })
         .unwrap(),
     )
@@ -79,6 +80,7 @@ async fn testing_to_production_mismatch_blocks_writes() {
         tmp.path().join("mode.json"),
         serde_json::to_vec_pretty(&ModeFileBody {
             mode: OperationalMode::Testing,
+            counter: 0,
         })
         .unwrap(),
     )

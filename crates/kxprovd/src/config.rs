@@ -38,6 +38,7 @@ pub struct Config {
 
 #[derive(Debug, Deserialize)]
 struct EtcConfigFile {
+    #[serde(default = "default_data_dir")]
     data_dir: PathBuf,
     #[serde(default = "default_socket")]
     socket_path: PathBuf,
@@ -75,16 +76,20 @@ enum TransportKindWire {
     Serial,
 }
 
+fn default_data_dir() -> PathBuf {
+    PathBuf::from("/var/lib/kx-provision")
+}
+
 fn default_socket() -> PathBuf {
-    PathBuf::from("/var/lib/kxprov/kxprovd.sock")
+    PathBuf::from("/run/kx-provision/kxprovd.sock")
 }
 
 fn default_tokens_path() -> PathBuf {
-    PathBuf::from("/var/lib/kxprov/tokens.json")
+    PathBuf::from("/var/lib/kx-provision/tokens.json")
 }
 
 fn default_goliath() -> PathBuf {
-    PathBuf::from("/var/lib/kxprov/goliath")
+    PathBuf::from("/var/lib/kx-provision/goliath")
 }
 
 fn default_serial() -> PathBuf {

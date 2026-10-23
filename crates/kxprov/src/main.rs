@@ -84,7 +84,7 @@ enum TokenCommand {
     Rotate {
         #[arg(long)]
         id: String,
-        #[arg(long, default_value = "/var/lib/kxprov/tokens.json")]
+        #[arg(long, default_value = "/var/lib/kx-provision/tokens.json")]
         tokens_path: PathBuf,
     },
 }
@@ -441,6 +441,8 @@ fn token_admin(cli: &Cli) -> Result<(), CliError> {
             let bearer = hex::encode(secret_bytes);
             entry.secret_hash = kxprov_api::hash_bearer_secret(&bearer);
             entry.revoked = false;
+            kxprov_api::validate_tokens_file(&file)
+                .map_err(|e| CliError::Usage(format!("{e:?}")))?;
             let data =
                 serde_json::to_vec_pretty(&file).map_err(|e| CliError::Usage(e.to_string()))?;
             atomic_write_tokens(tokens_path, &data).map_err(|e| CliError::Usage(e.to_string()))?;

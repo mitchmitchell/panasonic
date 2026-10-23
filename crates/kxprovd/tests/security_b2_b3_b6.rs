@@ -24,6 +24,7 @@ async fn b2_stale_testing_mode_backup_ignored_for_prod_transition() {
         tmp.path().join("mode.json"),
         serde_json::to_vec_pretty(&ModeFileBody {
             mode: OperationalMode::Testing,
+            counter: 0,
         })
         .unwrap(),
     )

@@ -1,6 +1,9 @@
 //! Daemon token store: verify bearer secrets (hashed on disk only).
 
-use kxprov_api::{hash_bearer_secret, Scope, TokenEntry, TokenId, TokensFile};
+use kxprov_api::{
+    hash_bearer_secret, validate_tokens_file, Scope, TokenEntry, TokenId, TokenValidationError,
+    TokensFile,
+};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, Weak};
@@ -166,6 +169,15 @@ impl TokenStore {
                 "exactly one approver token must match approver_token_id".into(),
             ));
         }
+        validate_tokens_file(&TokensFile {
+            approver_token_id: approver_token_id.clone(),
+            tokens: entries.to_vec(),
+        })
+        .map_err(|e| match e {
+            TokenValidationError::ApproverMustNotHoldPlanOrWrite => {
+                TokenError::Invalid("approver token must not include Plan or Write scope".into())
+            }
+        })?;
         let mut ids = std::collections::HashSet::new();
         let mut hashes = std::collections::HashSet::new();
         for t in entries {

@@ -1,8 +1,6 @@
-use kxprov_api::{
-    DiffHash, FieldKindWire, PlanChangeParams, PlanId, ReadFieldsParams, TokenId,
-    TOKEN_JOBS_PER_MINUTE, TOKEN_QUEUE_DEPTH_MAX,
-};
-use std::collections::{HashMap, HashSet, VecDeque};
+use crate::rate_limit::{RateLimitError, TokenRateState};
+use kxprov_api::{DiffHash, FieldKindWire, PlanChangeParams, PlanId, ReadFieldsParams, TokenId};
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex as StdMutex;
 use tokio::sync::{mpsc, oneshot, Mutex};
@@ -62,12 +60,6 @@ pub enum JobOutcome {
     },
 }
 
-#[derive(Default)]
-struct TokenRateState {
-    active: u32,
-    start_times_ms: VecDeque<u64>,
-}
-
 pub struct JobQueue {
     tx: mpsc::Sender<JobRequest>,
     pub jobs: Mutex<HashMap<String, JobState>>,
@@ -118,18 +110,9 @@ impl JobQueue {
         if let Some(ref tid) = token_id {
             let mut rates = self.token_rates.lock().await;
             let st = rates.entry(tid.as_str().to_string()).or_default();
-            if st.active >= TOKEN_QUEUE_DEPTH_MAX {
-                return Err(QueueError::RateLimit);
-            }
-            let minute_ago = now_ms.saturating_sub(60_000);
-            while st.start_times_ms.front().is_some_and(|t| *t < minute_ago) {
-                st.start_times_ms.pop_front();
-            }
-            if st.start_times_ms.len() as u32 >= TOKEN_JOBS_PER_MINUTE {
-                return Err(QueueError::RateLimit);
-            }
-            st.active += 1;
-            st.start_times_ms.push_back(now_ms);
+            st.try_reserve(now_ms).map_err(|e| match e {
+                RateLimitError::QueueDepth | RateLimitError::JobsPerMinute => QueueError::RateLimit,
+            })?;
         }
         self.jobs.lock().await.insert(id.clone(), JobState::Queued);
         if self
@@ -146,8 +129,7 @@ impl JobQueue {
             if let Some(ref tid) = token_id {
                 let mut rates = self.token_rates.lock().await;
                 if let Some(st) = rates.get_mut(tid.as_str()) {
-                    st.active = st.active.saturating_sub(1);
-                    let _ = st.start_times_ms.pop_back();
+                    st.rollback_reserve();
                 }
             }
             self.jobs.lock().await.remove(&id);
@@ -160,7 +142,7 @@ impl JobQueue {
         if let Some(tid) = token_id {
             let mut rates = self.token_rates.lock().await;
             if let Some(st) = rates.get_mut(tid.as_str()) {
-                st.active = st.active.saturating_sub(1);
+                st.complete();
             }
         }
     }

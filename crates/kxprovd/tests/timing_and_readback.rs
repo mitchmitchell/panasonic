@@ -85,6 +85,7 @@ async fn daemon_apply_on_prod_profile_readback_via_read_fields() {
         tmp.path().join("mode.json"),
         serde_json::to_vec_pretty(&ModeFileBody {
             mode: OperationalMode::Production,
+            counter: 0,
         })
         .unwrap(),
     )
@@ -93,6 +94,7 @@ async fn daemon_apply_on_prod_profile_readback_via_read_fields() {
         tmp.path().join("profile.json"),
         serde_json::to_vec_pretty(&ProfileFileBody {
             profile: Profile::Prod,
+            counter: 0,
         })
         .unwrap(),
     )
