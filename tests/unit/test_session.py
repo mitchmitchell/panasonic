@@ -41,3 +41,12 @@ def test_terminated_overlong_line_fails():
     s = Login("0000")
     s.feed(bytes([XON]) + b"A" * (MAX_LINE + 1) + b"\r\n")
     assert s.state is State.FAILED and "longer than" in (s.failure or "")
+
+
+def test_max_length_line_with_crlf_is_accepted():
+    # Tester low: a MAX_LINE-byte line plus CRLF is within the cap; the CR is a terminator.
+    from panasonic.kxtd1232.session import MAX_LINE, XON, Login, State
+
+    s = Login("0000")
+    s.feed(bytes([XON]) + b"A" * MAX_LINE + b"\r\n")
+    assert s.state is not State.FAILED

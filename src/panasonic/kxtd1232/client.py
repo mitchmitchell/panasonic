@@ -74,6 +74,8 @@ class Client:
         busy_limit: float = BUSY_LIMIT_S,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
+        if not isinstance(getattr(transport, "instant", None), bool):
+            raise TypeError("transport must declare a bool `instant` attribute")
         self.t = transport
         self.enc = encoder or Encoder()
         self.busy_limit = busy_limit

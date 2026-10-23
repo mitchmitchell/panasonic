@@ -59,6 +59,7 @@ class Login:
         self._buf += data
         while b"\n" in self._buf and self.state not in (State.BINARY, State.FAILED):
             line, self._buf = self._buf.split(b"\n", 1)
+            line = line.removesuffix(b"\r")  # CRLF: the CR is a terminator, not content
             if len(line) > MAX_LINE:
                 self._fail(f"text line longer than {MAX_LINE} bytes")
                 break

@@ -61,3 +61,14 @@ def test_plan_errors_are_plan_error():
         build_plan(0x25, 16, base, [], granularity="whole")
     with pytest.raises(PlanError):
         build_plan(0x24, 6, b"\x00" * 6, [Patch(0x24, 4, b"\x00\x00\x00")])
+
+
+def test_patch_outside_image_reports_offset_length_and_size():
+    # Claude PRRT_kwDOVUJjDM6vp7Qj: expected vs actual on the error.
+    from panasonic.kxtd1232.writeplan import PlanError
+
+    base = bytes(12)
+    with pytest.raises(PlanError) as ei:
+        build_plan(0x24, 6, base, [Patch(0x24, 10, b"\x00\x00\x00\x00")])
+    e = ei.value
+    assert (e.table, e.offset, e.length, e.size) == (0x24, 10, 4, 12)

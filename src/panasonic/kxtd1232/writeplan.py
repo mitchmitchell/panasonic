@@ -15,11 +15,22 @@ from .tables import check_writable
 
 class PlanError(ValueError):
     """A write plan cannot be built. Distinct from field-decode ``ValueError``s; carries
-    the table and, for size failures, the chunk size in bytes."""
+    the table, for size failures the chunk size in bytes, and for a patch outside the
+    image the patch ``offset``/``length`` and the image ``size``."""
 
-    def __init__(self, msg: str, table: int, chunk: int | None = None) -> None:
+    def __init__(
+        self,
+        msg: str,
+        table: int,
+        chunk: int | None = None,
+        *,
+        offset: int | None = None,
+        length: int | None = None,
+        size: int | None = None,
+    ) -> None:
         super().__init__(msg)
         self.table, self.chunk = table, chunk
+        self.offset, self.length, self.size = offset, length, size
 
 
 class Granularity(StrEnum):
@@ -92,7 +103,14 @@ def build_plan(
         if p.table != table:
             raise PlanError("patch for another table", table)
         if p.offset < 0 or p.offset + len(p.data) > len(base):
-            raise PlanError("patch outside table image", table)
+            raise PlanError(
+                f"patch outside table image: offset {p.offset} + length {len(p.data)}"
+                f" > image size {len(base)}",
+                table,
+                offset=p.offset,
+                length=len(p.data),
+                size=len(base),
+            )
         new[p.offset : p.offset + len(p.data)] = p.data
     per = records_per_chunk or max(1, MAX_WRITE_PAYLOAD // record_size)
     chunk = per * record_size

@@ -95,5 +95,6 @@ def test_transport_must_declare_instant():
         def close(self):
             pass
 
-    with pytest.raises(AttributeError):
-        _client(NoFlag()).write(0x25, 1, 0, P)
+    # Rejected at construction with a typed error, before any clock or I/O is used.
+    with pytest.raises(TypeError, match="instant"):
+        Client(NoFlag(), encoder=Encoder(READ_ONLY_COMMANDS | {Cmd.WRITE}))
