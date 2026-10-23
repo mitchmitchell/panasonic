@@ -1,5 +1,6 @@
 pub mod auth;
 pub mod config;
+pub mod daemon_client;
 pub mod host_origin;
 pub mod post_origin;
 pub mod ratelimit;

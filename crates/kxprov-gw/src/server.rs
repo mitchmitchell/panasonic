@@ -13,7 +13,7 @@ use axum_csrf::CsrfConfig;
 use axum_server::tls_rustls::RustlsConfig;
 use kxprov_api::TokenId;
 use kxprov_mcp::{KxMcpServer, MCP_CALLER};
-use kxprov_mock::{CallerIdentity, DaemonBackend, McpTokenIdentity, MockDaemon};
+use kxprov_mock::{CallerIdentity, DaemonBackend, McpTokenIdentity};
 use kxprov_web::{LoginRateLimiter, PasswordVerifier, WebState};
 use rmcp::transport::streamable_http_server::{
     session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
@@ -50,11 +50,11 @@ fn ensure_rustls_provider() {
 
 pub async fn serve(
     config: GatewayConfig,
-    backend: Option<Arc<dyn DaemonBackend>>,
+    backend: Arc<dyn DaemonBackend>,
 ) -> anyhow::Result<GatewayHandles> {
     ensure_rustls_provider();
     config.warn_if_lan_ip_unset();
-    let backend = backend.unwrap_or_else(|| Arc::new(MockDaemon::new()) as Arc<dyn DaemonBackend>);
+    config.warn_if_insecure_bind();
     let admin = Arc::new(AdminPassword::from_file(&config.admin_password_path)?);
     let token_store = Arc::new(McpTokenStore::from_file(&config.mcp_tokens_path)?);
 
@@ -62,7 +62,10 @@ pub async fn serve(
     let web_state = WebState {
         backend: backend.clone(),
         admin: Arc::new(AdminVerifier(admin)),
-        login_limiter: Arc::new(LoginRateLimiter::new(5, Duration::from_secs(900))),
+        login_limiter: Arc::new(LoginRateLimiter::new(
+            Duration::from_secs(1),
+            Duration::from_secs(900),
+        )),
         csrf_config: csrf_config.clone(),
     };
 
@@ -113,6 +116,12 @@ pub async fn serve(
         .map(|s| s.parse())
         .collect::<Result<Vec<_>, _>>()?;
 
+    warn_if_unspecified_bind(web_tailnet_addr);
+    warn_if_unspecified_bind(mcp_addr);
+    for addr in &web_lan_addrs {
+        warn_if_unspecified_bind(*addr);
+    }
+
     let web_tailnet_listener = TcpListener::bind(web_tailnet_addr).await?;
     let mcp_listener = TcpListener::bind(mcp_addr).await?;
 
@@ -127,12 +136,15 @@ pub async fn serve(
 
     let web_app_tailnet = web_app.clone();
     tokio::spawn(async move {
-        axum::serve(web_tailnet_listener, web_app_tailnet)
-            .with_graceful_shutdown(async {
-                let _ = shutdown_rx.await;
-            })
-            .await
-            .ok();
+        axum::serve(
+            web_tailnet_listener,
+            web_app_tailnet.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .with_graceful_shutdown(async {
+            let _ = shutdown_rx.await;
+        })
+        .await
+        .ok();
     });
 
     for lan_addr in web_lan_addrs {
@@ -145,7 +157,7 @@ pub async fn serve(
         let web_app_lan = web_app.clone();
         tokio::spawn(async move {
             let _ = axum_server::from_tcp_rustls(listener.into_std().expect("tcp"), tls_cfg)
-                .serve(web_app_lan.into_make_service())
+                .serve(web_app_lan.into_make_service_with_connect_info::<SocketAddr>())
                 .await;
         });
     }
@@ -232,6 +244,15 @@ async fn handle_mcp(
             }
         })
         .await
+}
+
+fn warn_if_unspecified_bind(addr: SocketAddr) {
+    if addr.ip().is_unspecified() {
+        tracing::warn!(
+            %addr,
+            "SECURITY: gateway listening on all interfaces; prefer explicit site or loopback binds"
+        );
+    }
 }
 
 fn bearer_token(headers: &HeaderMap) -> Option<&str> {

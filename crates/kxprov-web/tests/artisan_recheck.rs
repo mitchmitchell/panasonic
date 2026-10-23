@@ -10,8 +10,11 @@ use http_body_util::BodyExt;
 use kxprov_api::OperationalMode;
 use kxprov_api::Profile;
 use kxprov_mock::MockDaemon;
-use kxprov_web::require_web_session;
-use support::{test_router, test_web_state};
+use kxprov_web::{reject_authenticated_login, require_web_session};
+use support::{
+    cookie_header_from_set_cookies, form_urlencoded, merge_cookie_headers, test_router,
+    test_web_state, with_peer,
+};
 use tower::ServiceExt;
 use tower_sessions::cookie::time::Duration as CookieDuration;
 use tower_sessions::cookie::SameSite;
@@ -23,19 +26,23 @@ async fn body_string(resp: axum::response::Response) -> String {
 }
 
 fn app_with_mode(mode: OperationalMode) -> axum::Router {
+    let csrf_config = CsrfConfig::default();
     let mut state = test_web_state();
     state.backend = Arc::new(MockDaemon::with_mode_and_password(
         mode,
         "test-admin-password",
     ));
+    state.csrf_config = csrf_config.clone();
     let session = SessionManagerLayer::new(MemoryStore::default())
+        .with_name("__Host-kxprov.sid")
         .with_secure(true)
         .with_http_only(true)
         .with_same_site(SameSite::Strict)
         .with_expiry(Expiry::OnInactivity(CookieDuration::seconds(900)));
     kxprov_web::router(state)
         .layer(from_fn(require_web_session))
-        .layer(CsrfLayer::new(CsrfConfig::default()))
+        .layer(from_fn(reject_authenticated_login))
+        .layer(CsrfLayer::new(csrf_config))
         .layer(session)
 }
 
@@ -50,13 +57,7 @@ async fn login_cookie(app: &axum::Router) -> (String, String) {
         )
         .await
         .unwrap();
-    let cookie = get
-        .headers()
-        .get(header::SET_COOKIE)
-        .unwrap()
-        .to_str()
-        .unwrap()
-        .to_string();
+    let cookie = cookie_header_from_set_cookies(get.headers());
     let html = body_string(get).await;
     let csrf = html
         .split("name=\"_csrf\" value=\"")
@@ -66,7 +67,7 @@ async fn login_cookie(app: &axum::Router) -> (String, String) {
         .to_string();
     let post = app
         .clone()
-        .oneshot(
+        .oneshot(with_peer(
             Request::builder()
                 .method(Method::POST)
                 .uri("/login")
@@ -74,21 +75,34 @@ async fn login_cookie(app: &axum::Router) -> (String, String) {
                 .header(header::COOKIE, &cookie)
                 .header(header::ORIGIN, "http://127.0.0.1")
                 .body(Body::from(format!(
-                    "password=test-admin-password&_csrf={csrf}"
+                    "password=test-admin-password&_csrf={}",
+                    form_urlencoded(&csrf)
                 )))
+                .unwrap(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(post.status(), StatusCode::SEE_OTHER);
+    let session_cookie = merge_cookie_headers(&cookie, post.headers());
+    let dash = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/")
+                .header(header::COOKIE, &session_cookie)
+                .body(Body::empty())
                 .unwrap(),
         )
         .await
         .unwrap();
-    assert_eq!(post.status(), StatusCode::SEE_OTHER);
-    let session_cookie = post
-        .headers()
-        .get_all(header::SET_COOKIE)
-        .iter()
-        .map(|v| v.to_str().unwrap())
-        .collect::<Vec<_>>()
-        .join("; ");
-    (session_cookie, csrf)
+    let dash_html = body_string(dash).await;
+    let dash_csrf = dash_html
+        .split("name=\"_csrf\" value=\"")
+        .nth(1)
+        .and_then(|s| s.split('"').next())
+        .unwrap()
+        .to_string();
+    (session_cookie, dash_csrf)
 }
 
 #[tokio::test]
@@ -121,7 +135,10 @@ async fn read_record_shows_fields_before_plan() {
                 .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
                 .header(header::COOKIE, cookie)
                 .header(header::ORIGIN, "http://127.0.0.1")
-                .body(Body::from(format!("table=36&record=1&_csrf={csrf}")))
+                .body(Body::from(format!(
+                    "table=36&record=1&_csrf={}",
+                    form_urlencoded(&csrf)
+                )))
                 .unwrap(),
         )
         .await
@@ -144,7 +161,8 @@ async fn plan_rejects_field_not_in_table_spec() {
                 .header(header::COOKIE, cookie)
                 .header(header::ORIGIN, "http://127.0.0.1")
                 .body(Body::from(format!(
-                    "table=36&record=1&field=cid_name&new_value=hello&_csrf={csrf}"
+                    "table=36&record=1&field=cid_name&new_value=hello&_csrf={}",
+                    form_urlencoded(&csrf)
                 )))
                 .unwrap(),
         )
@@ -169,7 +187,8 @@ async fn plan_summary_lists_table_record_and_values() {
                 .header(header::ORIGIN, "http://127.0.0.1")
                 .header(header::ORIGIN, "http://127.0.0.1")
                 .body(Body::from(format!(
-                    "table=36&record=1&field=cid_number&new_value=5550100&_csrf={csrf}"
+                    "table=36&record=1&field=cid_number&new_value=5550100&_csrf={}",
+                    form_urlencoded(&csrf)
                 )))
                 .unwrap(),
         )
@@ -183,14 +202,20 @@ async fn plan_summary_lists_table_record_and_values() {
 
 #[tokio::test]
 async fn production_plan_shows_chicago_expiry_and_countdown() {
+    let csrf_config = CsrfConfig::default();
     let mut state = test_web_state();
     state.backend = Arc::new(MockDaemon::with_profile(Profile::Prod));
+    state.csrf_config = csrf_config.clone();
     let session = SessionManagerLayer::new(MemoryStore::default())
+        .with_name("__Host-kxprov.sid")
         .with_secure(true)
+        .with_http_only(true)
+        .with_same_site(SameSite::Strict)
         .with_expiry(Expiry::OnInactivity(CookieDuration::seconds(900)));
     let app = kxprov_web::router(state)
         .layer(from_fn(require_web_session))
-        .layer(CsrfLayer::new(CsrfConfig::default()))
+        .layer(from_fn(reject_authenticated_login))
+        .layer(CsrfLayer::new(csrf_config))
         .layer(session);
     let (cookie, csrf) = login_cookie(&app).await;
     let resp = app
@@ -202,7 +227,8 @@ async fn production_plan_shows_chicago_expiry_and_countdown() {
                 .header(header::COOKIE, cookie)
                 .header(header::ORIGIN, "http://127.0.0.1")
                 .body(Body::from(format!(
-                    "table=36&record=1&field=cid_number&new_value=5550100&_csrf={csrf}"
+                    "table=36&record=1&field=cid_number&new_value=5550100&_csrf={}",
+                    form_urlencoded(&csrf)
                 )))
                 .unwrap(),
         )

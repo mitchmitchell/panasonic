@@ -14,7 +14,10 @@ use support::{test_web_state, TestVerifier};
 use tower::ServiceExt;
 fn production_like_app() -> axum::Router {
     let mut state = test_web_state();
-    state.login_limiter = Arc::new(LoginRateLimiter::new(20, Duration::from_secs(60)));
+    state.login_limiter = Arc::new(LoginRateLimiter::new(
+        Duration::from_secs(1),
+        Duration::from_secs(60),
+    ));
     state.admin = Arc::new(TestVerifier);
     production_web_router(
         state,
@@ -28,6 +31,15 @@ fn production_like_app() -> axum::Router {
     )
 }
 
+fn production_request(method: Method, uri: &str) -> Request<Body> {
+    Request::builder()
+        .method(method)
+        .uri(uri)
+        .header(header::HOST, "127.0.0.1")
+        .body(Body::empty())
+        .unwrap()
+}
+
 fn allowed_status(status: StatusCode) -> bool {
     matches!(
         status,
@@ -39,6 +51,21 @@ fn allowed_status(status: StatusCode) -> bool {
 }
 
 #[tokio::test]
+async fn missing_host_header_is_rejected_on_production_router() {
+    let app = production_like_app();
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/login")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
 async fn n1_forbidden_mode_profile_paths_return_404_or_405() {
     use kxprov_mock::FORBIDDEN_MODE_PROFILE_PATHS;
     let app = production_like_app();
@@ -46,13 +73,7 @@ async fn n1_forbidden_mode_profile_paths_return_404_or_405() {
         for method in [Method::GET, Method::POST, Method::PUT, Method::DELETE] {
             let resp = app
                 .clone()
-                .oneshot(
-                    Request::builder()
-                        .method(method.clone())
-                        .uri(*path)
-                        .body(Body::empty())
-                        .unwrap(),
-                )
+                .oneshot(production_request(method.clone(), path))
                 .await
                 .unwrap();
             assert!(
@@ -79,7 +100,10 @@ async fn n1_registered_routes_exist_on_production_router() {
             "POST" => Method::POST,
             _ => continue,
         };
-        let mut builder = Request::builder().method(method).uri(uri);
+        let mut builder = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header(header::HOST, "127.0.0.1");
         if route.method == "POST" {
             builder = builder
                 .header(header::ORIGIN, "http://127.0.0.1")
@@ -110,6 +134,7 @@ async fn n1_approval_http_paths_are_registered_and_fail_closed_without_session()
                 Request::builder()
                     .method(Method::POST)
                     .uri(path)
+                    .header(header::HOST, "127.0.0.1")
                     .header(header::ORIGIN, "http://127.0.0.1")
                     .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
                     .body(Body::from("_csrf=x"))

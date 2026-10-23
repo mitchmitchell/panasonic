@@ -63,6 +63,7 @@ fn sample_config(dir: &TempDir) -> GatewayConfig {
         mcp_public_bind: "127.0.0.1:0".into(),
         mcp_tokens_path: tokens_path,
         admin_password_path: admin_path,
+        daemon_socket_path: dir.path().join("kxprovd.sock"),
         tls_cert_path: cert_path,
         tls_key_path: key_path,
         session_ttl_secs: 900,
@@ -78,9 +79,7 @@ async fn gateway_starts_from_sample_config() {
     let dir = tempfile::tempdir().unwrap();
     let config = sample_config(&dir);
     let backend = Arc::new(MockDaemon::new());
-    let handles = serve(config, Some(backend))
-        .await
-        .expect("gateway should start");
+    let handles = serve(config, backend).await.expect("gateway should start");
     assert!(handles.web_tailnet.port() > 0);
     assert!(handles.web_lan.port() > 0);
     assert!(handles.mcp.port() > 0);
@@ -93,7 +92,8 @@ async fn missing_tls_cert_fails_loudly() {
     let dir = tempfile::tempdir().unwrap();
     let mut config = sample_config(&dir);
     config.tls_cert_path = dir.path().join("missing.crt");
-    let err = match serve(config, None).await {
+    let backend = Arc::new(MockDaemon::new());
+    let err = match serve(config, backend).await {
         Err(e) => e,
         Ok(_) => panic!("expected TLS load to fail"),
     };

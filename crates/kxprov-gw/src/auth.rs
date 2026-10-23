@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::time::SystemTime;
 
 use argon2::password_hash::{PasswordHash, PasswordVerifier};
 use argon2::Argon2;
@@ -58,49 +60,70 @@ struct TokenFileEntry {
     expires_at_ms: Option<u64>,
 }
 
-pub struct McpTokenStore {
+struct TokenCache {
+    mtime: SystemTime,
+    len: u64,
     by_hash: HashMap<[u8; 32], McpTokenRecord>,
+}
+
+pub struct McpTokenStore {
+    path: PathBuf,
+    cache: Mutex<TokenCache>,
 }
 
 impl McpTokenStore {
     pub fn from_file(path: &Path) -> anyhow::Result<Self> {
         validate_secret_file(path, "MCP token")?;
-        let raw = fs::read_to_string(path)?;
-        let entries = load_token_entries(&raw)?;
-        let approver_count = entries.iter().filter(|e| e.role == "approver").count();
-        if approver_count != 1 {
-            anyhow::bail!("token file must contain exactly one approver (found {approver_count})");
-        }
-        let now_ms = OffsetDateTime::now_utc().unix_timestamp() as u64 * 1000;
-        let mut by_hash = HashMap::new();
-        for entry in entries {
-            if let Some(exp) = entry.expires_at_ms {
-                if now_ms >= exp {
-                    anyhow::bail!("token {} expired", entry.id);
-                }
+        let by_hash = load_by_hash(path)?;
+        let meta = fs::metadata(path)?;
+        let mtime = meta.modified()?;
+        let len = meta.len();
+        Ok(Self {
+            path: path.to_path_buf(),
+            cache: Mutex::new(TokenCache {
+                mtime,
+                len,
+                by_hash,
+            }),
+        })
+    }
+
+    fn reload_if_stale(&self) -> HashMap<[u8; 32], McpTokenRecord> {
+        let meta = fs::metadata(&self.path).ok();
+        let mtime = meta
+            .as_ref()
+            .and_then(|m| m.modified().ok())
+            .unwrap_or(SystemTime::UNIX_EPOCH);
+        let len = meta.map(|m| m.len()).unwrap_or(0);
+        let mut guard = self.cache.lock().expect("token cache");
+        if mtime != guard.mtime || len != guard.len {
+            if let Ok(fresh) = load_by_hash(&self.path) {
+                guard.mtime = mtime;
+                guard.len = len;
+                guard.by_hash = fresh;
             }
-            let hash = decode_sha256_hex(&entry.token_sha256_hex)?;
-            let scopes = scopes_for_role(&entry.role);
-            scopes.validate().map_err(|e| anyhow::anyhow!("{e}"))?;
-            by_hash.insert(
-                hash,
-                McpTokenRecord {
-                    token_id: entry.id,
-                    agent_name: entry.name,
-                    scopes,
-                    expires_at_ms: entry.expires_at_ms,
-                },
-            );
         }
-        Ok(Self { by_hash })
+        guard.by_hash.clone()
     }
 
     pub fn verify_bearer(&self, bearer: &str) -> Option<McpTokenRecord> {
+        let by_hash = match load_by_hash(&self.path) {
+            Ok(fresh) => {
+                if let Ok(meta) = fs::metadata(&self.path) {
+                    let mut guard = self.cache.lock().expect("token cache");
+                    guard.mtime = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+                    guard.len = meta.len();
+                    guard.by_hash = fresh.clone();
+                }
+                fresh
+            }
+            Err(_) => self.reload_if_stale(),
+        };
         let digest = Sha256::digest(bearer.as_bytes());
         let mut key = [0u8; 32];
         key.copy_from_slice(&digest);
         let now_ms = OffsetDateTime::now_utc().unix_timestamp() as u64 * 1000;
-        for (stored_hash, record) in &self.by_hash {
+        for (stored_hash, record) in &by_hash {
             if bool::from(key.ct_eq(stored_hash)) {
                 if let Some(exp) = record.expires_at_ms {
                     if now_ms >= exp {
@@ -112,6 +135,37 @@ impl McpTokenStore {
         }
         None
     }
+}
+
+fn load_by_hash(path: &Path) -> anyhow::Result<HashMap<[u8; 32], McpTokenRecord>> {
+    let raw = fs::read_to_string(path)?;
+    let entries = load_token_entries(&raw)?;
+    let approver_count = entries.iter().filter(|e| e.role == "approver").count();
+    if approver_count != 1 {
+        anyhow::bail!("token file must contain exactly one approver (found {approver_count})");
+    }
+    let now_ms = OffsetDateTime::now_utc().unix_timestamp() as u64 * 1000;
+    let mut by_hash = HashMap::new();
+    for entry in entries {
+        if let Some(exp) = entry.expires_at_ms {
+            if now_ms >= exp {
+                anyhow::bail!("token {} expired", entry.id);
+            }
+        }
+        let hash = decode_sha256_hex(&entry.token_sha256_hex)?;
+        let scopes = scopes_for_role(&entry.role);
+        scopes.validate().map_err(|e| anyhow::anyhow!("{e}"))?;
+        by_hash.insert(
+            hash,
+            McpTokenRecord {
+                token_id: entry.id,
+                agent_name: entry.name,
+                scopes,
+                expires_at_ms: entry.expires_at_ms,
+            },
+        );
+    }
+    Ok(by_hash)
 }
 
 #[cfg(test)]
@@ -135,17 +189,62 @@ mod verify_tests {
                 expires_at_ms: Some(1),
             },
         );
-        let store = McpTokenStore { by_hash };
+        let store = McpTokenStore {
+            path: PathBuf::from("/nonexistent"),
+            cache: Mutex::new(TokenCache {
+                mtime: SystemTime::UNIX_EPOCH,
+                len: 0,
+                by_hash,
+            }),
+        };
+        assert!(store.verify_bearer(bearer).is_none());
+    }
+
+    #[test]
+    fn revoked_token_drops_after_file_reload() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tokens.toml");
+        let bearer = "live-token-value";
+        let hash_hex = hash_token_for_file(bearer);
+        let body = format!(
+            r#"
+[[tokens]]
+id = "approver"
+name = "Approver"
+role = "approver"
+token_sha256_hex = "{hash_hex}"
+[[tokens]]
+id = "comms"
+name = "Comms"
+role = "communications"
+token_sha256_hex = "0202020202020202020202020202020202020202020202020202020202020202"
+"#
+        );
+        std::fs::write(&path, body).unwrap();
+        std::env::set_var("KXPROV_SKIP_SECRET_FILE_CHECKS", "1");
+        let store = McpTokenStore::from_file(&path).expect("load");
+        assert!(store.verify_bearer(bearer).is_some());
+
+        let body2 = r#"
+[[tokens]]
+id = "approver"
+name = "Approver"
+role = "approver"
+token_sha256_hex = "0101010101010101010101010101010101010101010101010101010101010101"
+[[tokens]]
+id = "comms"
+name = "Comms"
+role = "communications"
+token_sha256_hex = "0202020202020202020202020202020202020202020202020202020202020202"
+"#
+        .to_string();
+        std::fs::write(&path, body2).unwrap();
         assert!(store.verify_bearer(bearer).is_none());
     }
 }
 
 pub fn validate_secret_file(path: &Path, label: &str) -> anyhow::Result<()> {
-    if std::env::var("KXPROV_SKIP_SECRET_FILE_CHECKS")
-        .ok()
-        .as_deref()
-        == Some("1")
-    {
+    if skip_secret_file_checks() {
         return Ok(());
     }
     #[cfg(unix)]
@@ -160,6 +259,19 @@ pub fn validate_secret_file(path: &Path, label: &str) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(any(test, feature = "test-secret-skip"))]
+fn skip_secret_file_checks() -> bool {
+    std::env::var("KXPROV_SKIP_SECRET_FILE_CHECKS")
+        .ok()
+        .as_deref()
+        == Some("1")
+}
+
+#[cfg(not(any(test, feature = "test-secret-skip")))]
+fn skip_secret_file_checks() -> bool {
+    false
 }
 
 fn load_token_entries(raw: &str) -> anyhow::Result<Vec<TokenFileEntry>> {
@@ -216,7 +328,6 @@ token_sha256_hex = "020202020202020202020202020202020202020202020202020202020202
         );
         std::env::set_var("KXPROV_SKIP_SECRET_FILE_CHECKS", "1");
         let result = McpTokenStore::from_file(&path);
-        std::env::remove_var("KXPROV_SKIP_SECRET_FILE_CHECKS");
         let err = result.err().expect("load should fail");
         assert!(err.to_string().contains("exactly one approver"));
     }
@@ -243,7 +354,6 @@ token_sha256_hex = "020202020202020202020202020202020202020202020202020202020202
         );
         std::env::set_var("KXPROV_SKIP_SECRET_FILE_CHECKS", "1");
         let result = McpTokenStore::from_file(&path);
-        std::env::remove_var("KXPROV_SKIP_SECRET_FILE_CHECKS");
         let err = result.err().expect("load should fail");
         assert!(err.to_string().contains("expired"));
     }

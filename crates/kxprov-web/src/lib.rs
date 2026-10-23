@@ -1,3 +1,4 @@
+mod csrf;
 mod expiry;
 mod fields;
 mod login_limit;
@@ -8,7 +9,7 @@ mod templates;
 use std::sync::Arc;
 
 use askama::Template;
-use axum::extract::{Form, FromRef, Path, State};
+use axum::extract::{ConnectInfo, Form, FromRef, Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
@@ -20,6 +21,7 @@ use kxprov_mock::{
     WebSessionIdentity,
 };
 use serde::Deserialize;
+use std::net::SocketAddr;
 use templates::{DashboardTemplate, ReadFieldRow};
 use tower_sessions::Session;
 
@@ -64,11 +66,15 @@ pub fn router(state: WebState) -> Router {
         .with_state(state)
 }
 
-async fn approval_via_mcp_only() -> impl IntoResponse {
+async fn approval_via_mcp_only(csrf_token: CsrfToken, Form(form): Form<LogoutForm>) -> Response {
+    if let Some(resp) = csrf::verify_form_csrf(&csrf_token, &form._csrf) {
+        return resp;
+    }
     (
         StatusCode::FORBIDDEN,
         "This action is only available through MCP (submit_approval or apply_plan).",
     )
+        .into_response()
 }
 
 async fn static_file(Path(file): Path<String>) -> impl IntoResponse {
@@ -215,11 +221,21 @@ fn caller_from_session(session: &Session) -> CallerIdentity {
     CallerIdentity::Web(WebSessionIdentity { session_key })
 }
 
-fn client_ip(headers: &HeaderMap) -> String {
-    if let Some(v) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
-        if let Some(first) = v.split(',').next() {
-            return first.trim().to_string();
+/// Client IP for login rate limiting. Trust `X-Forwarded-For` only when the TCP peer is loopback
+/// (tailscale serve / reverse proxy on the gateway host).
+pub fn client_ip(headers: &HeaderMap, peer: Option<SocketAddr>) -> String {
+    if let Some(peer) = peer {
+        if peer.ip().is_loopback() {
+            if let Some(v) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
+                if let Some(first) = v.split(',').next() {
+                    let trimmed = first.trim();
+                    if !trimmed.is_empty() {
+                        return trimmed.to_string();
+                    }
+                }
+            }
         }
+        return peer.ip().to_string();
     }
     "unknown".into()
 }
@@ -260,9 +276,14 @@ async fn login_submit(
     State(state): State<WebState>,
     session: Session,
     headers: HeaderMap,
+    csrf_token: CsrfToken,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     Form(form): Form<LoginForm>,
 ) -> Response {
-    let ip = client_ip(&headers);
+    if let Some(resp) = csrf::verify_form_csrf(&csrf_token, &form._csrf) {
+        return resp;
+    }
+    let ip = client_ip(&headers, Some(peer));
     let acct_key = "acct:admin".to_string();
     let ip_key = format!("ip:{ip}");
     if !state.login_limiter.allow(&acct_key).await || !state.login_limiter.allow(&ip_key).await {
@@ -291,9 +312,12 @@ fn login_error_html(csrf: &str, message: &str) -> Html<String> {
     )
 }
 
-async fn logout(session: Session, Form(_form): Form<LogoutForm>) -> impl IntoResponse {
+async fn logout(session: Session, csrf_token: CsrfToken, Form(form): Form<LogoutForm>) -> Response {
+    if let Some(resp) = csrf::verify_form_csrf(&csrf_token, &form._csrf) {
+        return resp;
+    }
     let _ = session.delete().await;
-    Redirect::to("/login")
+    Redirect::to("/login").into_response()
 }
 
 #[derive(Deserialize)]
@@ -325,7 +349,10 @@ async fn read_record(
     session: Session,
     csrf_token: CsrfToken,
     Form(form): Form<TableRecordForm>,
-) -> Html<String> {
+) -> Response {
+    if let Some(resp) = csrf::verify_form_csrf(&csrf_token, &form._csrf) {
+        return resp;
+    }
     let token = csrf_token
         .authenticity_token()
         .unwrap_or_else(|_| String::new());
@@ -340,7 +367,7 @@ async fn read_record(
         Err(msg) => {
             tpl.show_read_form_error = true;
             tpl.read_form_error = msg;
-            return Html(tpl.render().unwrap_or_default());
+            return Html(tpl.render().unwrap_or_default()).into_response();
         }
     };
 
@@ -368,7 +395,7 @@ async fn read_record(
         }
     }
 
-    Html(tpl.render().unwrap_or_default())
+    Html(tpl.render().unwrap_or_default()).into_response()
 }
 
 async fn dashboard(
@@ -407,7 +434,10 @@ async fn plan_change(
     session: Session,
     csrf_token: CsrfToken,
     Form(form): Form<PlanForm>,
-) -> Html<String> {
+) -> Response {
+    if let Some(resp) = csrf::verify_form_csrf(&csrf_token, &form._csrf) {
+        return resp;
+    }
     let token = csrf_token
         .authenticity_token()
         .unwrap_or_else(|_| String::new());
@@ -426,7 +456,7 @@ async fn plan_change(
             tpl.plan_form_error =
                 "Could not read daemon status. Planning is unavailable until status succeeds."
                     .into();
-            return Html(tpl.render().unwrap_or_default());
+            return Html(tpl.render().unwrap_or_default()).into_response();
         }
     };
 
@@ -435,7 +465,7 @@ async fn plan_change(
         Err(msg) => {
             tpl.show_plan_form_error = true;
             tpl.plan_form_error = msg;
-            return Html(tpl.render().unwrap_or_default());
+            return Html(tpl.render().unwrap_or_default()).into_response();
         }
     };
 
@@ -447,5 +477,22 @@ async fn plan_change(
         }
     }
 
-    Html(tpl.render().unwrap_or_default())
+    Html(tpl.render().unwrap_or_default()).into_response()
+}
+
+#[cfg(test)]
+mod client_ip_tests {
+    use super::*;
+    use axum::http::HeaderMap;
+
+    #[test]
+    fn trusts_x_forwarded_for_only_from_loopback_peer() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-for", "203.0.113.5".parse().unwrap());
+        let peer = "127.0.0.1:8080".parse().unwrap();
+        assert_eq!(client_ip(&headers, Some(peer)), "203.0.113.5");
+
+        let peer = "10.0.0.2:443".parse().unwrap();
+        assert_eq!(client_ip(&headers, Some(peer)), "10.0.0.2");
+    }
 }

@@ -11,7 +11,9 @@ use http_body_util::BodyExt;
 use kxprov_web::require_web_session;
 use kxprov_web::LoginRateLimiter;
 use kxprov_web::PasswordVerifier;
-use support::{test_web_state, TestVerifier};
+use support::{
+    cookie_header_from_set_cookies, form_urlencoded, test_web_state, with_peer, TestVerifier,
+};
 use tower::ServiceExt;
 use tower_sessions::cookie::time::Duration as CookieDuration;
 use tower_sessions::cookie::SameSite;
@@ -60,32 +62,25 @@ async fn login_rejects_bad_password() {
         )
         .await
         .unwrap();
-    let set_cookie = get
-        .headers()
-        .get(header::SET_COOKIE)
-        .unwrap()
-        .to_str()
-        .unwrap()
-        .to_string();
+    let set_cookie = cookie_header_from_set_cookies(get.headers());
     let html = body_string(get).await;
     let csrf = html
         .split("name=\"_csrf\" value=\"")
         .nth(1)
         .and_then(|s| s.split('"').next())
         .expect("csrf in login form");
-    let resp = app
-        .oneshot(
-            Request::builder()
-                .method(Method::POST)
-                .uri("/login")
-                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
-                .header(header::COOKIE, set_cookie)
-                .header(header::ORIGIN, "http://127.0.0.1")
-                .body(Body::from(format!("password=wrong&_csrf={csrf}")))
-                .unwrap(),
-        )
-        .await
+    let req = Request::builder()
+        .method(Method::POST)
+        .uri("/login")
+        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .header(header::COOKIE, set_cookie)
+        .header(header::ORIGIN, "http://127.0.0.1")
+        .body(Body::from(format!(
+            "password=wrong&_csrf={}",
+            form_urlencoded(csrf)
+        )))
         .unwrap();
+    let resp = app.oneshot(with_peer(req)).await.unwrap();
     assert_eq!(resp.status(), StatusCode::SEE_OTHER);
     assert!(resp
         .headers()
@@ -97,12 +92,13 @@ async fn login_rejects_bad_password() {
 }
 
 #[tokio::test]
-async fn login_rate_limits_account_and_ip_separately() {
-    let limiter = LoginRateLimiter::new(2, Duration::from_secs(300));
+async fn login_uses_exponential_backoff_not_hard_lockout() {
+    let limiter = LoginRateLimiter::new(Duration::from_millis(40), Duration::from_secs(300));
     assert!(limiter.allow("acct:admin").await);
     limiter.record_failure("acct:admin", "ip:9").await;
-    limiter.record_failure("acct:admin", "ip:9").await;
     assert!(!limiter.allow("acct:admin").await);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(limiter.allow("acct:admin").await);
     assert!(limiter.allow("ip:10").await);
 }
 

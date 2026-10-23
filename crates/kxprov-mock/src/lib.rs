@@ -21,7 +21,7 @@ pub use route_table::{
 };
 pub use scope::{scopes_for_role, ScopeSet};
 pub use types::{
-    ApplyJob, BackupInfo, BackupList, DaemonStatus, JobId, JobState, PlanChangeRequest,
+    ApplyJob, BackupInfo, BackupList, DaemonStatus, FieldValue, JobId, JobState, PlanChangeRequest,
     PlanSummary, ReadFieldsRequest, ReadFieldsResponse,
 };
 pub use write_gates::prod_profile_write_gates_active;

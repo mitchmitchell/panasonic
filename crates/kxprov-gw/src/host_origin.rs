@@ -15,19 +15,20 @@ pub async fn host_origin_middleware(
     req: Request<Body>,
     next: Next,
 ) -> Response {
-    if let Some(host) = req
+    let Some(host) = req
         .headers()
         .get(header::HOST)
         .and_then(|v| v.to_str().ok())
+    else {
+        return (StatusCode::BAD_REQUEST, "missing host").into_response();
+    };
+    let host_lower = host.to_ascii_lowercase();
+    if !cfg
+        .allowed_hosts
+        .iter()
+        .any(|allowed| host_lower == allowed.to_ascii_lowercase())
     {
-        let host_lower = host.to_ascii_lowercase();
-        if !cfg
-            .allowed_hosts
-            .iter()
-            .any(|allowed| host_lower == allowed.to_ascii_lowercase())
-        {
-            return (StatusCode::MISDIRECTED_REQUEST, "unknown host").into_response();
-        }
+        return (StatusCode::MISDIRECTED_REQUEST, "unknown host").into_response();
     }
     if let Some(origin) = req
         .headers()

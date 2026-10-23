@@ -15,6 +15,7 @@ pub struct GatewayConfig {
     pub mcp_public_bind: String,
     pub mcp_tokens_path: PathBuf,
     pub admin_password_path: PathBuf,
+    pub daemon_socket_path: PathBuf,
     pub tls_cert_path: PathBuf,
     pub tls_key_path: PathBuf,
     pub session_ttl_secs: u64,
@@ -34,6 +35,7 @@ impl Default for GatewayConfig {
             mcp_public_bind: "127.0.0.1:8444".into(),
             mcp_tokens_path: "/etc/kx-provision/secrets/mcp-tokens.toml".into(),
             admin_password_path: "/etc/kx-provision/secrets/admin-password.hash".into(),
+            daemon_socket_path: "/run/kx-provision/kxprovd.sock".into(),
             tls_cert_path: "/etc/kx-provision/tls/lan.crt".into(),
             tls_key_path: "/etc/kx-provision/tls/lan.key".into(),
             session_ttl_secs: 900,
@@ -56,6 +58,22 @@ impl GatewayConfig {
             None => vec![loopback],
             Some(ip) if ip.is_loopback() => vec![loopback],
             Some(ip) => vec![loopback, format!("{ip}:{port}")],
+        }
+    }
+
+    pub fn warn_if_insecure_bind(&self) {
+        let mut addrs: Vec<String> =
+            vec![self.web_tailnet_bind.clone(), self.mcp_public_bind.clone()];
+        addrs.extend(self.web_lan_bind_addresses());
+        for raw in addrs {
+            if let Ok(addr) = raw.parse::<std::net::SocketAddr>() {
+                if addr.ip().is_unspecified() {
+                    tracing::warn!(
+                        %addr,
+                        "SECURITY: configured bind address listens on all interfaces"
+                    );
+                }
+            }
         }
     }
 
@@ -95,6 +113,9 @@ impl GatewayConfig {
         }
         if let Ok(path) = std::env::var("KXPROV_MCP_TOKENS") {
             config.mcp_tokens_path = path.into();
+        }
+        if let Ok(path) = std::env::var("KXPROV_DAEMON_SOCKET") {
+            config.daemon_socket_path = path.into();
         }
         config.apply_cli(std::env::args().skip(1))?;
         Ok(config)
@@ -140,6 +161,9 @@ impl GatewayConfig {
         if let Some(v) = file.admin_password_path {
             self.admin_password_path = v.into();
         }
+        if let Some(v) = file.daemon_socket_path {
+            self.daemon_socket_path = v.into();
+        }
         Ok(())
     }
 
@@ -176,6 +200,7 @@ struct FileConfig {
     tls_cert_path: Option<String>,
     tls_key_path: Option<String>,
     admin_password_path: Option<String>,
+    daemon_socket_path: Option<String>,
 }
 
 #[cfg(test)]

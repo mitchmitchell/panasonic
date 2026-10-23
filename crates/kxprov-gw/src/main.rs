@@ -1,8 +1,6 @@
-use std::sync::Arc;
-
 use kxprov_gw::config::GatewayConfig;
+use kxprov_gw::daemon_client::DaemonClient;
 use kxprov_gw::server::serve;
-use kxprov_mock::MockDaemon;
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
@@ -12,8 +10,15 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let config = GatewayConfig::from_env_and_args()?;
-    let backend = Arc::new(MockDaemon::new());
-    let handles = serve(config, Some(backend)).await?;
+    let backend = DaemonClient::connect(&config.daemon_socket_path)
+        .await
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "failed to connect to daemon at {}: {e}",
+                config.daemon_socket_path.display()
+            )
+        })?;
+    let handles = serve(config, backend).await?;
     tracing::info!(
         web_tailnet = %handles.web_tailnet,
         web_lan = %handles.web_lan,

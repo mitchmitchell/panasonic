@@ -1308,6 +1308,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "argon2",
+ "async-trait",
  "axum",
  "axum-server",
  "axum_csrf",
@@ -1320,6 +1321,7 @@ dependencies = [
  "kxprov-mcp",
  "kxprov-mock",
  "kxprov-web",
+ "kxtd1232",
  "rand 0.8.8",
  "rcgen",
  "reqwest",

@@ -11,7 +11,10 @@ use kxprov_api::OperationalMode;
 use kxprov_api::Profile;
 use kxprov_mock::MockDaemon;
 use kxprov_web::require_web_session;
-use support::{test_router, test_web_state};
+use support::{
+    cookie_header_from_set_cookies, form_urlencoded, merge_cookie_headers, test_router,
+    test_web_state, with_peer,
+};
 use tower::ServiceExt;
 use tower_sessions::cookie::time::Duration as CookieDuration;
 use tower_sessions::cookie::SameSite;
@@ -50,13 +53,7 @@ async fn login_cookie(app: &axum::Router) -> (String, String) {
         )
         .await
         .unwrap();
-    let cookie = get
-        .headers()
-        .get(header::SET_COOKIE)
-        .unwrap()
-        .to_str()
-        .unwrap()
-        .to_string();
+    let cookie = cookie_header_from_set_cookies(get.headers());
     let html = body_string(get).await;
     let csrf = html
         .split("name=\"_csrf\" value=\"")
@@ -66,7 +63,7 @@ async fn login_cookie(app: &axum::Router) -> (String, String) {
         .to_string();
     let post = app
         .clone()
-        .oneshot(
+        .oneshot(with_peer(
             Request::builder()
                 .method(Method::POST)
                 .uri("/login")
@@ -74,21 +71,34 @@ async fn login_cookie(app: &axum::Router) -> (String, String) {
                 .header(header::COOKIE, &cookie)
                 .header(header::ORIGIN, "http://127.0.0.1")
                 .body(Body::from(format!(
-                    "password=test-admin-password&_csrf={csrf}"
+                    "password=test-admin-password&_csrf={}",
+                    form_urlencoded(&csrf)
                 )))
+                .unwrap(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(post.status(), StatusCode::SEE_OTHER);
+    let session_cookie = merge_cookie_headers(&cookie, post.headers());
+    let dash = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/")
+                .header(header::COOKIE, &session_cookie)
+                .body(Body::empty())
                 .unwrap(),
         )
         .await
         .unwrap();
-    assert_eq!(post.status(), StatusCode::SEE_OTHER);
-    let session_cookie = post
-        .headers()
-        .get_all(header::SET_COOKIE)
-        .iter()
-        .map(|v| v.to_str().unwrap())
-        .collect::<Vec<_>>()
-        .join("; ");
-    (session_cookie, csrf)
+    let dash_html = body_string(dash).await;
+    let dash_csrf = dash_html
+        .split("name=\"_csrf\" value=\"")
+        .nth(1)
+        .and_then(|s| s.split('"').next())
+        .unwrap()
+        .to_string();
+    (session_cookie, dash_csrf)
 }
 
 #[tokio::test]
@@ -158,7 +168,8 @@ async fn plan_validation_error_keeps_form_values() {
                 .header(header::COOKIE, cookie)
                 .header(header::ORIGIN, "http://127.0.0.1")
                 .body(Body::from(format!(
-                    "table=not-a-number&record=7&field=cid_number&new_value=hello&_csrf={csrf}"
+                    "table=not-a-number&record=7&field=cid_number&new_value=hello&_csrf={}",
+                    form_urlencoded(&csrf)
                 )))
                 .unwrap(),
         )
@@ -191,7 +202,8 @@ async fn production_plan_shows_diff_prefix_and_expiry() {
                 .header(header::COOKIE, cookie)
                 .header(header::ORIGIN, "http://127.0.0.1")
                 .body(Body::from(format!(
-                    "table=36&record=1&field=cid_number&new_value=5550100&_csrf={csrf}"
+                    "table=36&record=1&field=cid_number&new_value=5550100&_csrf={}",
+                    form_urlencoded(&csrf)
                 )))
                 .unwrap(),
         )

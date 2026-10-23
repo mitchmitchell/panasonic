@@ -10,8 +10,17 @@ publish.workspace = true
 name = "kxprov-gw"
 path = "src/main.rs"
 
+[[test]]
+name = "startup"
+path = "tests/startup.rs"
+required-features = ["test-secret-skip"]
+
+[features]
+test-secret-skip = []
+
 [dependencies]
 anyhow.workspace = true
+async-trait = "0.1"
 argon2 = { workspace = true, features = ["password-hash"] }
 axum.workspace = true
 axum-server.workspace = true
@@ -21,6 +30,7 @@ hex.workspace = true
 http.workspace = true
 kxprov-api.workspace = true
 kxprov-mock.workspace = true
+kxtd1232.workspace = true
 kxprov-mcp = { workspace = true }
 rmcp = { workspace = true }
 tower-service = "0.3"
