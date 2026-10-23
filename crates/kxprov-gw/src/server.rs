@@ -1,4 +1,5 @@
 use std::net::SocketAddr;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -37,7 +38,7 @@ pub struct GatewayHandles {
     pub web_tailnet: SocketAddr,
     pub web_lan: SocketAddr,
     pub mcp: SocketAddr,
-    pub shutdown: oneshot::Sender<()>,
+    pub shutdown: GatewayShutdown,
 }
 
 struct AdminVerifier(Arc<AdminPassword>);
@@ -48,10 +49,19 @@ impl PasswordVerifier for AdminVerifier {
     }
 }
 
+fn ensure_rustls_provider() {
+    if rustls::crypto::CryptoProvider::get_default().is_none() {
+        rustls::crypto::ring::default_provider()
+            .install_default()
+            .expect("install rustls ring crypto provider");
+    }
+}
+
 pub async fn serve(
     config: GatewayConfig,
     backend: Option<Arc<dyn DaemonBackend>>,
 ) -> anyhow::Result<GatewayHandles> {
+    ensure_rustls_provider();
     let backend = backend.unwrap_or_else(|| Arc::new(MockDaemon::new()) as Arc<dyn DaemonBackend>);
     let admin = Arc::new(AdminPassword::from_file(&config.admin_password_path)?);
     let token_store = Arc::new(McpTokenStore::from_file(&config.mcp_tokens_path)?);
@@ -145,7 +155,10 @@ pub async fn serve(
     let bound_web_lan = web_lan_listener.local_addr()?;
     let bound_mcp = mcp_listener.local_addr()?;
 
+    let tls = load_tls_config(&config.tls_cert_path, &config.tls_key_path).await?;
+
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let (shutdown_tx_mcp, shutdown_rx_mcp) = oneshot::channel::<()>();
 
     let web_app_tailnet = web_app.clone();
     tokio::spawn(async move {
@@ -158,26 +171,66 @@ pub async fn serve(
     });
 
     let web_app_lan = web_app;
-    let tls_cert = config.tls_cert_path.clone();
-    let tls_key = config.tls_key_path.clone();
     tokio::spawn(async move {
-        if let Ok(tls) = RustlsConfig::from_pem_file(tls_cert, tls_key).await {
-            let _ = axum_server::from_tcp_rustls(web_lan_listener.into_std().expect("tcp"), tls)
-                .serve(web_app_lan.into_make_service())
-                .await;
-        }
+        let _ = axum_server::from_tcp_rustls(web_lan_listener.into_std().expect("tcp"), tls)
+            .serve(web_app_lan.into_make_service())
+            .await;
     });
 
     tokio::spawn(async move {
-        axum::serve(mcp_listener, mcp_router).await.ok();
+        axum::serve(mcp_listener, mcp_router)
+            .with_graceful_shutdown(async {
+                let _ = shutdown_rx_mcp.await;
+            })
+            .await
+            .ok();
     });
 
     Ok(GatewayHandles {
         web_tailnet: bound_web_tailnet,
         web_lan: bound_web_lan,
         mcp: bound_mcp,
-        shutdown: shutdown_tx,
+        shutdown: GatewayShutdown {
+            web_tailnet: shutdown_tx,
+            mcp: shutdown_tx_mcp,
+        },
     })
+}
+
+pub struct GatewayShutdown {
+    web_tailnet: oneshot::Sender<()>,
+    mcp: oneshot::Sender<()>,
+}
+
+impl GatewayShutdown {
+    pub fn stop(self) {
+        let _ = self.web_tailnet.send(());
+        let _ = self.mcp.send(());
+    }
+}
+
+async fn load_tls_config(cert: &Path, key: &Path) -> anyhow::Result<RustlsConfig> {
+    if !cert.is_file() {
+        anyhow::bail!(
+            "TLS certificate not found at {} (set tls_cert_path in config)",
+            cert.display()
+        );
+    }
+    if !key.is_file() {
+        anyhow::bail!(
+            "TLS private key not found at {} (set tls_key_path in config)",
+            key.display()
+        );
+    }
+    RustlsConfig::from_pem_file(cert, key)
+        .await
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "failed to load TLS certificate from {} and key from {}: {e}",
+                cert.display(),
+                key.display()
+            )
+        })
 }
 
 async fn handle_mcp(

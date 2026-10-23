@@ -1,3 +1,5 @@
+mod expiry;
+mod fields;
 mod login_limit;
 mod session;
 mod static_files;
@@ -14,10 +16,11 @@ use axum::Router;
 use axum_csrf::{CsrfConfig, CsrfToken};
 use kxprov_api::{OperationalMode, Profile};
 use kxprov_mock::{
-    BackendError, CallerIdentity, DaemonBackend, PlanChangeRequest, PlanSummary, WebSessionIdentity,
+    BackendError, CallerIdentity, DaemonBackend, PlanChangeRequest, PlanSummary, ReadFieldsRequest,
+    WebSessionIdentity,
 };
 use serde::Deserialize;
-use templates::DashboardTemplate;
+use templates::{DashboardTemplate, ReadFieldRow};
 use tower_sessions::Session;
 
 pub use static_files::serve_static;
@@ -48,6 +51,7 @@ pub fn router(state: WebState) -> Router {
         .route("/login", get(login_form).post(login_submit))
         .route("/logout", post(logout))
         .route("/", get(dashboard))
+        .route("/read", post(read_record))
         .route("/plan", post(plan_change))
         .with_state(state)
 }
@@ -71,7 +75,7 @@ pub fn operational_mode_banner_class(mode: OperationalMode) -> &'static str {
 }
 
 fn default_plan_form() -> (String, String, String, String) {
-    ("36".into(), "1".into(), "name".into(), "test".into())
+    ("36".into(), "1".into(), "cid_number".into(), "5550100".into())
 }
 
 fn empty_dashboard(csrf: &str) -> DashboardTemplate {
@@ -90,6 +94,12 @@ fn empty_dashboard(csrf: &str) -> DashboardTemplate {
         record_value,
         field_value,
         new_value_value,
+        show_read_form_error: false,
+        read_form_error: String::new(),
+        show_read_result: false,
+        read_table: 0,
+        read_record: 0,
+        read_fields: Vec::new(),
         show_plan_form_error: false,
         plan_form_error: String::new(),
         show_plan: false,
@@ -97,8 +107,15 @@ fn empty_dashboard(csrf: &str) -> DashboardTemplate {
         diff_hash_hex: String::new(),
         diff_hash_prefix: String::new(),
         plan_summary: String::new(),
+        plan_table: 0,
+        plan_record: 0,
+        plan_field: String::new(),
+        plan_old_value: String::new(),
+        plan_new_value: String::new(),
         show_production_plan_hint: false,
-        plan_expires_at: String::new(),
+        plan_expires_at_iso: String::new(),
+        plan_expires_at_chicago: String::new(),
+        plan_expires_at_ms: String::new(),
         csrf_token: csrf.to_string(),
     }
 }
@@ -133,9 +150,18 @@ fn apply_plan_result(tpl: &mut DashboardTemplate, summary: &PlanSummary, mode: O
     tpl.plan_id_hex = summary.plan_id.0.clone();
     tpl.diff_hash_hex = summary.diff_hash.0.clone();
     tpl.plan_summary = summary.summary.clone();
+    tpl.plan_table = summary.table;
+    tpl.plan_record = summary.record;
+    tpl.plan_field = summary.field.clone();
+    tpl.plan_old_value = summary.old_value.clone();
+    tpl.plan_new_value = summary.new_value.clone();
     if mode == OperationalMode::Production {
         tpl.diff_hash_prefix = summary.diff_hash.0.chars().take(8).collect();
-        tpl.plan_expires_at = summary.expires_at.clone();
+        tpl.plan_expires_at_iso = summary.expires_at.clone();
+        tpl.plan_expires_at_chicago = expiry::format_expiry_chicago(&summary.expires_at);
+        tpl.plan_expires_at_ms = expiry::expiry_unix_ms(&summary.expires_at)
+            .map(|ms| ms.to_string())
+            .unwrap_or_default();
         tpl.show_production_plan_hint = true;
     }
 }
@@ -145,9 +171,22 @@ fn plan_error_message(err: BackendError) -> String {
         BackendError::ForbiddenScope => {
             "You don't have permission to create plans with this session.".into()
         }
-        BackendError::BadRequest(field) => format!("Invalid input: {field}."),
+        BackendError::BadRequest(field) => match field {
+            "field" => "That field is not valid for the phone table you chose.".into(),
+            other => format!("Invalid input: {other}."),
+        },
         BackendError::PlanExpired => "That plan window has expired. Create a new plan.".into(),
         _ => "Could not create the plan. Check your entries and try again.".into(),
+    }
+}
+
+fn read_error_message(err: BackendError) -> String {
+    match err {
+        BackendError::ForbiddenScope => {
+            "You don't have permission to read phone data with this session.".into()
+        }
+        BackendError::BadRequest(field) => format!("Invalid input: {field}."),
+        _ => "Could not read that record. Check your entries and try again.".into(),
     }
 }
 
@@ -173,7 +212,6 @@ async fn login_form(csrf_token: CsrfToken) -> impl IntoResponse {
         csrf_token,
         Html(
             templates::LoginTemplate {
-                banner: "Web sign-in".into(),
                 show_error: false,
                 error: String::new(),
                 csrf_token: token,
@@ -225,7 +263,6 @@ async fn login_submit(
 fn login_error_html(csrf: &str, message: &str) -> Html<String> {
     Html(
         templates::LoginTemplate {
-            banner: "Web sign-in".into(),
             show_error: true,
             error: message.into(),
             csrf_token: csrf.to_string(),
@@ -241,6 +278,14 @@ async fn logout(session: Session, Form(_form): Form<LogoutForm>) -> impl IntoRes
 }
 
 #[derive(Deserialize)]
+pub struct TableRecordForm {
+    table: String,
+    record: String,
+    #[serde(rename = "_csrf")]
+    pub _csrf: String,
+}
+
+#[derive(Deserialize)]
 pub struct PlanForm {
     table: String,
     record: String,
@@ -248,6 +293,66 @@ pub struct PlanForm {
     new_value: String,
     #[serde(rename = "_csrf")]
     pub _csrf: String,
+}
+
+fn parse_table_record(form: &TableRecordForm) -> Result<(u8, u16), String> {
+    let table = fields::parse_table_input(&form.table)?;
+    let record = fields::parse_record_input(&form.record)?;
+    Ok((table, record))
+}
+
+async fn read_record(
+    State(state): State<WebState>,
+    session: Session,
+    csrf_token: CsrfToken,
+    Form(form): Form<TableRecordForm>,
+) -> Html<String> {
+    let token = csrf_token
+        .authenticity_token()
+        .unwrap_or_else(|_| String::new());
+    let caller = caller_from_session(&session);
+    let mut tpl = empty_dashboard(&token);
+    tpl.table_value = form.table.clone();
+    tpl.record_value = form.record.clone();
+    fill_dashboard_from_status(&mut tpl, &state, &caller).await;
+
+    let (table, record) = match parse_table_record(&form) {
+        Ok(v) => v,
+        Err(msg) => {
+            tpl.show_read_form_error = true;
+            tpl.read_form_error = msg;
+            return Html(tpl.render().unwrap_or_default());
+        }
+    };
+
+    match state
+        .backend
+        .read_fields(
+            &caller,
+            ReadFieldsRequest { table, record },
+        )
+        .await
+    {
+        Ok(resp) => {
+            tpl.show_read_result = true;
+            tpl.read_table = table;
+            tpl.read_record = record;
+            tpl.read_fields = resp
+                .fields
+                .into_iter()
+                .map(|f| ReadFieldRow {
+                    name: f.name,
+                    value: f.value,
+                })
+                .collect();
+        }
+        Err(err) => {
+            tpl.show_read_form_error = true;
+            tpl.read_form_error = read_error_message(err);
+        }
+    }
+
+    Html(tpl.render().unwrap_or_default())
 }
 
 async fn dashboard(
@@ -264,35 +369,21 @@ async fn dashboard(
     Html(tpl.render().unwrap_or_default())
 }
 
-fn parse_plan_form(form: &PlanForm) -> Result<(u8, u16, PlanChangeRequest), String> {
-    let table_str = form.table.trim();
-    let table = if let Some(hex) = table_str
-        .strip_prefix("0x")
-        .or_else(|| table_str.strip_prefix("0X"))
-    {
-        u8::from_str_radix(hex, 16).map_err(|_| "phone table must be a valid number".to_string())?
-    } else {
-        table_str
-            .parse::<u8>()
-            .map_err(|_| "phone table must be a valid number".to_string())?
-    };
-    let record = form
-        .record
-        .trim()
-        .parse()
-        .map_err(|_| "record number must be a valid integer".to_string())?;
-    Ok((
+fn parse_plan_form(form: &PlanForm) -> Result<PlanChangeRequest, String> {
+    let (table, record) = parse_table_record(&TableRecordForm {
+        table: form.table.clone(),
+        record: form.record.clone(),
+        _csrf: String::new(),
+    })?;
+    let _field_kind = fields::field_for_table(table, &form.field)?;
+    Ok(PlanChangeRequest {
         table,
         record,
-        PlanChangeRequest {
-            table,
-            record,
-            field: form.field.clone(),
-            new_value: form.new_value.clone(),
-            base_bytes: Vec::new(),
-            new_bytes: Vec::new(),
-        },
-    ))
+        field: form.field.clone(),
+        new_value: form.new_value.clone(),
+        base_bytes: Vec::new(),
+        new_bytes: Vec::new(),
+    })
 }
 
 async fn plan_change(
@@ -320,7 +411,7 @@ async fn plan_change(
         .unwrap_or(OperationalMode::Testing);
 
     let request = match parse_plan_form(&form) {
-        Ok((_table, _record, req)) => req,
+        Ok(req) => req,
         Err(msg) => {
             tpl.show_plan_form_error = true;
             tpl.plan_form_error = msg;

@@ -22,10 +22,10 @@ pub struct GatewayConfig {
 impl Default for GatewayConfig {
     fn default() -> Self {
         Self {
-            bind: "0.0.0.0:443".into(),
+            bind: "0.0.0.0:8443".into(),
             web_tailnet_bind: "127.0.0.1:8080".into(),
             mcp_tailnet_bind: "127.0.0.1:8081".into(),
-            mcp_public_bind: "127.0.0.1:8443".into(),
+            mcp_public_bind: "127.0.0.1:8444".into(),
             mcp_tokens_path: "/etc/kx-provision/secrets/mcp-tokens.toml".into(),
             admin_password_path: "/etc/kx-provision/secrets/admin-password.hash".into(),
             tls_cert_path: "/etc/kx-provision/tls/lan.crt".into(),
@@ -75,6 +75,18 @@ impl GatewayConfig {
         if let Some(v) = file.mcp_tokens_path {
             self.mcp_tokens_path = v.into();
         }
+        if let Some(v) = file.mcp_tailnet_bind {
+            self.mcp_tailnet_bind = v;
+        }
+        if let Some(v) = file.tls_cert_path {
+            self.tls_cert_path = v.into();
+        }
+        if let Some(v) = file.tls_key_path {
+            self.tls_key_path = v.into();
+        }
+        if let Some(v) = file.admin_password_path {
+            self.admin_password_path = v.into();
+        }
         Ok(())
     }
 
@@ -102,8 +114,12 @@ impl GatewayConfig {
 struct FileConfig {
     bind: Option<String>,
     web_tailnet_bind: Option<String>,
+    mcp_tailnet_bind: Option<String>,
     mcp_public_bind: Option<String>,
     mcp_tokens_path: Option<String>,
+    tls_cert_path: Option<String>,
+    tls_key_path: Option<String>,
+    admin_password_path: Option<String>,
 }
 
 #[cfg(test)]
@@ -111,10 +127,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_bind_is_privileged_https_port() {
+    fn default_web_and_mcp_ports_are_distinct() {
         let cfg = GatewayConfig::default();
-        assert_eq!(cfg.bind, "0.0.0.0:443");
-        assert_eq!(cfg.web_lan_bind(), "0.0.0.0:443");
+        assert_eq!(cfg.bind, "0.0.0.0:8443");
+        assert_eq!(cfg.web_lan_bind(), "0.0.0.0:8443");
+        assert_eq!(cfg.mcp_public_bind, "127.0.0.1:8444");
+        let web_port = cfg.bind.rsplit(':').next().unwrap();
+        let mcp_port = cfg.mcp_public_bind.rsplit(':').next().unwrap();
+        assert_ne!(web_port, mcp_port);
     }
 
     #[test]

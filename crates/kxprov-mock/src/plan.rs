@@ -50,6 +50,7 @@ pub struct ImmutablePlan {
     pub id: PlanId,
     pub diff_hash: DiffHash,
     pub profile: Profile,
+    #[allow(dead_code)]
     pub request: PlanChangeRequest,
     pub creator_token: Option<TokenId>,
     pub stored_at: OffsetDateTime,

@@ -55,6 +55,11 @@ pub struct PlanSummary {
     pub plan_id: PlanId,
     pub diff_hash: DiffHash,
     pub summary: String,
+    pub table: u8,
+    pub record: u16,
+    pub field: String,
+    pub old_value: String,
+    pub new_value: String,
     pub expires_at: String,
 }
 

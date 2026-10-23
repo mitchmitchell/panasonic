@@ -5,4 +5,4 @@ pub mod post_origin;
 pub mod ratelimit;
 pub mod server;
 
-pub use server::{serve, GatewayHandles};
+pub use server::{serve, GatewayHandles, GatewayShutdown};

@@ -21,6 +21,6 @@ async fn main() -> anyhow::Result<()> {
         "kxprov-gw listening"
     );
     tokio::signal::ctrl_c().await?;
-    let _ = handles.shutdown.send(());
+    handles.shutdown.stop();
     Ok(())
 }

@@ -29,6 +29,10 @@ pub const WEB_ROUTES: &[HttpRoute] = &[
         method: "POST",
         path: "/plan",
     },
+    HttpRoute {
+        method: "POST",
+        path: "/read",
+    },
 ];
 
 pub const FORBIDDEN_MODE_PROFILE_PATHS: &[&str] = &[

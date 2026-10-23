@@ -41,8 +41,8 @@ async fn sample_plan(daemon: &MockDaemon) -> kxprov_mock::PlanSummary {
             PlanChangeRequest {
                 table: 0x24,
                 record: 1,
-                field: "name".into(),
-                new_value: "y".into(),
+                field: "cid_number".into(),
+                new_value: "5550100".into(),
                 base_bytes: vec![],
                 new_bytes: vec![9],
             },
@@ -210,8 +210,8 @@ async fn approver_cannot_approve_own_plan() {
             PlanChangeRequest {
                 table: 0x24,
                 record: 1,
-                field: "f".into(),
-                new_value: "v".into(),
+                field: "cid_number".into(),
+                new_value: "5550101".into(),
                 base_bytes: vec![],
                 new_bytes: vec![1],
             },
@@ -288,8 +288,8 @@ async fn submit_approval_rate_limit() {
                 PlanChangeRequest {
                     table: 0x24,
                     record: i as u16 + 1,
-                    field: "f".into(),
-                    new_value: format!("v{i}"),
+                    field: "cid_number".into(),
+                    new_value: format!("55501{i:02}"),
                     base_bytes: vec![],
                     new_bytes: vec![i as u8],
                 },

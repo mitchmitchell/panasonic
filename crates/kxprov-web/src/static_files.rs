@@ -45,6 +45,10 @@ fn asset(path: &str) -> Option<Asset> {
             bytes: include_bytes!("../assets/site.css"),
             content_type: "text/css; charset=utf-8",
         },
+        "plan-expiry.js" => Asset {
+            bytes: include_bytes!("../assets/plan-expiry.js"),
+            content_type: "application/javascript; charset=utf-8",
+        },
         _ => return None,
     })
 }

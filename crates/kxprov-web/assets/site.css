@@ -165,3 +165,49 @@ main {
   max-width: 40rem;
   font-size: 0.95rem;
 }
+
+.read-form label,
+.plan-form select {
+  display: block;
+  margin-bottom: 0.85rem;
+  max-width: 28rem;
+}
+
+.field-list,
+.plan-detail {
+  max-width: 28rem;
+}
+
+.field-list dt,
+.plan-detail dt {
+  font-weight: 600;
+  margin-top: 0.5rem;
+}
+
+.field-list dd,
+.plan-detail dd {
+  margin: 0.15rem 0 0 0;
+}
+
+.hash-code {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+@media (max-width: 375px) {
+  main {
+    padding-left: 0.75rem;
+    padding-right: 0.75rem;
+  }
+
+  .hash-code {
+    overflow-wrap: anywhere;
+    word-break: break-word;
+    white-space: normal;
+  }
+
+  .plan-result,
+  .read-result {
+    overflow-x: hidden;
+  }
+}

@@ -7,6 +7,7 @@ use kxprov_api::{
     ApplyApprovalRequiredResult, ApplyPlanAwaitingStatus, Approval, DiffHash, OperationalMode,
     PlanId, Profile, Scope,
 };
+use kxtd1232::FieldKind;
 use time::OffsetDateTime;
 use tokio::sync::RwLock;
 
@@ -99,6 +100,25 @@ impl MockDaemon {
 
     fn plan_key(id: &PlanId) -> String {
         id.0.clone()
+    }
+
+    fn simulated_value(kind: FieldKind, record: u16) -> String {
+        match kind {
+            FieldKind::CidNumber => format!("555{:04}", u32::from(record) % 10_000),
+            FieldKind::CidName => format!("Station {record}"),
+            FieldKind::ExtName => format!("Ext {record}"),
+        }
+    }
+
+    fn field_kind_for_request(req: &PlanChangeRequest) -> Result<FieldKind, BackendError> {
+        let kind = req
+            .field
+            .parse::<FieldKind>()
+            .map_err(|_| BackendError::BadRequest("field"))?;
+        if kind.table() != req.table {
+            return Err(BackendError::BadRequest("field"));
+        }
+        Ok(kind)
     }
 
     fn resolve_plan_id(
@@ -223,12 +243,15 @@ impl DaemonBackend for MockDaemon {
         req: ReadFieldsRequest,
     ) -> Result<ReadFieldsResponse, BackendError> {
         Self::require_scope(caller, Scope::Read)?;
-        Ok(ReadFieldsResponse {
-            fields: vec![FieldValue {
-                name: format!("table_{:02x}_rec_{}", req.table, req.record),
-                value: "simulated".into(),
-            }],
-        })
+        let fields = FieldKind::ALL
+            .into_iter()
+            .filter(|kind| kind.table() == req.table)
+            .map(|kind| FieldValue {
+                name: kind.name().into(),
+                value: Self::simulated_value(kind, req.record),
+            })
+            .collect();
+        Ok(ReadFieldsResponse { fields })
     }
 
     async fn plan_change(
@@ -237,12 +260,20 @@ impl DaemonBackend for MockDaemon {
         req: PlanChangeRequest,
     ) -> Result<PlanSummary, BackendError> {
         Self::require_scope(caller, Scope::Plan)?;
+        let kind = Self::field_kind_for_request(&req)?;
+        let old_value = Self::simulated_value(kind, req.record);
         let inner = self.inner.read().await;
         let profile = inner.profile;
         drop(inner);
         let creator = caller.token_id().cloned();
+        let table = req.table;
+        let record = req.record;
+        let field = req.field.clone();
+        let new_value = req.new_value.clone();
         let plan = ImmutablePlan::from_request(profile, req, creator)?;
-        let summary_text = format!("{} → {}", plan.request.field, plan.request.new_value);
+        let summary_text = format!(
+            "Table {table}, record {record}: {field} changes from \"{old_value}\" to \"{new_value}\""
+        );
         let plan_id = plan.id.clone();
         let diff_hash = plan.diff_hash.clone();
         let expires_at = (plan.stored_at + plan_storage_ttl())
@@ -252,6 +283,11 @@ impl DaemonBackend for MockDaemon {
             plan_id: plan_id.clone(),
             diff_hash,
             summary: summary_text,
+            table,
+            record,
+            field,
+            old_value,
+            new_value,
             expires_at,
         };
         let mut inner = self.inner.write().await;

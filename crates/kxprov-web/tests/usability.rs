@@ -144,7 +144,7 @@ async fn plan_validation_error_keeps_form_values() {
                 .header(header::COOKIE, cookie)
                 .header(header::ORIGIN, "http://127.0.0.1")
                 .body(Body::from(format!(
-                    "table=not-a-number&record=7&field=label&new_value=hello&_csrf={csrf}"
+                    "table=not-a-number&record=7&field=cid_number&new_value=hello&_csrf={csrf}"
                 )))
                 .unwrap(),
         )
@@ -177,7 +177,7 @@ async fn production_plan_shows_diff_prefix_and_expiry() {
                 .header(header::COOKIE, cookie)
                 .header(header::ORIGIN, "http://127.0.0.1")
                 .body(Body::from(format!(
-                    "table=36&record=1&field=name&new_value=hello&_csrf={csrf}"
+                    "table=36&record=1&field=cid_number&new_value=5550100&_csrf={csrf}"
                 )))
                 .unwrap(),
         )
