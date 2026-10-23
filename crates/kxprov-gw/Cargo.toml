@@ -113,3 +113,4 @@ libc = "0.2"
 nix = { version = "0.29", features = ["user"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 uuid.workspace = true
+serial_test = "3"

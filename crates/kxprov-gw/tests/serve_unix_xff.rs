@@ -1,13 +1,12 @@
 //! Serve Unix socket SO_PEERCRED controls login XFF trust (not TCP loopback).
+//! Serialized with [`serial_test::serial`] — parallel bind races caused flaky `EACCES` under full `cargo test`.
 
 use kxprov_gw::serve_peer::{ServeTrustConfig, SERVE_LOOPBACK_PEER};
 use kxprov_web::login_rate_ip_key;
+use serial_test::serial;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
-
-static UNIX_SOCKET_TEST_LOCK: Mutex<()> = Mutex::new(());
 use std::time::{Duration, Instant};
 use tokio::net::{TcpListener, TcpStream, UnixListener, UnixStream};
 
@@ -36,15 +35,28 @@ async fn wait_for_unix_connect(path: &Path) -> UnixStream {
     }
 }
 
-async fn accept_unix_pair(path: &Path) -> (UnixStream, UnixStream) {
-    let _lock = UNIX_SOCKET_TEST_LOCK
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
+async fn bind_unix_listener(path: &Path) -> UnixListener {
     remove_stale_socket(path);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).ok();
     }
-    let listener = UnixListener::bind(path).expect("bind unix socket");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match UnixListener::bind(path) {
+            Ok(listener) => return listener,
+            Err(e)
+                if e.kind() == std::io::ErrorKind::PermissionDenied
+                    && Instant::now() < deadline =>
+            {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            Err(e) => panic!("bind unix socket {}: {e}", path.display()),
+        }
+    }
+}
+
+async fn accept_unix_pair(path: &Path) -> (UnixStream, UnixStream) {
+    let listener = bind_unix_listener(path).await;
     let accept_task = tokio::spawn(async move { listener.accept().await.unwrap() });
     let client = wait_for_unix_connect(path).await;
     let (server, _addr) = accept_task.await.expect("accept task");
@@ -52,9 +64,6 @@ async fn accept_unix_pair(path: &Path) -> (UnixStream, UnixStream) {
 }
 
 fn prep_runtime_dir(dir: &std::path::Path) {
-    let _lock = UNIX_SOCKET_TEST_LOCK
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
     if dir.exists() {
         std::fs::remove_dir_all(dir).ok();
     }
@@ -71,6 +80,7 @@ fn prep_runtime_dir(dir: &std::path::Path) {
 }
 
 #[tokio::test]
+#[serial]
 async fn unix_peercred_matching_uid_trusts_xff_on_real_connection() {
     let dir = tempfile::tempdir().unwrap();
     let sock = unique_socket_path(dir.path(), "peercred-match");
@@ -91,6 +101,7 @@ async fn unix_peercred_matching_uid_trusts_xff_on_real_connection() {
 }
 
 #[tokio::test]
+#[serial]
 async fn unix_peercred_non_matching_uid_ignores_xff() {
     let dir = tempfile::tempdir().unwrap();
     let sock = unique_socket_path(dir.path(), "peercred-mismatch");
@@ -111,6 +122,7 @@ async fn unix_peercred_non_matching_uid_ignores_xff() {
 }
 
 #[tokio::test]
+#[serial]
 async fn tcp_loopback_connection_never_trusts_xff() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -129,6 +141,7 @@ async fn tcp_loopback_connection_never_trusts_xff() {
 }
 
 #[tokio::test]
+#[serial]
 async fn web_serve_bind_sets_runtime_dir_0750_and_socket_mode_0660() {
     let dir = tempfile::tempdir().unwrap();
     let runtime = dir.path().join("run");
@@ -152,6 +165,7 @@ async fn web_serve_bind_sets_runtime_dir_0750_and_socket_mode_0660() {
 }
 
 #[tokio::test]
+#[serial]
 async fn bind_fails_when_serve_socket_group_missing() {
     let dir = tempfile::tempdir().unwrap();
     let runtime = dir.path().join("run");
@@ -167,10 +181,8 @@ async fn bind_fails_when_serve_socket_group_missing() {
 }
 
 #[tokio::test]
+#[serial]
 async fn bind_rejects_symlink_runtime_directory() {
-    let _lock = UNIX_SOCKET_TEST_LOCK
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
     let dir = tempfile::tempdir().unwrap();
     let runtime = dir.path().join("run-link");
     std::os::unix::fs::symlink(dir.path(), &runtime).unwrap();
@@ -182,10 +194,11 @@ async fn bind_rejects_symlink_runtime_directory() {
 }
 
 #[tokio::test]
+#[serial]
 async fn bind_rejects_symlink_at_socket_path() {
     let dir = tempfile::tempdir().unwrap();
     let runtime = dir.path().join("run");
-    prep_runtime_dir(&runtime); // takes UNIX_SOCKET_TEST_LOCK
+    prep_runtime_dir(&runtime);
     let real = unique_socket_path(&runtime, "real");
     let link = unique_socket_path(&runtime, "web-serve");
     std::os::unix::fs::symlink(&real, &link).unwrap();
@@ -196,6 +209,7 @@ async fn bind_rejects_symlink_at_socket_path() {
 }
 
 #[test]
+#[serial]
 fn config_rejects_missing_and_invalid_serve_peer_uid() {
     let missing = kxprov_gw::config::GatewayConfig::default();
     assert!(
