@@ -204,7 +204,8 @@ impl GatewayConfig {
         if let Some(ref name) = self.serve_hostname {
             let trimmed = name.trim();
             if !trimmed.is_empty() {
-                push_https_listener_hosts(&mut out, self.web_https_port, &[trimmed]);
+                // Tailscale Serve presents the site on HTTPS :443 regardless of local bind port.
+                push_https_listener_hosts(&mut out, 443, &[trimmed]);
             }
         }
         out
@@ -225,7 +226,7 @@ impl GatewayConfig {
         if let Some(ref name) = self.serve_hostname {
             let trimmed = name.trim();
             if !trimmed.is_empty() {
-                push_https_listener_origins(&mut out, self.web_https_port, &[trimmed]);
+                push_https_listener_origins(&mut out, 443, &[trimmed]);
             }
         }
         out
@@ -584,6 +585,24 @@ mod tests {
         let origins = cfg.effective_web_https_origins();
         assert!(origins.contains(&"https://10.0.0.5".to_string()));
         assert!(origins.contains(&"https://gw.example.ts.net".to_string()));
+    }
+
+    #[test]
+    fn serve_hostname_allowlist_uses_443_not_lan_bind_port() {
+        let cfg = GatewayConfig {
+            bind: Some("127.0.0.1:8443".into()),
+            web_https_port: 8443,
+            serve_hostname: Some("gw.example.ts.net".into()),
+            ..Default::default()
+        };
+        let origins = cfg.effective_web_https_origins();
+        assert!(origins.contains(&"https://gw.example.ts.net".to_string()));
+        assert!(!origins
+            .iter()
+            .any(|o| o.contains("gw.example.ts.net") && o.contains(":8443")));
+        let hosts = cfg.effective_web_https_hosts();
+        assert!(hosts.contains(&"gw.example.ts.net".to_string()));
+        assert!(hosts.contains(&"127.0.0.1:8443".to_string()));
     }
 
     #[test]

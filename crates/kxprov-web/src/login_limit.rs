@@ -62,6 +62,16 @@ impl LoginRateLimiter {
         }
     }
 
+    /// Soft pacing when the account is in backoff: at most 2s, never a 429 by itself.
+    pub async fn soft_account_delay(&self, account_key: &str) -> Duration {
+        const MAX_SOFT: Duration = Duration::from_secs(2);
+        let remaining = self.delay_for_key(account_key).await;
+        if remaining == Duration::ZERO {
+            return Duration::ZERO;
+        }
+        remaining.min(MAX_SOFT)
+    }
+
     /// Backoff / concurrency gate before password verification (does not take the verify slot).
     /// Account backoff never hard-blocks a clean IP; only IP backoff yields 429.
     pub async fn precheck_login(&self, account_key: &str, ip_key: &str) -> LoginPrecheck {
@@ -250,6 +260,8 @@ mod tests {
             limiter.precheck_login("acct:admin", "ip:mitch-home").await,
             LoginPrecheck::Ready
         ));
+        let soft = limiter.soft_account_delay("acct:admin").await;
+        assert!(soft > Duration::ZERO && soft <= Duration::from_secs(2));
         assert!(
             limiter.begin_password_verify("acct:admin").is_ok(),
             "clean IP may verify password during account backoff"

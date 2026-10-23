@@ -7,6 +7,7 @@ mod static_files;
 mod templates;
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use askama::Template;
 use axum::extract::{ConnectInfo, Extension, Form, Path, State};
@@ -320,6 +321,10 @@ async fn login_submit(
                 .into_response();
         }
         LoginPrecheck::Ready => {}
+    }
+    let account_soft = state.login_limiter.soft_account_delay(&acct_key).await;
+    if account_soft > Duration::ZERO {
+        tokio::time::sleep(account_soft).await;
     }
     let _guard = match state.login_limiter.begin_password_verify(&acct_key) {
         Ok(g) => g,
