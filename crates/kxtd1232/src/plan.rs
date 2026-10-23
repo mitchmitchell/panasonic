@@ -1,7 +1,7 @@
 //! WritePlan: a dry-run list of chunk writes computed from a base image and edits.
 //! Unchanged bytes inside a chunk are re-sent exactly as read (design §3).
 
-use crate::error::Error;
+use crate::error::{Error, PlanError};
 use crate::fields::FieldKind;
 use crate::frame::MAX_WRITE_PAYLOAD;
 use crate::tables;
@@ -94,20 +94,23 @@ pub fn build_plan(
 ) -> Result<WritePlan, Error> {
     let spec = tables::check_writable_table(table)?;
     if base.len() != spec.wire_bytes() {
-        return Err(Error::Plan(format!(
-            "base image is {} bytes, table {table:#04x} is {}",
-            base.len(),
-            spec.wire_bytes()
-        )));
+        return Err(Error::Plan(PlanError::BaseSize {
+            table,
+            expected: spec.wire_bytes(),
+            got: base.len(),
+        }));
     }
     let mut new = base.to_vec();
     for p in patches {
         if p.table != table {
-            return Err(Error::Plan(format!("patch for table {:#04x}", p.table)));
+            return Err(Error::Plan(PlanError::WrongTable {
+                plan: table,
+                patch: p.table,
+            }));
         }
         let end = p.offset.checked_add(p.data.len()).unwrap_or(usize::MAX);
         if end > base.len() {
-            return Err(Error::Plan("patch outside table image".into()));
+            return Err(Error::Plan(PlanError::PatchOutsideImage));
         }
         new[p.offset..end].copy_from_slice(&p.data);
     }
@@ -122,7 +125,7 @@ pub fn build_plan(
         let end = start + 2 * nwords as usize;
         let len = end - start;
         if len == 0 || len > MAX_WRITE_PAYLOAD || len % 2 != 0 {
-            return Err(Error::Plan(format!("chunk of {len} bytes")));
+            return Err(Error::Plan(PlanError::BadChunk(len)));
         }
         tables::check_writable(table, record, word, len)?;
         if granularity == Granularity::Table || base[start..end] != new[start..end] {

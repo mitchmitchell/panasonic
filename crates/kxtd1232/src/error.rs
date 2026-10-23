@@ -5,7 +5,10 @@ use std::fmt;
 
 /// A frame that cannot be built or parsed.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum FrameError {
+    /// No bytes at all.
+    Empty,
     /// LEN byte below 2.
     InvalidLen(u8),
     /// LEN + 1 does not equal the buffer length.
@@ -23,6 +26,7 @@ pub enum FrameError {
 impl fmt::Display for FrameError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Empty => write!(f, "empty frame"),
             Self::InvalidLen(b) => write!(f, "invalid LEN byte {b:#04x}"),
             Self::LengthMismatch { expected, got } => {
                 write!(f, "length mismatch: LEN says {expected}, got {got}")
@@ -39,6 +43,7 @@ impl std::error::Error for FrameError {}
 
 /// A request the core refuses to encode.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum NotAllowed {
     /// The encoder is read-only and a write was requested.
     ReadOnlyEncoder,
@@ -93,6 +98,7 @@ impl std::error::Error for NotAllowed {}
 
 /// A field value that cannot be encoded or a record that cannot be decoded.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum FieldError {
     NotDigits,
     TooManyDigits { max: usize },
@@ -127,6 +133,7 @@ impl std::error::Error for FieldError {}
 
 /// Why the login state machine failed.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum LoginFailure {
     /// PBX answered `NG...`.
     Ng,
@@ -138,6 +145,10 @@ pub enum LoginFailure {
     LineTooLong { max: usize },
     /// Password empty or contains CR/LF.
     InvalidPassword,
+    /// More text lines than the cap before reaching binary mode.
+    TooManyLines { max: usize },
+    /// Login did not reach binary mode within the overall time limit.
+    TimedOut { ms: u64 },
 }
 
 impl fmt::Display for LoginFailure {
@@ -148,6 +159,8 @@ impl fmt::Display for LoginFailure {
             Self::PasswordRejected => write!(f, "password rejected"),
             Self::LineTooLong { max } => write!(f, "login line longer than {max} bytes"),
             Self::InvalidPassword => write!(f, "invalid password"),
+            Self::TooManyLines { max } => write!(f, "more than {max} login lines"),
+            Self::TimedOut { ms } => write!(f, "login not finished within {ms} ms"),
         }
     }
 }
@@ -164,6 +177,7 @@ pub struct UnackedWrite {
 
 /// Why a write counts as unacked.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum UnackedReason {
     Timeout,
     BusyTimeout,
@@ -177,6 +191,10 @@ pub enum UnackedReason {
     Nak(u8),
     /// A well-formed reply that is not an ack.
     NotAnAck,
+    /// Another frame followed the ack within the quiet window: the ack may be stale.
+    ExtraFrame,
+    /// The link dropped while waiting for the ack.
+    LinkDown(String),
 }
 
 impl fmt::Display for UnackedReason {
@@ -188,12 +206,15 @@ impl fmt::Display for UnackedReason {
             Self::MismatchedReply { got } => write!(f, "reply for command {got:#04x}"),
             Self::Nak(c) => write!(f, "NAK code {c:#04x}"),
             Self::NotAnAck => write!(f, "reply is not an ack"),
+            Self::ExtraFrame => write!(f, "extra frame after the ack (possibly stale)"),
+            Self::LinkDown(s) => write!(f, "link down ({s})"),
         }
     }
 }
 
 /// Top-level error of the protocol core.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Error {
     Frame(FrameError),
     NotAllowed(NotAllowed),
@@ -201,6 +222,8 @@ pub enum Error {
     Login(LoginFailure),
     /// The transport reported the link is down.
     LinkDown(String),
+    /// The serial session was lost (link drop); log in again before reads, writes, or verify.
+    SessionLost,
     /// No reply within the timeout.
     Timeout,
     /// A busy run outlasted the bound: a link failure.
@@ -223,6 +246,11 @@ pub enum Error {
     },
     /// A well-formed reply of the wrong kind or size.
     UnexpectedReply(String),
+    /// The pre-send drain failed (line never quiet, or link down); nothing was sent.
+    PreSend(Box<Error>),
+    /// Another frame arrived within the quiet window after a reply, so the reply may be
+    /// stale. The stream was resynced; the data is discarded.
+    ExtraFrame,
     /// A write was not positively acked; verify by re-reading, never resend.
     Unacked(UnackedWrite),
     /// A write was attempted while an earlier one still awaits verify or rollback.
@@ -234,7 +262,65 @@ pub enum Error {
     /// Verify did not match plan or backup, or rollback failed: session is LOCKED.
     Locked,
     /// The plan could not be built.
-    Plan(String),
+    Plan(PlanError),
+    /// The operation is not valid in the current session state.
+    BadState {
+        op: Op,
+        state: crate::client::SessionState,
+    },
+    /// `verify_block` or `rollback_block` named a block other than the pending write, or
+    /// a different payload or length for it.
+    NotPendingBlock,
+    /// The PBX did not confirm BYE after end-binary.
+    ByeNotConfirmed(String),
+}
+
+/// Client operations, for [`Error::BadState`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Op {
+    Request,
+    Write,
+    Rollback,
+}
+
+/// Why a write plan could not be built.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum PlanError {
+    BaseSize {
+        table: u8,
+        expected: usize,
+        got: usize,
+    },
+    WrongTable {
+        plan: u8,
+        patch: u8,
+    },
+    PatchOutsideImage,
+    BadChunk(usize),
+}
+
+impl fmt::Display for PlanError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::BaseSize {
+                table,
+                expected,
+                got,
+            } => {
+                write!(
+                    f,
+                    "base image is {got} bytes, table {table:#04x} is {expected}"
+                )
+            }
+            Self::WrongTable { plan, patch } => {
+                write!(f, "patch for table {patch:#04x} in a plan for {plan:#04x}")
+            }
+            Self::PatchOutsideImage => write!(f, "patch outside table image"),
+            Self::BadChunk(n) => write!(f, "chunk of {n} bytes"),
+        }
+    }
 }
 
 impl fmt::Display for Error {
@@ -245,6 +331,7 @@ impl fmt::Display for Error {
             Self::Field(e) => write!(f, "invalid value: {e}"),
             Self::Login(e) => write!(f, "login failed: {e}"),
             Self::LinkDown(s) => write!(f, "link down: {s}"),
+            Self::SessionLost => write!(f, "session lost: login required"),
             Self::Timeout => write!(f, "timeout waiting for reply"),
             Self::BusyTimeout => write!(f, "busy run longer than the bound"),
             Self::Garbled(e) => write!(f, "bad reply: {e}"),
@@ -254,6 +341,8 @@ impl fmt::Display for Error {
             Self::Nak { cmd, code } => write!(f, "NAK {code:#04x} for command {cmd:#04x}"),
             Self::Refused { cmd } => write!(f, "refused by PBX (command {cmd:#04x})"),
             Self::UnexpectedReply(s) => write!(f, "unexpected reply: {s}"),
+            Self::PreSend(e) => write!(f, "not sent: line not ready ({e})"),
+            Self::ExtraFrame => write!(f, "extra frame after reply (possibly stale); discarded"),
             Self::Unacked(u) => write!(
                 f,
                 "write to table {:#04x} record {} not acked: {}",
@@ -263,12 +352,30 @@ impl fmt::Display for Error {
             Self::EndBinaryHeld => write!(f, "end_binary held until verify/rollback finishes"),
             Self::LineNotQuiet => write!(f, "line did not go quiet before verify re-read"),
             Self::Locked => write!(f, "session LOCKED: verify or rollback failed"),
-            Self::Plan(s) => write!(f, "plan: {s}"),
+            Self::Plan(e) => write!(f, "plan: {e}"),
+            Self::BadState { op, state } => write!(f, "{op:?} not allowed in state {state:?}"),
+            Self::NotPendingBlock => write!(f, "not the block pending verify or rollback"),
+            Self::ByeNotConfirmed(s) => write!(f, "BYE not confirmed: {s}"),
         }
     }
 }
 
-impl std::error::Error for Error {}
+impl std::error::Error for PlanError {}
+impl std::error::Error for LoginFailure {}
+
+impl std::error::Error for Error {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Frame(e) | Self::Garbled(e) => Some(e),
+            Self::NotAllowed(e) => Some(e),
+            Self::Field(e) => Some(e),
+            Self::Login(e) => Some(e),
+            Self::Plan(e) => Some(e),
+            Self::PreSend(e) => Some(e.as_ref()),
+            _ => None,
+        }
+    }
+}
 
 impl From<FrameError> for Error {
     fn from(e: FrameError) -> Self {

@@ -2,6 +2,7 @@
 
 mod common;
 
+use common::{bearer_auth, init_test_daemon, APPROVER_SECRET, COMM_SECRET, WRITER_SECRET};
 use kxprov_api::{
     ApiClient, ApplyPlanAwaitingStatus, FieldKindWire, OperationalMode, Profile, RequestBody,
     ResponseResult,
@@ -9,7 +10,6 @@ use kxprov_api::{
 use kxprovd::locked::LockedStore;
 use kxprovd::mode::{ModeFileBody, ProfileFileBody};
 use std::time::Duration;
-use common::{bearer_auth, init_test_daemon, APPROVER_SECRET, COMM_SECRET, WRITER_SECRET};
 
 #[tokio::test]
 async fn plan_immutable_and_token_bound() {

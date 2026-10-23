@@ -4,11 +4,11 @@
 
 mod common;
 
+use common::{bearer_auth, init_test_daemon, write_testing_mode_backup_meta, READER_SECRET};
 use kxprov_api::{ApiClient, OperationalMode, Profile, RequestBody, ResponseResult, SetModeParams};
 use kxprovd::mode::ModeFileBody;
 use kxprovd::transition::TransitionBlockStore;
 use std::time::Duration;
-use common::{bearer_auth, init_test_daemon, write_testing_mode_backup_meta, READER_SECRET};
 
 /// B2: stale backup from another mode — only latest **Production** backup counts.
 #[tokio::test]

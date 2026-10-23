@@ -2,9 +2,7 @@
 
 mod common;
 
-use kxprov_api::{
-    ApiClient, FieldKindWire, OperationalMode, Profile, RequestBody, ResponseResult,
-};
+use kxprov_api::{ApiClient, FieldKindWire, OperationalMode, Profile, RequestBody, ResponseResult};
 use kxprovd::config::Config;
 use kxprovd::mode::{ModeFileBody, ProfileFileBody};
 use kxtd1232::{build_plan, field_patch, frame::Access, Client, Granularity};
