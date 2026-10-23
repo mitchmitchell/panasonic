@@ -13,12 +13,19 @@ use crate::tables;
 pub enum TransportError {
     /// Nothing arrived within the timeout.
     Timeout,
-    /// The link is gone.
+    /// The link is gone. From `send`: some, all or an unknown part of the data may have
+    /// been written, so a write frame counts as possibly applied.
     LinkDown(String),
+    /// From `send` only: the link failed and provably no byte of the data was written
+    /// (for example the port was already closed). Only this counts as "not sent".
+    NothingWritten(String),
 }
 
 /// Byte transport plus clock. Implemented by the simulator and (A3) the daemon's port.
 pub trait Transport {
+    /// Write all of `data`. On failure, return [`TransportError::NothingWritten`] only
+    /// when no byte left the host; any partial or uncertain write is
+    /// [`TransportError::LinkDown`].
     fn send(&mut self, data: &[u8]) -> Result<(), TransportError>;
     /// Return whatever bytes arrive within `timeout_ms` (at least one byte), or `Timeout`.
     fn recv(&mut self, timeout_ms: u64) -> Result<Vec<u8>, TransportError>;
@@ -45,7 +52,12 @@ pub struct Timing {
     pub login_timeout_ms: u64,
     /// Line rate for the post-send cutoff (10 bits per byte).
     pub link_baud: u32,
-    /// Margin added to the post-send cutoff for the PBX's turnaround.
+    /// Assumed minimum PBX turnaround, added to the post-send cutoff. This is a lower
+    /// bound, not slack: no genuine reply can start before the request has been sent and
+    /// the PBX has turned round, so a larger value drops more early (stale) frames, and a
+    /// value above the real turnaround would drop a genuine ack (the write then counts as
+    /// unacked and is verified by read-back, never resent). 20 ms is a placeholder until
+    /// hardware test H5 measures it; the prototype had no margin here.
     pub reply_guard_ms: u64,
 }
 
@@ -216,14 +228,27 @@ impl<T: Transport> Client<T> {
             Ok(b) if b.is_empty() => Err(Error::LinkDown("transport returned no bytes".into())),
             Ok(b) => Ok(b),
             Err(TransportError::Timeout) => Err(Error::Timeout),
-            Err(TransportError::LinkDown(s)) => Err(Error::LinkDown(s)),
+            Err(TransportError::LinkDown(s) | TransportError::NothingWritten(s)) => {
+                Err(Error::LinkDown(s))
+            }
         }
     }
 
+    /// Text-mode send (login, BYE): any link failure is just a lost link.
     fn send(&mut self, data: &[u8]) -> Result<(), Error> {
         self.t.send(data).map_err(|e| match e {
             TransportError::Timeout => Error::Timeout,
+            TransportError::LinkDown(s) | TransportError::NothingWritten(s) => Error::LinkDown(s),
+        })
+    }
+
+    /// Frame send: a provable zero-byte failure is [`Error::PreSend`] (nothing sent);
+    /// anything else that fails is [`Error::LinkDown`] (the frame may have arrived).
+    fn send_frame(&mut self, data: &[u8]) -> Result<(), Error> {
+        self.t.send(data).map_err(|e| match e {
+            TransportError::Timeout => Error::Timeout,
             TransportError::LinkDown(s) => Error::LinkDown(s),
+            TransportError::NothingWritten(s) => Error::PreSend(Box::new(Error::LinkDown(s))),
         })
     }
 
@@ -297,9 +322,14 @@ impl<T: Transport> Client<T> {
             return Err(e);
         }
         let sent_at = self.t.now_ms();
-        if let Err(e @ Error::LinkDown(_)) = self.send(raw) {
-            self.note_link_down(None);
-            return Err(e);
+        match self.send_frame(raw) {
+            // LinkDown: write() records the frame as possibly applied. PreSend: provably
+            // nothing left the host, so there is nothing to verify.
+            Err(e @ (Error::LinkDown(_) | Error::PreSend(_))) => {
+                self.note_link_down(None);
+                return Err(e);
+            }
+            _ => {}
         }
         let r = match self
             .drop_before_cutoff(sent_at + self.timing.reply_cutoff_ms(raw.len()))
@@ -796,5 +826,48 @@ impl<T: Transport> Client<T> {
 impl From<LoginFailure> for Error {
     fn from(f: LoginFailure) -> Self {
         Self::Login(f)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::VecDeque;
+
+    /// Scripted transport: `recv` pops queued chunks, then times out.
+    struct Script {
+        now: u64,
+        inbound: VecDeque<Vec<u8>>,
+    }
+
+    impl Transport for Script {
+        fn send(&mut self, _: &[u8]) -> Result<(), TransportError> {
+            Ok(())
+        }
+        fn recv(&mut self, timeout_ms: u64) -> Result<Vec<u8>, TransportError> {
+            self.inbound.pop_front().ok_or_else(|| {
+                self.now += timeout_ms;
+                TransportError::Timeout
+            })
+        }
+        fn now_ms(&mut self) -> u64 {
+            self.now
+        }
+    }
+
+    /// Architect 5629005479: bytes already buffered when a drain starts are logged as
+    /// drained and never left in the buffer to be parsed as the next reply.
+    #[test]
+    fn drain_until_quiet_flushes_buffered_rx() {
+        let mut c = Client::new(Script {
+            now: 0,
+            inbound: VecDeque::new(),
+        });
+        c.state = SessionState::Binary;
+        let stale = vec![0x03, 0x00, 0x00, 0x03];
+        c.rx = stale.clone();
+        assert_eq!(c.drain_until_quiet(), Ok(()));
+        assert!(c.rx.is_empty(), "buffered bytes survived the drain");
+        assert_eq!(c.drained().first().map(|d| d.bytes.clone()), Some(stale));
     }
 }

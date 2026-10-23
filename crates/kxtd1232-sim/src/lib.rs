@@ -382,6 +382,9 @@ pub struct SimTransport {
     pub sent: Vec<u8>,
     /// When set, the link drops right after the next write frame reaches the simulator.
     pub drop_link_after_write: bool,
+    /// Next write send fails with `LinkDown` after this many bytes left the host (a
+    /// partial frame, or the whole frame when >= its length, which the PBX then stores).
+    pub fail_write_send_after: Option<usize>,
     link_down: bool,
 }
 
@@ -397,6 +400,7 @@ impl SimTransport {
             queue: q,
             sent: Vec::new(),
             drop_link_after_write: false,
+            fail_write_send_after: None,
             link_down: false,
         }
     }
@@ -405,6 +409,7 @@ impl SimTransport {
     pub fn reconnect(&mut self) {
         self.link_down = false;
         self.drop_link_after_write = false;
+        self.fail_write_send_after = None;
         self.queue.clear();
         self.sim.dtr_down();
         let first = self.sim.dtr_up();
@@ -446,7 +451,21 @@ impl SimTransport {
 impl Transport for SimTransport {
     fn send(&mut self, data: &[u8]) -> Result<(), TransportError> {
         if self.link_down {
-            return Err(TransportError::LinkDown("sim: link dropped".into()));
+            // Port already gone: provably nothing written.
+            return Err(TransportError::NothingWritten("sim: link dropped".into()));
+        }
+        if data.get(1) == Some(&Cmd::Write.byte()) {
+            if let Some(n) = self.fail_write_send_after.take() {
+                let n = n.min(data.len());
+                self.sent.extend_from_slice(&data[..n]);
+                if n == data.len() {
+                    self.sim.feed(data);
+                }
+                self.link_down = true;
+                return Err(TransportError::LinkDown(
+                    "sim: link dropped mid-send".into(),
+                ));
+            }
         }
         self.sent.extend_from_slice(data);
         if self.drop_link_after_write && data.get(1) == Some(&Cmd::Write.byte()) {

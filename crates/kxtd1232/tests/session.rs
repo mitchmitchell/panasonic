@@ -153,3 +153,42 @@ fn test_plan_error_is_an_error_source() {
     assert!(p.source().is_some());
     assert!(kxtd1232::Error::Timeout.source().is_none());
 }
+
+/// Claude review (PRRT_kwDOVUJjDM6vemQF): an empty sign-on pattern matches every line, so
+/// each one is refused up front.
+fn empty_signon_field(f: impl FnOnce(&mut kxtd1232::SignOn)) -> kxtd1232::error::LoginFailure {
+    let mut s = kxtd1232::SignOn::default();
+    f(&mut s);
+    kxtd1232::session::Login::with_signon("0000", s).unwrap_err()
+}
+
+#[test]
+fn test_signon_rejects_empty_password_prompt() {
+    let e = empty_signon_field(|s| s.password_prompt.clear());
+    assert_eq!(
+        e,
+        kxtd1232::error::LoginFailure::InvalidSignOn {
+            field: "password_prompt"
+        }
+    );
+}
+
+#[test]
+fn test_signon_rejects_empty_mode_start() {
+    let e = empty_signon_field(|s| s.mode_start = " ".into());
+    assert_eq!(
+        e,
+        kxtd1232::error::LoginFailure::InvalidSignOn {
+            field: "mode_start"
+        }
+    );
+}
+
+#[test]
+fn test_signon_rejects_empty_in_use() {
+    let e = empty_signon_field(|s| s.in_use.clear());
+    assert_eq!(
+        e,
+        kxtd1232::error::LoginFailure::InvalidSignOn { field: "in_use" }
+    );
+}

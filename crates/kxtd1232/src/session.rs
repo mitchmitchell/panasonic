@@ -58,6 +58,16 @@ impl Login {
         if password.is_empty() || password.contains(['\r', '\n']) || !password.is_ascii() {
             return Err(LoginFailure::InvalidPassword);
         }
+        // An empty pattern matches every line (every line would look like "in use").
+        for (field, v) in [
+            ("password_prompt", &signon.password_prompt),
+            ("mode_start", &signon.mode_start),
+            ("in_use", &signon.in_use),
+        ] {
+            if v.trim().is_empty() {
+                return Err(LoginFailure::InvalidSignOn { field });
+            }
+        }
         Ok(Self {
             password: password.as_bytes().to_vec(),
             state: LoginState::WaitXon,
