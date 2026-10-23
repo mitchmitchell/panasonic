@@ -98,3 +98,19 @@ fn test_invalid_value_uses_error_prefix() {
         assert_eq!(e.lines().count(), 1, "one line: {e}");
     }
 }
+
+#[test]
+fn test_clap_usage_errors_are_one_line() {
+    for argv in [
+        &["read"][..],
+        &["--bogus"],
+        &["read", "cid_name", "--first", "x"],
+        &[],
+    ] {
+        let o = run(argv);
+        assert_eq!(o.status.code(), Some(2), "{argv:?}");
+        let e = stderr(&o);
+        assert!(e.starts_with("kxprov: error: "), "{e}");
+        assert_eq!(e.lines().count(), 1, "one line: {e}");
+    }
+}

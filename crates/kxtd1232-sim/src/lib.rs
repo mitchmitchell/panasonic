@@ -6,14 +6,39 @@
 //! variants, ...) lands in A2.
 
 use kxtd1232::fields::{encode_cid_name, encode_cid_number, encode_ext_name};
-use kxtd1232::frame::{checksum, encode_raw, Cmd, BUSY_FRAME};
+use kxtd1232::frame::{checksum, Cmd, BUSY_FRAME};
 use kxtd1232::tables;
-use kxtd1232::{Transport, TransportError};
+use kxtd1232::{SignOn, Transport, TransportError};
 use std::collections::{HashMap, VecDeque};
 
 pub const PLACEHOLDER_PASSWORD: &str = "0000";
 pub const PLACEHOLDER_ROM_ID: &str = "-----PXXXXXXXXXX";
-pub const BANNER: &[u8] = b"Welcome To KX-TD1232  Ver 2.0 Panasonic CO.,LTD.\r\nEnter Password\r\n";
+/// Sign-on text the simulator plays: the placeholders from [`SignOn::default`].
+fn text_line(s: &str) -> Vec<u8> {
+    format!("{s}\r\n").into_bytes()
+}
+
+/// Banner then password prompt, as sent after CR LF and after BYE.
+pub fn banner() -> Vec<u8> {
+    let s = SignOn::default();
+    let mut v = text_line(&s.banner);
+    v.extend(text_line(&s.password_prompt));
+    v
+}
+
+/// Frame `[LEN][CMD][body][SUM]` as the PBX would send it. The simulator plays the PBX, so
+/// it frames its own replies; the protocol core exposes no raw-byte encoder. Tests use it
+/// to inject stale or garbled frames.
+pub fn reply_frame(cmd: u8, body: &[u8]) -> Vec<u8> {
+    let len = 2 + body.len();
+    assert!(len <= 0xFF, "reply body too long");
+    let mut out = Vec::with_capacity(len + 1);
+    out.push(len as u8);
+    out.push(cmd);
+    out.extend_from_slice(body);
+    out.push(checksum(&out));
+    out
+}
 /// Busy-frame cadence observed on the real unit.
 pub const BUSY_CADENCE_MS: u64 = 128;
 
@@ -36,11 +61,19 @@ pub enum Fault {
     GarbledAck,
     /// Next write is stored and answered with an ack for another command (0x01).
     StaleReply,
+    /// Next request's real reply is preceded by a same-command stale one (a read reply
+    /// full of 0xEE, or a write ack) arriving 20 ms earlier.
+    DuplicateReply,
+    /// Next request's reply is followed 10 ms later by one busy frame.
+    BusyAfterReply,
 }
 
 impl Fault {
     const fn write_only(self) -> bool {
-        !matches!(self, Self::Nak | Self::Busy { .. })
+        !matches!(
+            self,
+            Self::Nak | Self::Busy { .. } | Self::DuplicateReply | Self::BusyAfterReply
+        )
     }
 }
 
@@ -96,6 +129,8 @@ pub struct SimPbx {
     pub commands: Vec<u8>,
     /// Response latency for every reply.
     pub latency_ms: u64,
+    /// When set, BYE gets no answer (logout not confirmed).
+    pub silent_bye: bool,
 }
 
 impl Default for SimPbx {
@@ -123,6 +158,7 @@ impl SimPbx {
             writes: Vec::new(),
             commands: Vec::new(),
             latency_ms: 30,
+            silent_bye: false,
         }
     }
 
@@ -179,14 +215,14 @@ impl SimPbx {
         match self.mode {
             Mode::AwaitCrlf => {
                 self.mode = Mode::AwaitPassword;
-                BANNER.to_vec()
+                banner()
             }
             Mode::AwaitPassword if line == self.password.as_slice() => {
                 self.mode = Mode::AwaitEcs;
-                b"EIA Mode Start\r\n".to_vec()
+                text_line(&SignOn::default().mode_start)
             }
             // Wrong-password reply is a guess, like the RE simulator (gate G5).
-            Mode::AwaitPassword => b"Enter Password\r\n".to_vec(),
+            Mode::AwaitPassword => text_line(&SignOn::default().password_prompt),
             Mode::AwaitEcs if line == b"ECS OF" => {
                 self.mode = Mode::AwaitPrg;
                 b"ECS OF\r\nOK\r\n".to_vec()
@@ -195,10 +231,11 @@ impl SimPbx {
                 self.mode = Mode::Binary;
                 b"OK\r\n".to_vec()
             }
+            Mode::AwaitBye if line == b"BYE" && self.silent_bye => Vec::new(),
             Mode::AwaitBye if line == b"BYE" => {
                 self.mode = Mode::AwaitPassword;
                 let mut v = b"OK\r\n".to_vec();
-                v.extend_from_slice(BANNER);
+                v.extend(banner());
                 v
             }
             _ => b"NG\r\n".to_vec(),
@@ -206,7 +243,7 @@ impl SimPbx {
     }
 
     fn reply(cmd: u8, body: &[u8]) -> Vec<u8> {
-        encode_raw(cmd, body).unwrap_or_default()
+        reply_frame(cmd, body)
     }
 
     fn frame(&mut self, raw: &[u8]) -> Emits {
@@ -255,6 +292,18 @@ impl SimPbx {
                 self.store(body, true);
                 return vec![(lat, Self::reply(Cmd::Read.byte(), &[0x00]))];
             }
+            Some(Fault::DuplicateReply) => {
+                let stale = match Cmd::from_byte(cmd) {
+                    Some(Cmd::Read) if body.len() == 6 => {
+                        let mut b = vec![0x00];
+                        b.resize(1 + 2 * body[5] as usize, 0xEE);
+                        Self::reply(cmd, &b)
+                    }
+                    _ => Self::reply(cmd, &[0x00]),
+                };
+                out.push((t, stale));
+                t += 20;
+            }
             _ => {}
         }
         let r = match Cmd::from_byte(cmd) {
@@ -276,6 +325,9 @@ impl SimPbx {
             _ => Self::reply(cmd, &[0x00]), // guess, like the RE simulator
         };
         out.push((t, r));
+        if fault == Some(Fault::BusyAfterReply) {
+            out.push((t + 10, BUSY_FRAME.to_vec()));
+        }
         out
     }
 
@@ -328,6 +380,9 @@ pub struct SimTransport {
     queue: VecDeque<(u64, Vec<u8>)>,
     /// Every byte the client sent.
     pub sent: Vec<u8>,
+    /// When set, the link drops right after the next write frame reaches the simulator.
+    pub drop_link_after_write: bool,
+    link_down: bool,
 }
 
 impl SimTransport {
@@ -341,7 +396,37 @@ impl SimTransport {
             now: 0,
             queue: q,
             sent: Vec::new(),
+            drop_link_after_write: false,
+            link_down: false,
         }
+    }
+
+    /// Bring a dropped link back: DTR cycles and the PBX greets again, ready for login.
+    pub fn reconnect(&mut self) {
+        self.link_down = false;
+        self.drop_link_after_write = false;
+        self.queue.clear();
+        self.sim.dtr_down();
+        let first = self.sim.dtr_up();
+        let now = self.now;
+        self.schedule(now, first);
+    }
+
+    /// Drop the link now: every later send/recv fails until [`Self::reconnect`].
+    pub fn drop_link_now(&mut self) {
+        self.link_down = true;
+    }
+
+    /// Queue bytes as if they were already waiting in the receive buffer (a stale frame
+    /// from an earlier exchange).
+    pub fn inject_inbound(&mut self, bytes: Vec<u8>) {
+        self.inject_inbound_after(0, bytes);
+    }
+
+    /// Queue bytes to arrive `delay_ms` from now, independent of any request.
+    pub fn inject_inbound_after(&mut self, delay_ms: u64, bytes: Vec<u8>) {
+        let at = self.now + delay_ms;
+        self.schedule(at, bytes);
     }
 
     pub fn now(&self) -> u64 {
@@ -360,15 +445,30 @@ impl SimTransport {
 
 impl Transport for SimTransport {
     fn send(&mut self, data: &[u8]) -> Result<(), TransportError> {
+        if self.link_down {
+            return Err(TransportError::LinkDown("sim: link dropped".into()));
+        }
         self.sent.extend_from_slice(data);
+        if self.drop_link_after_write && data.get(1) == Some(&Cmd::Write.byte()) {
+            self.sim.feed(data);
+            self.link_down = true;
+            return Ok(());
+        }
+        // Model the 9600-baud line: the PBX acts once the request has been received, and
+        // each reply lands once it has been transmitted.
+        let t = kxtd1232::Timing::default();
+        let rx_done = self.now + t.tx_ms(data.len());
         for (delay, bytes) in self.sim.feed(data) {
-            let at = self.now + delay;
+            let at = rx_done + delay + t.tx_ms(bytes.len());
             self.schedule(at, bytes);
         }
         Ok(())
     }
 
     fn recv(&mut self, timeout_ms: u64) -> Result<Vec<u8>, TransportError> {
+        if self.link_down {
+            return Err(TransportError::LinkDown("sim: link dropped".into()));
+        }
         match self.queue.front() {
             Some(&(at, _)) if at <= self.now + timeout_ms => {
                 self.now = self.now.max(at);
