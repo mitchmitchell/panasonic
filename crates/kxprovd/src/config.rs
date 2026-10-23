@@ -2,9 +2,11 @@ use crate::gates::GateConfig;
 use crate::peer::PeerPolicy;
 use kxprov_api::Profile;
 use kxtd1232::{Timing, TimingConfigError};
+#[cfg(feature = "inprocess-sim")]
 use kxtd1232_sim::SimPbx;
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
+#[cfg(feature = "inprocess-sim")]
 use std::sync::{Arc, Mutex};
 use thiserror::Error;
 
@@ -32,6 +34,7 @@ pub struct Config {
     pub totp_enabled: bool,
     pub totp_secret_path: Option<PathBuf>,
     pub timing: Timing,
+    #[cfg(feature = "inprocess-sim")]
     pub sim_pbx: Option<Arc<Mutex<SimPbx>>>,
     pub tokens_path: PathBuf,
 }
@@ -72,8 +75,8 @@ struct EtcConfigFile {
 #[serde(rename_all = "snake_case")]
 enum TransportKindWire {
     #[default]
-    Sim,
     Serial,
+    Sim,
 }
 
 fn default_data_dir() -> PathBuf {
@@ -114,6 +117,8 @@ pub enum ConfigError {
     Timing(#[from] TimingConfigError),
     #[error("gateway_uid must differ from admin_uid")]
     UidsMustDiffer,
+    #[error("in-process sim transport was not enabled at build time (rebuild with feature inprocess-sim)")]
+    SimTransportNotBuilt,
 }
 
 impl std::fmt::Debug for Config {
@@ -133,6 +138,10 @@ impl Config {
         self.timing.validate()?;
         if self.gateway_uid == self.admin_uid {
             return Err(ConfigError::UidsMustDiffer);
+        }
+        #[cfg(not(feature = "inprocess-sim"))]
+        if self.transport == TransportKind::Sim {
+            return Err(ConfigError::SimTransportNotBuilt);
         }
         Ok(())
     }
@@ -167,6 +176,7 @@ impl Config {
             totp_enabled: file.totp_enabled,
             totp_secret_path: file.totp_secret_path,
             timing,
+            #[cfg(feature = "inprocess-sim")]
             sim_pbx: None,
             tokens_path: file.tokens_path,
         };

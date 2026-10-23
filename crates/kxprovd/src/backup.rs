@@ -91,6 +91,7 @@ impl BackupStore {
             return Ok(tail);
         }
         match transport {
+            #[cfg(feature = "inprocess-sim")]
             AnyTransport::Sim(sim) => Ok(sim.dbh_upload_header_tail()),
             AnyTransport::Serial(_) => Err(BackupError::NoBackupForWrite),
         }

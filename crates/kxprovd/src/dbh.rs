@@ -135,7 +135,7 @@ pub fn parse_size(data: &[u8]) -> Result<(), DbhError> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "inprocess-sim"))]
 mod tests {
     use super::*;
     use kxtd1232_sim::synthetic_db;
