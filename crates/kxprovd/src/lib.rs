@@ -38,6 +38,8 @@ use config::{Config, TransportKind};
 use gates::GateState;
 use goliath::GoliathQueue;
 use journal::Journal;
+#[cfg(feature = "test-util")]
+use kxprov_api::Profile;
 use locked::LockedStore;
 use plan_store::PlanStore;
 use std::sync::Arc;
