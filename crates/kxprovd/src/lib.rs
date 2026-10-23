@@ -35,7 +35,6 @@ use config::{Config, TransportKind};
 use gates::GateState;
 use goliath::GoliathQueue;
 use journal::Journal;
-#[cfg(feature = "test-util")]
 use kxprov_api::Profile;
 use locked::LockedStore;
 use plan_store::PlanStore;
@@ -50,6 +49,22 @@ pub struct Daemon {
 }
 
 impl Daemon {
+    fn load_tokens(config: &Config) -> Result<TokenStore, Box<dyn std::error::Error + Send + Sync>> {
+        let map_err = |e: tokens::TokenError| {
+            Box::new(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                e.to_string(),
+            )) as Box<dyn std::error::Error + Send + Sync>
+        };
+        #[cfg(feature = "test-util")]
+        {
+            if config.profile == Profile::Sim && config.transport == TransportKind::Sim {
+                return TokenStore::load_insecure(config.tokens_path.clone()).map_err(map_err);
+            }
+        }
+        TokenStore::load(config.tokens_path.clone()).map_err(map_err)
+    }
+
     pub fn start(config: Config) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         config.validate()?;
         let process_lock = lock::ProcessLock::acquire(&config.data_dir)?;
@@ -73,12 +88,7 @@ impl Daemon {
         let (job_tx, job_rx) = mpsc::channel(32);
         let queue = Arc::new(queue::JobQueue::new(job_tx));
 
-        let tokens = TokenStore::load(config.tokens_path.clone()).map_err(|e| {
-            Box::new(std::io::Error::new(
-                std::io::ErrorKind::PermissionDenied,
-                e.to_string(),
-            )) as Box<dyn std::error::Error + Send + Sync>
-        })?;
+        let tokens = Self::load_tokens(&config)?;
         tokens.attach_job_queue(Arc::downgrade(&queue));
         let gates = Arc::new(RwLock::new(GateState {
             config: config.gates,
