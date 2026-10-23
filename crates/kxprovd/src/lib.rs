@@ -63,10 +63,7 @@ fn bind_unix_listener(
         use std::os::unix::fs::PermissionsExt;
         use std::os::unix::net::UnixListener as StdUnixListener;
         let std_listener = StdUnixListener::bind(socket_path)?;
-        std::fs::set_permissions(
-            socket_path,
-            std::fs::Permissions::from_mode(0o660),
-        )?;
+        std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o660))?;
         std_listener.set_nonblocking(true)?;
         UnixListener::from_std(std_listener).map_err(|e| Box::new(e) as _)
     }

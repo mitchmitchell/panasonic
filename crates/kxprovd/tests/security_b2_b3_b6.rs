@@ -157,8 +157,11 @@ async fn b9_revoked_token_fails_queued_job() {
         let mut c = clients.pop().unwrap();
         let params = plan_params(&format!("QUEUED-{i}"));
         handles.push(tokio::spawn(async move {
-            c.call_auth(RequestBody::PlanChange { params }, Some(bearer_auth(WRITER_SECRET)))
-                .await
+            c.call_auth(
+                RequestBody::PlanChange { params },
+                Some(bearer_auth(WRITER_SECRET)),
+            )
+            .await
         }));
     }
 
@@ -172,14 +175,20 @@ async fn b9_revoked_token_fails_queued_job() {
     for h in handles {
         match h.await.unwrap() {
             Err(e) if e.to_string().contains("token_revoked") => saw_revoked = true,
-            Err(e) if e.to_string().contains("unauthorized") || e.to_string().contains("invalid bearer") => {
+            Err(e)
+                if e.to_string().contains("unauthorized")
+                    || e.to_string().contains("invalid bearer") =>
+            {
                 saw_revoked = true;
             }
             Ok(_) => {}
             Err(e) => panic!("unexpected error: {e}"),
         }
     }
-    assert!(saw_revoked, "expected at least one queued job to fail after token removal");
+    assert!(
+        saw_revoked,
+        "expected at least one queued job to fail after token removal"
+    );
 }
 
 /// B8: gateway and admin Unix identities must differ at startup.

@@ -212,9 +212,7 @@ fn verify_bearer(
                 api_err("unauthorized", "invalid bearer")
             }
             TokenError::ScopeDenied => api_err("forbidden", "token scope denied"),
-            TokenError::Io(_) | TokenError::Json(_) => {
-                api_err("token", "token store unavailable")
-            }
+            TokenError::Io(_) | TokenError::Json(_) => api_err("token", "token store unavailable"),
             TokenError::InsecurePermissions | TokenError::Invalid(_) => {
                 api_err("token", "invalid tokens configuration")
             }

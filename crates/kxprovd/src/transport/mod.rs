@@ -52,13 +52,11 @@ pub fn open(config: &Config) -> Result<AnyTransport, String> {
                 .ok_or_else(|| "sim transport requires sim_pbx".to_string())?;
             Ok(AnyTransport::Sim(Box::new(SimTransportBridge::new(pbx))))
         }
-        TransportKind::Serial => {
-            TokioSerialTransport::open(
-                &config.serial_device,
-                config.timing.link_baud,
-                config.timing.send_bound_ms,
-            )
-            .map(AnyTransport::Serial)
-        }
+        TransportKind::Serial => TokioSerialTransport::open(
+            &config.serial_device,
+            config.timing.link_baud,
+            config.timing.send_bound_ms,
+        )
+        .map(AnyTransport::Serial),
     }
 }
