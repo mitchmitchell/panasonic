@@ -57,6 +57,7 @@ fn sample_config(dir: &TempDir) -> GatewayConfig {
     GatewayConfig {
         bind: Some("127.0.0.1:0".into()),
         lan_ip: None,
+        serve_hostname: None,
         web_https_port: 8443,
         web_tailnet_bind: "127.0.0.1:0".into(),
         mcp_tailnet_bind: "127.0.0.1:8081".into(),

@@ -54,6 +54,8 @@ pub struct GatewayConfig {
     pub rate_limit_per_minute: u32,
     pub allowed_hosts: Vec<String>,
     pub allowed_origins: Vec<String>,
+    /// Tailscale Serve hostname (e.g. `mybox.tailnet.ts.net`) when exposed via Serve.
+    pub serve_hostname: Option<String>,
 }
 
 impl Default for GatewayConfig {
@@ -76,6 +78,7 @@ impl Default for GatewayConfig {
             rate_limit_per_minute: 120,
             allowed_hosts: vec![],
             allowed_origins: vec![],
+            serve_hostname: None,
         }
     }
 }
@@ -93,23 +96,54 @@ impl GatewayConfig {
         if !self.allowed_origins.is_empty() {
             return self.allowed_origins.clone();
         }
-        self.effective_allowed_hosts()
-            .iter()
-            .map(|host| format!("http://{host}"))
-            .collect()
+        self.derived_site_origins()
     }
 
     fn derived_loopback_hosts(&self) -> Vec<String> {
         let mut out = Vec::new();
-        let mut binds = vec![self.web_tailnet_bind.clone()];
-        binds.extend(self.web_lan_bind_addresses());
-        for bind in binds {
+        if let Ok(addr) = self.web_tailnet_bind.parse::<SocketAddr>() {
+            push_http_listener_hosts(&mut out, addr.port(), &["localhost", "127.0.0.1"]);
+        }
+        for bind in self.web_lan_bind_addresses() {
             let Ok(addr) = bind.parse::<SocketAddr>() else {
                 continue;
             };
-            let port = addr.port();
-            for host in ["localhost", "127.0.0.1"] {
-                out.push(format!("{host}:{port}"));
+            push_https_listener_hosts(&mut out, addr.port(), &["localhost", "127.0.0.1"]);
+            if let Some(lan) = self.lan_ip {
+                let ip = lan.to_string();
+                push_https_listener_hosts(&mut out, addr.port(), &[ip.as_str()]);
+            }
+        }
+        if let Some(ref name) = self.serve_hostname {
+            let trimmed = name.trim();
+            if !trimmed.is_empty() {
+                push_https_listener_hosts(&mut out, self.web_https_port, &[trimmed]);
+            }
+        }
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    fn derived_site_origins(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        if let Ok(addr) = self.web_tailnet_bind.parse::<SocketAddr>() {
+            push_http_listener_origins(&mut out, addr.port(), &["localhost", "127.0.0.1"]);
+        }
+        for bind in self.web_lan_bind_addresses() {
+            let Ok(addr) = bind.parse::<SocketAddr>() else {
+                continue;
+            };
+            push_https_listener_origins(&mut out, addr.port(), &["localhost", "127.0.0.1"]);
+            if let Some(lan) = self.lan_ip {
+                let ip = lan.to_string();
+                push_https_listener_origins(&mut out, addr.port(), &[ip.as_str()]);
+            }
+        }
+        if let Some(ref name) = self.serve_hostname {
+            let trimmed = name.trim();
+            if !trimmed.is_empty() {
+                push_https_listener_origins(&mut out, self.web_https_port, &[trimmed]);
             }
         }
         out.sort();
@@ -208,6 +242,12 @@ impl GatewayConfig {
         if let Ok(path) = std::env::var("KXPROV_DAEMON_SOCKET") {
             config.daemon_socket_path = path.into();
         }
+        if let Ok(host) = std::env::var("KXPROV_SERVE_HOSTNAME") {
+            let trimmed = host.trim();
+            if !trimmed.is_empty() {
+                config.serve_hostname = Some(trimmed.to_string());
+            }
+        }
         config.apply_cli(std::env::args().skip(1))?;
         config.validate_site_bind_settings()?;
         Ok(config)
@@ -266,6 +306,12 @@ impl GatewayConfig {
         if let Some(v) = file.daemon_socket_path {
             self.daemon_socket_path = v.into();
         }
+        if let Some(v) = file.serve_hostname {
+            let trimmed = v.trim();
+            if !trimmed.is_empty() {
+                self.serve_hostname = Some(trimmed.to_string());
+            }
+        }
         Ok(())
     }
 
@@ -306,6 +352,41 @@ struct FileConfig {
     tls_key_path: Option<String>,
     admin_password_path: Option<String>,
     daemon_socket_path: Option<String>,
+    serve_hostname: Option<String>,
+}
+
+fn push_http_listener_hosts(out: &mut Vec<String>, port: u16, hosts: &[&str]) {
+    for host in hosts {
+        out.push(format!("{host}:{port}"));
+    }
+}
+
+fn push_https_listener_hosts(out: &mut Vec<String>, port: u16, hosts: &[&str]) {
+    for host in hosts {
+        if port == 443 {
+            out.push(host.to_string());
+            out.push(format!("{host}:443"));
+        } else {
+            out.push(format!("{host}:{port}"));
+        }
+    }
+}
+
+fn push_http_listener_origins(out: &mut Vec<String>, port: u16, hosts: &[&str]) {
+    for host in hosts {
+        out.push(format!("http://{host}:{port}"));
+    }
+}
+
+fn push_https_listener_origins(out: &mut Vec<String>, port: u16, hosts: &[&str]) {
+    for host in hosts {
+        if port == 443 {
+            out.push(format!("https://{host}"));
+            out.push(format!("https://{host}:443"));
+        } else {
+            out.push(format!("https://{host}:{port}"));
+        }
+    }
 }
 
 #[cfg(test)]
@@ -376,9 +457,26 @@ mod tests {
         let hosts = cfg.effective_allowed_hosts();
         assert!(hosts.contains(&"localhost:8080".to_string()));
         assert!(hosts.contains(&"127.0.0.1:8080".to_string()));
+        assert!(hosts.contains(&"127.0.0.1".to_string()));
         assert!(hosts.contains(&"127.0.0.1:443".to_string()));
         let origins = cfg.effective_allowed_origins();
         assert!(origins.contains(&"http://localhost:8080".to_string()));
+        assert!(origins.contains(&"https://127.0.0.1".to_string()));
+    }
+
+    #[test]
+    fn derived_allowlist_includes_lan_ip_and_serve_hostname() {
+        let cfg = GatewayConfig {
+            lan_ip: Some("10.0.0.5".parse().unwrap()),
+            serve_hostname: Some("gw.example.ts.net".into()),
+            ..Default::default()
+        };
+        let hosts = cfg.effective_allowed_hosts();
+        assert!(hosts.contains(&"10.0.0.5".to_string()));
+        assert!(hosts.contains(&"gw.example.ts.net".to_string()));
+        let origins = cfg.effective_allowed_origins();
+        assert!(origins.contains(&"https://10.0.0.5".to_string()));
+        assert!(origins.contains(&"https://gw.example.ts.net".to_string()));
     }
 
     #[test]

@@ -291,9 +291,9 @@ async fn login_submit(
     let acct_key = "acct:admin".to_string();
     let ip_key = format!("ip:{ip}");
     match state.login_limiter.precheck_login(&acct_key, &ip_key).await {
-        LoginPrecheck::RateLimited(delay) => {
+        LoginPrecheck::IpRateLimited(delay) => {
             return login_rate_limited_response(
-                "Too many login attempts. Try again later.",
+                "Too many login attempts from this address. Try again later.",
                 delay,
             );
         }

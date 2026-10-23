@@ -13,7 +13,8 @@ pub enum LoginBusy {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LoginPrecheck {
     Ready,
-    RateLimited(Duration),
+    /// Hard 429 + Retry-After: this IP has its own failure backoff only.
+    IpRateLimited(Duration),
     AccountInProgress,
 }
 
@@ -62,6 +63,7 @@ impl LoginRateLimiter {
     }
 
     /// Backoff / concurrency gate before password verification (does not take the verify slot).
+    /// Account backoff never hard-blocks a clean IP; only IP backoff yields 429.
     pub async fn precheck_login(&self, account_key: &str, ip_key: &str) -> LoginPrecheck {
         {
             let active = self.account_active.lock().expect("account login lock");
@@ -69,9 +71,9 @@ impl LoginRateLimiter {
                 return LoginPrecheck::AccountInProgress;
             }
         }
-        let delay = self.delay_before_attempt(account_key, ip_key).await;
-        if delay > Duration::ZERO {
-            return LoginPrecheck::RateLimited(delay);
+        let ip_delay = self.delay_for_key(ip_key).await;
+        if ip_delay > Duration::ZERO {
+            return LoginPrecheck::IpRateLimited(ip_delay);
         }
         LoginPrecheck::Ready
     }
@@ -92,9 +94,23 @@ impl LoginRateLimiter {
     pub async fn delay_before_attempt(&self, account_key: &str, ip_key: &str) -> Duration {
         let map = self.by_key.lock().await;
         let now = Instant::now();
-        let acct = wait_for_key(map.get(account_key), now, self.max_account_backoff);
+        let acct = wait_for_key(
+            map.get(account_key),
+            now,
+            self.max_account_backoff,
+        );
         let ip = wait_for_key(map.get(ip_key), now, self.max_ip_backoff);
         acct.max(ip)
+    }
+
+    async fn delay_for_key(&self, key: &str) -> Duration {
+        let cap = if key.starts_with("ip:") {
+            self.max_ip_backoff
+        } else {
+            self.max_account_backoff
+        };
+        let map = self.by_key.lock().await;
+        wait_for_key(map.get(key), Instant::now(), cap)
     }
 
     pub async fn record_failure(&self, account_key: &str, ip_key: &str) {
@@ -175,7 +191,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stranger_failures_cannot_delay_mitch_beyond_account_cap() {
+    async fn clean_ip_precheck_ignores_account_backoff() {
         let limiter = LoginRateLimiter::new(
             Duration::from_secs(10),
             Duration::from_secs(30),
@@ -184,10 +200,10 @@ mod tests {
         for _ in 0..50 {
             limiter.record_failure("acct:admin", "ip:stranger").await;
         }
-        let wait = limiter
-            .delay_before_attempt("acct:admin", "ip:mitch-home")
-            .await;
-        assert!(wait <= Duration::from_secs(30));
+        assert!(matches!(
+            limiter.precheck_login("acct:admin", "ip:mitch-home").await,
+            LoginPrecheck::Ready
+        ));
     }
 
     #[tokio::test]
@@ -207,7 +223,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rate_limited_precheck_does_not_hold_verify_slot() {
+    async fn ip_backoff_yields_rate_limited_precheck() {
         let limiter = LoginRateLimiter::new(
             Duration::from_millis(200),
             Duration::from_secs(30),
@@ -215,35 +231,34 @@ mod tests {
         );
         limiter.record_failure("acct:admin", "ip:1").await;
         assert!(matches!(
-            limiter.precheck_login("acct:admin", "ip:2").await,
-            LoginPrecheck::RateLimited(_)
+            limiter.precheck_login("acct:admin", "ip:1").await,
+            LoginPrecheck::IpRateLimited(_)
         ));
-        assert!(
-            limiter
-                .begin_password_verify("acct:admin")
-                .is_ok(),
-            "backoff must not hold the verify slot"
-        );
+        assert!(matches!(
+            limiter.precheck_login("acct:admin", "ip:2").await,
+            LoginPrecheck::Ready
+        ));
     }
 
     #[tokio::test]
-    async fn rapid_hammer_cannot_extend_mitch_delay_past_account_cap() {
+    async fn clean_ip_can_login_while_account_backoff_and_other_ips_fail() {
         let limiter = LoginRateLimiter::new(
-            Duration::from_secs(5),
+            Duration::from_millis(100),
             Duration::from_secs(30),
             Duration::from_secs(300),
         );
-        for i in 0..100 {
+        for i in 0..10 {
             limiter
-                .record_failure("acct:admin", &format!("ip:hammer-{i}"))
+                .record_failure("acct:admin", &format!("ip:attacker-{i}"))
                 .await;
         }
-        let wait = limiter
-            .precheck_login("acct:admin", "ip:mitch-home")
-            .await;
-        let LoginPrecheck::RateLimited(d) = wait else {
-            panic!("mitch should still be rate limited");
-        };
-        assert!(d <= Duration::from_secs(30));
+        assert!(matches!(
+            limiter.precheck_login("acct:admin", "ip:mitch-home").await,
+            LoginPrecheck::Ready
+        ));
+        assert!(
+            limiter.begin_password_verify("acct:admin").is_ok(),
+            "clean IP may verify password during account backoff"
+        );
     }
 }

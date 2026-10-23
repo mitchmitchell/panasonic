@@ -71,6 +71,3 @@ required-features = ["test-util"]
 [[test]]
 name = "run_seed"
 required-features = ["test-util"]
-
-[[test]]
-name = "release_markers"

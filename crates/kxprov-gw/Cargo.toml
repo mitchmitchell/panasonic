@@ -31,6 +31,11 @@ path = "tests/host_authority.rs"
 required-features = ["test-secret-skip"]
 
 [[test]]
+name = "https_origin_allowlist"
+path = "tests/https_origin_allowlist.rs"
+required-features = ["test-secret-skip"]
+
+[[test]]
 name = "run_seed"
 path = "tests/run_seed.rs"
 required-features = ["test-secret-skip"]
