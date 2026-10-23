@@ -9,8 +9,7 @@ Type=simple
 # root:kxprovision so gateway (SupplementaryGroups=kxprovision) can reach kxprovd.sock.
 User=root
 Group=kxprovision
-RuntimeDirectory=kx-provision
-RuntimeDirectoryMode=0750
+RuntimeDirectory=kx-provision:0750:root:kxprovision
 UMask=0077
 
 EnvironmentFile=-/etc/kx-provision/daemon.env

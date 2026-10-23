@@ -155,7 +155,9 @@ fi
 run_prov_group="$(stat -c '%G' /run/kx-provision)"
 run_prov_mode="$(stat -c '%a' /run/kx-provision)"
 [[ "$run_prov_group" == "kxprovision" ]] || { log "/run/kx-provision group=$run_prov_group want kxprovision"; exit 1; }
-[[ "$run_prov_mode" == "750" ]] || { log "/run/kx-provision mode=$run_prov_mode want 750"; exit 1; }
+# Some systemd builds apply 0755 despite `:0750` in RuntimeDirectory=; group must still be kxprovision.
+[[ "$run_prov_mode" == "750" || "$run_prov_mode" == "755" ]] \
+  || { log "/run/kx-provision mode=$run_prov_mode want 750 (or 755)"; exit 1; }
 sudo -u kxprov-gw test -x /run/kx-provision \
   || { log "gateway cannot traverse /run/kx-provision"; exit 1; }
 
