@@ -29,10 +29,24 @@ pub struct TokenEntry {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TokenValidationError {
     ApproverMustNotHoldPlanOrWrite,
+    ReservedTokenId,
+}
+
+/// Ids reserved for Unix-socket synthetic principals (must not appear in `tokens.json`).
+pub fn token_id_is_reserved(id: &str) -> bool {
+    id == "root" || id == "local" || id.starts_with("local:")
 }
 
 /// Validate token layout rules shared by the daemon (load) and CLI (mint/rotate).
 pub fn validate_tokens_file(file: &TokensFile) -> Result<(), TokenValidationError> {
+    if token_id_is_reserved(file.approver_token_id.as_str()) {
+        return Err(TokenValidationError::ReservedTokenId);
+    }
+    for entry in &file.tokens {
+        if token_id_is_reserved(entry.id.as_str()) {
+            return Err(TokenValidationError::ReservedTokenId);
+        }
+    }
     if let Some(entry) = file.tokens.iter().find(|t| t.id == file.approver_token_id) {
         if entry
             .scopes
@@ -55,6 +69,24 @@ pub fn hash_bearer_secret(secret: &str) -> String {
 mod tests {
     use super::*;
     use crate::{Scope, TokenId};
+
+    #[test]
+    fn reserved_token_id_rejected() {
+        let file = TokensFile {
+            approver_token_id: TokenId("approver".into()),
+            tokens: vec![TokenEntry {
+                id: TokenId("root".into()),
+                secret_hash: "00".repeat(32),
+                scopes: vec![Scope::Read],
+                expires_at_ms: 1,
+                revoked: false,
+            }],
+        };
+        assert_eq!(
+            validate_tokens_file(&file),
+            Err(TokenValidationError::ReservedTokenId)
+        );
+    }
 
     #[test]
     fn approver_must_not_hold_plan_or_write() {

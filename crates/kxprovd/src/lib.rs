@@ -11,6 +11,7 @@ pub mod config;
 pub mod dbh;
 pub mod gates;
 pub mod goliath;
+pub mod job_principal;
 pub mod journal;
 pub mod lock;
 pub mod locked;

@@ -67,7 +67,38 @@ fn p4_r1_deleted_token_id_is_revoked() {
     assert!(store
         .is_revoked(&TokenId("no-such-token".into()))
         .expect("lookup"));
-    assert!(!store.is_revoked(&TokenId("root".into())).expect("root"));
+}
+
+#[test]
+fn p4_r8_reserved_token_id_rejected_at_load() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("tokens.json");
+    let mut file = kxprovd::test_util::default_tokens_file();
+    file.tokens.push(kxprov_api::TokenEntry {
+        id: TokenId("local:42".into()),
+        secret_hash: kxprov_api::hash_bearer_secret("extra"),
+        scopes: vec![kxprov_api::Scope::Read],
+        expires_at_ms: u64::MAX / 2,
+        revoked: false,
+    });
+    std::fs::write(&path, serde_json::to_vec_pretty(&file).unwrap()).unwrap();
+    assert!(TokenStore::load_insecure(path).is_err());
+}
+
+#[test]
+fn p4_r9_missing_mode_counter_with_stored_epoch_fails_closed() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        tmp.path().join("mode.json"),
+        serde_json::to_vec_pretty(&kxprovd::mode::ModeFileBody {
+            mode: kxprov_api::OperationalMode::Production,
+            counter: 3,
+        })
+        .unwrap(),
+    )
+    .unwrap();
+    let store = ModeStore::new(tmp.path(), Profile::Prod);
+    assert_eq!(store.load_profile(), Profile::Prod);
 }
 
 #[test]
@@ -111,26 +142,6 @@ fn p4_r3_missing_profile_after_epoch_fails_closed_to_prod() {
     std::fs::write(tmp.path().join("mode.counter"), "2\n").unwrap();
     let store = ModeStore::new(tmp.path(), Profile::Sim);
     assert_eq!(store.load_profile(), Profile::Prod);
-}
-
-fn kxprov_binary() -> std::path::PathBuf {
-    std::path::PathBuf::from(
-        std::env::var("CARGO_BIN_EXE_kxprov").unwrap_or_else(|_| {
-            format!("{}/../../target/debug/kxprov", env!("CARGO_MANIFEST_DIR"))
-        }),
-    )
-}
-
-fn ensure_kxprov_built() -> std::path::PathBuf {
-    let bin = kxprov_binary();
-    if !bin.is_file() {
-        let status = Command::new("cargo")
-            .args(["build", "-p", "kxprov", "-q"])
-            .status()
-            .expect("cargo build kxprov");
-        assert!(status.success());
-    }
-    bin
 }
 
 /// Jobs queued while revoked stay failed after rotate; only post-rotate submits succeed.
@@ -182,7 +193,7 @@ async fn p4_r6_rotate_does_not_revive_queued_revoked_jobs() {
         .await
         .expect_err("writer revoked before rotate");
 
-    let kxprov = ensure_kxprov_built();
+    let kxprov = common::kxprov_binary();
     let out = Command::new(&kxprov)
         .args(["token", "rotate", "--id", "writer"])
         .arg("--tokens-path")

@@ -56,6 +56,7 @@ pub struct TokenStore {
 struct TokenRefreshDelta {
     newly_revoked: Vec<TokenId>,
     reactivated: Vec<TokenId>,
+    rotated: Vec<TokenId>,
 }
 
 impl Clone for TokenStore {
@@ -121,7 +122,7 @@ impl TokenStore {
         *self.job_queue.lock().expect("token store lock") = Some(queue);
     }
 
-    fn notify_token_revocation_changes(&self, newly_revoked: &[TokenId], reactivated: &[TokenId]) {
+    fn notify_token_revocation_changes(&self, delta: &TokenRefreshDelta) {
         let q = self
             .job_queue
             .lock()
@@ -131,18 +132,15 @@ impl TokenStore {
         let Some(q) = q else {
             return;
         };
-        for id in newly_revoked {
+        for id in &delta.newly_revoked {
             q.bump_token_epoch(id);
         }
-        for id in reactivated {
+        for id in &delta.reactivated {
             q.bump_token_epoch(id);
         }
-    }
-
-    /// Unix-socket principals that are not rows in `tokens.json` (admin read, read-only peer).
-    pub fn is_synthetic_job_principal(token_id: &TokenId) -> bool {
-        let s = token_id.as_str();
-        s == "root" || s == "local" || s.starts_with("local:")
+        for id in &delta.rotated {
+            q.bump_token_epoch(id);
+        }
     }
 
     fn digest_bytes(raw: &[u8]) -> [u8; 32] {
@@ -198,6 +196,9 @@ impl TokenStore {
             TokenValidationError::ApproverMustNotHoldPlanOrWrite => {
                 TokenError::Invalid("approver token must not include Plan or Write scope".into())
             }
+            TokenValidationError::ReservedTokenId => {
+                TokenError::Invalid("token id is reserved for synthetic Unix principals".into())
+            }
         })?;
         let mut ids = std::collections::HashSet::new();
         let mut hashes = std::collections::HashSet::new();
@@ -217,6 +218,7 @@ impl TokenStore {
             return Ok(TokenRefreshDelta {
                 newly_revoked: Vec::new(),
                 reactivated: Vec::new(),
+                rotated: Vec::new(),
             });
         }
         let raw = std::fs::read(&state.path)?;
@@ -225,6 +227,7 @@ impl TokenStore {
             return Ok(TokenRefreshDelta {
                 newly_revoked: Vec::new(),
                 reactivated: Vec::new(),
+                rotated: Vec::new(),
             });
         }
         let enforce_secure = state.enforce_secure_reload;
@@ -241,6 +244,11 @@ impl TokenStore {
             .iter()
             .filter(|t| t.revoked)
             .map(|t| t.id.as_str().to_string())
+            .collect();
+        let prev_hashes: std::collections::HashMap<String, String> = state
+            .entries
+            .iter()
+            .map(|t| (t.id.as_str().to_string(), t.secret_hash.clone()))
             .collect();
         let fresh = Self::read_state_from_raw(&state.path, &raw)?;
         Self::validate_file(&fresh.entries, &fresh.approver_token_id)?;
@@ -264,11 +272,22 @@ impl TokenStore {
             .filter(|t| !t.revoked && prev_revoked.contains(t.id.as_str()))
             .map(|t| t.id.clone())
             .collect();
+        let rotated = fresh
+            .entries
+            .iter()
+            .filter(|t| {
+                prev_hashes
+                    .get(t.id.as_str())
+                    .is_some_and(|h| h != &t.secret_hash)
+            })
+            .map(|t| t.id.clone())
+            .collect();
         *state = fresh;
         state.enforce_secure_reload = enforce_secure;
         Ok(TokenRefreshDelta {
             newly_revoked,
             reactivated,
+            rotated,
         })
     }
 
@@ -314,7 +333,7 @@ impl TokenStore {
         let mut state = self.inner.lock().expect("token store lock");
         let delta = Self::refresh_if_modified(&mut state)?;
         drop(state);
-        self.notify_token_revocation_changes(&delta.newly_revoked, &delta.reactivated);
+        self.notify_token_revocation_changes(&delta);
         let state = self.inner.lock().expect("token store lock");
         let hash = hash_bearer_secret(bearer);
         let entry = Self::find_entry(&state.entries, &hash).ok_or(TokenError::Unauthorized)?;
@@ -352,13 +371,10 @@ impl TokenStore {
     }
 
     pub fn is_revoked(&self, token_id: &TokenId) -> Result<bool, TokenError> {
-        if Self::is_synthetic_job_principal(token_id) {
-            return Ok(false);
-        }
         let mut state = self.inner.lock().expect("token store lock");
         let delta = Self::refresh_if_modified(&mut state)?;
         drop(state);
-        self.notify_token_revocation_changes(&delta.newly_revoked, &delta.reactivated);
+        self.notify_token_revocation_changes(&delta);
         let state = self.inner.lock().expect("token store lock");
         Ok(state
             .entries

@@ -6,6 +6,24 @@ use std::path::Path;
 
 pub use kxprovd::test_util::{APPROVER_SECRET, COMM_SECRET, READER_SECRET, WRITER_SECRET};
 
+pub fn kxprov_binary() -> std::path::PathBuf {
+    if let Ok(p) = std::env::var("CARGO_BIN_EXE_kxprov") {
+        return std::path::PathBuf::from(p);
+    }
+    let target = std::env::var("CARGO_TARGET_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| {
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target")
+        });
+    let bin = target.join("debug/kxprov");
+    assert!(
+        bin.is_file(),
+        "kxprov not at {}; run via cargo test",
+        bin.display()
+    );
+    bin
+}
+
 pub fn bearer_auth(secret: &str) -> RequestAuth {
     RequestAuth {
         bearer: secret.to_string(),

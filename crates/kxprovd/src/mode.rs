@@ -128,8 +128,29 @@ impl ModeStore {
         );
     }
 
+    fn file_counter(path: &Path) -> Option<u64> {
+        let raw = std::fs::read_to_string(path).ok()?;
+        let body = serde_json::from_str::<ModeFileBody>(&raw).ok()?;
+        Some(body.counter)
+    }
+
+    fn profile_file_counter(path: &Path) -> Option<u64> {
+        let raw = std::fs::read_to_string(path).ok()?;
+        let body = serde_json::from_str::<ProfileFileBody>(&raw).ok()?;
+        Some(body.counter)
+    }
+
+    fn missing_counter_with_stored_epoch(&self) -> bool {
+        let mode_c = Self::file_counter(&self.mode_path).unwrap_or(0);
+        let prof_c = Self::profile_file_counter(&self.profile_path).unwrap_or(0);
+        mode_c > 0 || prof_c > 0
+    }
+
     fn last_counter(&self) -> Result<u64, ModeError> {
         if !self.counter_path.exists() {
+            if self.missing_counter_with_stored_epoch() {
+                return Err(ModeError::CounterCorrupt);
+            }
             return Ok(0);
         }
         let s = std::fs::read_to_string(&self.counter_path)?;

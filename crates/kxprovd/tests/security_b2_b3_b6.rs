@@ -18,26 +18,6 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::time::Duration;
 
-fn kxprov_binary() -> PathBuf {
-    PathBuf::from(
-        std::env::var("CARGO_BIN_EXE_kxprov").unwrap_or_else(|_| {
-            format!("{}/../../target/debug/kxprov", env!("CARGO_MANIFEST_DIR"))
-        }),
-    )
-}
-
-fn ensure_kxprov_built() -> PathBuf {
-    let bin = kxprov_binary();
-    if !bin.is_file() {
-        let status = Command::new("cargo")
-            .args(["build", "-p", "kxprov", "-q"])
-            .status()
-            .expect("cargo build kxprov");
-        assert!(status.success(), "failed to build kxprov for rotate test");
-    }
-    bin
-}
-
 /// B2: stale backup from another mode — only latest **Production** backup counts.
 #[tokio::test]
 async fn b2_stale_testing_mode_backup_ignored_for_prod_transition() {
@@ -191,7 +171,7 @@ async fn rotate_revoked_token_jobs_accepted_without_restart() {
     .await
     .expect_err("revoked writer");
 
-    let kxprov = ensure_kxprov_built();
+    let kxprov = common::kxprov_binary();
     let out = Command::new(&kxprov)
         .args(["token", "rotate", "--id", "writer"])
         .arg("--tokens-path")
