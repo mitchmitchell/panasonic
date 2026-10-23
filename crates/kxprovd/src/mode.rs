@@ -14,7 +14,7 @@ pub enum ModeError {
     Io(#[from] std::io::Error),
     #[error("json: {0}")]
     Json(#[from] serde_json::Error),
-    #[error("epoch storage")]
+    #[error("epoch storage: {0}")]
     Epoch(#[from] epoch_store::EpochError),
     #[error("counter rollback")]
     CounterRollback,
@@ -129,6 +129,16 @@ impl ModeStore {
                 self.fail_closed_profile_rollback(body.counter, last);
                 Profile::Prod
             }
+            Some(body) if self.later_epoch_on_other_profile(body.profile, body.counter) => {
+                self.fail_closed(
+                    AuditKind::ModeCounterRollback,
+                    format!(
+                        "profile.json counter {} stale after switch to another profile epoch",
+                        body.counter
+                    ),
+                );
+                Profile::Prod
+            }
             Some(body) => {
                 if self.boot_profile == Profile::Prod && body.profile != Profile::Prod {
                     self.fail_closed(
@@ -159,22 +169,54 @@ impl ModeStore {
         Some(body.counter)
     }
 
-    fn profile_file_counter(path: &Path) -> Option<u64> {
-        let raw = std::fs::read_to_string(path).ok()?;
-        let body = serde_json::from_str::<ProfileFileBody>(&raw).ok()?;
-        Some(body.counter)
+    /// Non-zero only when on-disk mode/profile files claim an epoch for `profile`.
+    fn cross_profile_epoch_peers(&self) -> &'static [Profile] {
+        match self.boot_profile {
+            Profile::Sim | Profile::Test => &[Profile::Sim, Profile::Test],
+            Profile::Prod => &[],
+        }
     }
 
-    fn missing_counter_with_stored_epoch(&self) -> bool {
-        let mode_c = Self::file_counter(&self.mode_path).unwrap_or(0);
-        let prof_c = Self::profile_file_counter(&self.profile_path).unwrap_or(0);
-        mode_c > 0 || prof_c > 0
+    fn later_epoch_on_other_profile(&self, profile: Profile, counter: u64) -> bool {
+        for &other in self.cross_profile_epoch_peers() {
+            if other == profile {
+                continue;
+            }
+            let Ok(epoch) = epoch_store::read_counter(&self.provision_root, other) else {
+                continue;
+            };
+            if epoch.is_some_and(|n| n > counter) {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn stored_epoch_claim_for_profile(&self, profile: Profile) -> u64 {
+        match std::fs::read_to_string(&self.profile_path) {
+            Ok(raw) => match serde_json::from_str::<ProfileFileBody>(&raw) {
+                Ok(body) if body.profile == profile => {
+                    let mode_c = Self::file_counter(&self.mode_path).unwrap_or(0);
+                    body.counter.max(mode_c)
+                }
+                Ok(_) => 0,
+                Err(_) => 0,
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                if profile == self.boot_profile {
+                    Self::file_counter(&self.mode_path).unwrap_or(0)
+                } else {
+                    0
+                }
+            }
+            Err(_) => 0,
+        }
     }
 
     fn last_counter(&self, profile: Profile) -> Result<u64, ModeError> {
         match epoch_store::read_counter(&self.provision_root, profile)? {
             None => {
-                if self.missing_counter_with_stored_epoch() {
+                if self.stored_epoch_claim_for_profile(profile) > 0 {
                     return Err(ModeError::CounterCorrupt);
                 }
                 Ok(0)
@@ -227,6 +269,15 @@ impl ModeStore {
             return self.fail_closed(
                 AuditKind::ModeCounterRollback,
                 format!("mode.json counter {} < epoch {last}", body.counter),
+            );
+        }
+        if self.later_epoch_on_other_profile(profile, body.counter) {
+            return self.fail_closed(
+                AuditKind::ModeCounterRollback,
+                format!(
+                    "mode.json counter {} stale after switch to another profile epoch",
+                    body.counter
+                ),
             );
         }
         if let Ok(prof_raw) = std::fs::read_to_string(&self.profile_path) {
@@ -343,6 +394,91 @@ mod tests {
             err,
             ModeError::Epoch(epoch_store::EpochError::Corrupt)
         ));
+    }
+
+    #[test]
+    fn fresh_install_switch_sim_test_sim() {
+        let root = tempfile::tempdir().unwrap();
+        let data = root.path().join("sim");
+        std::fs::create_dir_all(&data).unwrap();
+        let store = ModeStore::new_with_epoch_root(&data, root.path(), Profile::Sim);
+        store
+            .set_operational(OperationalMode::Production, Profile::Sim, true)
+            .unwrap();
+        store
+            .set_operational(OperationalMode::Testing, Profile::Test, true)
+            .unwrap();
+        store
+            .set_operational(OperationalMode::Production, Profile::Sim, true)
+            .unwrap();
+        let restarted = ModeStore::new_with_epoch_root(&data, root.path(), Profile::Sim);
+        assert_eq!(restarted.load_profile(), Profile::Sim);
+        assert_eq!(
+            restarted.effective(Profile::Sim).operational,
+            OperationalMode::Production
+        );
+    }
+
+    #[test]
+    fn switch_profiles_with_existing_epoch_counters() {
+        use crate::config::profile_epoch_counter_path;
+        let root = tempfile::tempdir().unwrap();
+        let data = root.path().join("sim");
+        std::fs::create_dir_all(&data).unwrap();
+        epoch_store::write_counter(root.path(), Profile::Sim, 3).unwrap();
+        epoch_store::write_counter(root.path(), Profile::Test, 2).unwrap();
+        std::fs::write(
+            data.join("profile.json"),
+            serde_json::to_vec_pretty(&ProfileFileBody {
+                profile: Profile::Sim,
+                counter: 3,
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            data.join("mode.json"),
+            serde_json::to_vec_pretty(&ModeFileBody {
+                mode: OperationalMode::Production,
+                counter: 3,
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        let store = ModeStore::new_with_epoch_root(&data, root.path(), Profile::Sim);
+        store
+            .set_operational(OperationalMode::Testing, Profile::Test, true)
+            .unwrap();
+        assert!(profile_epoch_counter_path(root.path(), Profile::Test).exists());
+        let restarted = ModeStore::new_with_epoch_root(&data, root.path(), Profile::Sim);
+        assert_eq!(restarted.load_profile(), Profile::Test);
+    }
+
+    #[test]
+    fn cross_profile_old_snapshot_rollback_fail_closed() {
+        let root = tempfile::tempdir().unwrap();
+        let data = root.path().join("sim");
+        std::fs::create_dir_all(&data).unwrap();
+        let store = ModeStore::new_with_epoch_root(&data, root.path(), Profile::Sim);
+        store
+            .set_operational(OperationalMode::Testing, Profile::Test, true)
+            .unwrap();
+        let old_mode = std::fs::read(data.join("mode.json")).unwrap();
+        let old_profile = std::fs::read(data.join("profile.json")).unwrap();
+        store
+            .set_operational(OperationalMode::Production, Profile::Sim, true)
+            .unwrap();
+        store
+            .set_operational(OperationalMode::Production, Profile::Sim, true)
+            .unwrap();
+        std::fs::write(data.join("mode.json"), &old_mode).unwrap();
+        std::fs::write(data.join("profile.json"), &old_profile).unwrap();
+        let restarted = ModeStore::new_with_epoch_root(&data, root.path(), Profile::Sim);
+        assert_eq!(restarted.load_profile(), Profile::Prod);
+        assert_eq!(
+            restarted.effective(Profile::Test).operational,
+            OperationalMode::Production
+        );
     }
 
     #[test]
