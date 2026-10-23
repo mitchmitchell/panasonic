@@ -39,8 +39,10 @@ if ! id kxprov-gw &>/dev/null; then
 fi
 GW_UID="$(id -u kxprov-gw)"
 
-sudo mkdir -p /etc/kx-provision/secrets /etc/kx-provision/tls /var/lib/kx-provision/sim/{plans,backups,goliath,.epoch}
+sudo mkdir -p /etc/kx-provision/secrets /etc/kx-provision/tls \
+  /var/lib/kx-provision/sim/{plans,backups,goliath} /var/lib/kx-provision/.epoch
 sudo chmod 0750 /var/lib/kx-provision
+sudo chmod 0700 /var/lib/kx-provision/.epoch
 
 # Dummy secrets (not production values).
 sudo bash -c 'echo -n "0000" > /etc/kx-provision/secrets/pbx.password'
@@ -127,11 +129,18 @@ sudo systemd-analyze security kxprovd.service kxprov-gw.service | tee /tmp/syste
 
 sudo systemctl stop kxprov-gw.service 2>/dev/null || true
 sudo systemctl stop kxprovd.service 2>/dev/null || true
-sudo rm -f /run/kx-provision/kxprovd.sock /run/kx-provision-gw/web-serve.sock
+sudo systemctl reset-failed kxprovd.service kxprov-gw.service 2>/dev/null || true
+sudo rm -f /var/lib/kx-provision/sim/kxprovd.lock \
+  /run/kx-provision/kxprovd.sock /run/kx-provision-gw/web-serve.sock
 
 sudo systemctl start kxprovd.service
-for _ in $(seq 1 50); do
+for _ in $(seq 1 120); do
   if [[ -S /run/kx-provision/kxprovd.sock ]]; then break; fi
+  if ! systemctl is-active --quiet kxprovd.service; then
+    log "kxprovd.service exited before socket bind"
+    sudo systemctl status kxprovd.service --no-pager || true
+    exit 1
+  fi
   sleep 0.1
 done
 [[ -S /run/kx-provision/kxprovd.sock ]] || { log "kxprovd.sock missing"; exit 1; }

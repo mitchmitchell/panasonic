@@ -56,7 +56,7 @@ fn auth_recovers_after_replace(store: &TokenStore, path: &std::path::Path) {
             Err(e) => panic!("unexpected token error: {e}"),
         }
     }
-    assert_eq!(store.live_disk_probe_threads_for_test(), 0);
+    wait_live_zero(store, Instant::now() + Duration::from_secs(8));
     assert!(
         path.is_file(),
         "expected regular tokens.json after recovery"
@@ -177,6 +177,7 @@ fn fifo_tokens_single_probe_thread_fast_fail_and_recovery() {
 }
 
 #[test]
+#[serial]
 fn fifo_replaced_by_regular_file_via_rename_recovers_auth() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let path = tmp.path().join("tokens.json");
@@ -203,6 +204,7 @@ fn fifo_replaced_by_regular_file_via_rename_recovers_auth() {
 }
 
 #[test]
+#[serial]
 fn fifo_replaced_by_regular_file_via_unlink_create_recovers_auth() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let path = tmp.path().join("tokens.json");

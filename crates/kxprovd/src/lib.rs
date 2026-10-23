@@ -38,7 +38,6 @@ use config::{Config, TransportKind};
 use gates::GateState;
 use goliath::GoliathQueue;
 use journal::Journal;
-use kxprov_api::Profile;
 use locked::LockedStore;
 use plan_store::PlanStore;
 use std::sync::Arc;
@@ -100,6 +99,7 @@ impl Daemon {
         };
         #[cfg(feature = "test-util")]
         {
+            use kxprov_api::Profile;
             if config.profile == Profile::Sim && config.transport == TransportKind::Sim {
                 return TokenStore::load_insecure(config.tokens_path.clone()).map_err(map_err);
             }
