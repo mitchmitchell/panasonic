@@ -71,3 +71,7 @@ required-features = ["test-util"]
 [[test]]
 name = "run_seed"
 required-features = ["test-util"]
+
+[[test]]
+name = "a4_smoke"
+required-features = ["test-util"]

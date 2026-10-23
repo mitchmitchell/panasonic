@@ -71,9 +71,7 @@ fn validate_gateway_scopes(whoami: &kxprov_api::WhoamiResult) -> Result<(), Gate
             "gateway service token must not include write or approve scope".into(),
         ));
     }
-    if !whoami.scopes.iter().any(|s| *s == Scope::Read)
-        || !whoami.scopes.iter().any(|s| *s == Scope::Plan)
-    {
+    if !whoami.scopes.contains(&Scope::Read) || !whoami.scopes.contains(&Scope::Plan) {
         return Err(GatewayTokenError::Invalid(
             "gateway service token must include read and plan scopes".into(),
         ));

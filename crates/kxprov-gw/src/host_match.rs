@@ -80,7 +80,7 @@ fn origins_equivalent(allowed: &str, origin: &str) -> bool {
     }
     let (a_host, a_port) = split_host_port(a_rest.trim_end_matches('/'));
     let (o_host, o_port) = split_host_port(o_rest.trim_end_matches('/'));
-    if a_host.to_ascii_lowercase() != o_host.to_ascii_lowercase() {
+    if !a_host.eq_ignore_ascii_case(&o_host) {
         return false;
     }
     match (a_port.as_deref(), o_port.as_deref()) {

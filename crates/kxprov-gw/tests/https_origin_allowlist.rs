@@ -17,6 +17,7 @@ async fn https_origin_with_portless_host_allowed_on_443_listener() {
             allowed_hosts: vec!["127.0.0.1".into(), "127.0.0.1:443".into()],
             allowed_origins: vec!["https://127.0.0.1".into()],
         },
+        false,
         900,
         RateLimiter::new(120),
     );

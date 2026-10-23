@@ -150,7 +150,7 @@ impl TokenStore {
         }
         let approve_ids: Vec<_> = entries
             .iter()
-            .filter(|t| !t.revoked && t.scopes.iter().any(|s| *s == Scope::Approve))
+            .filter(|t| !t.revoked && t.scopes.contains(&Scope::Approve))
             .map(|t| t.id.clone())
             .collect();
         if approve_ids.len() != 1 || approve_ids[0] != *approver_token_id {
@@ -276,7 +276,7 @@ impl TokenStore {
         if need == Scope::Approve && entry.id != state.approver_token_id {
             return Err(TokenError::ScopeDenied);
         }
-        if !entry.scopes.iter().any(|s| *s == need) {
+        if !entry.scopes.contains(&need) {
             return Err(TokenError::ScopeDenied);
         }
         Ok(VerifiedToken {

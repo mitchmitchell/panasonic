@@ -17,8 +17,7 @@ use crate::worker::backup_info;
 use kxprov_api::{
     ApiErrorBody, ApplyPlanParams, OperationalMode, PlanChangeParams, Profile, RequestAuth,
     RequestBody, RequestEnvelope, Response, ResponseResult, Scope, SetModeParams, SetModeResult,
-    SubmitApprovalParams, SubmitApprovalResult, TokenId,
-    UnlockParams, UnlockResult, WhoamiResult,
+    SubmitApprovalParams, SubmitApprovalResult, TokenId, UnlockParams, UnlockResult, WhoamiResult,
 };
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -268,7 +267,9 @@ async fn sim_trigger_busy(
         .inject(kxtd1232_sim::Fault::Busy {
             frames: params.frames,
         });
-    Ok(ResponseResult::SimTrigger(kxprov_api::SimTriggerResult { ok: true }))
+    Ok(ResponseResult::SimTrigger(kxprov_api::SimTriggerResult {
+        ok: true,
+    }))
 }
 
 #[cfg(feature = "sim-fault-triggers")]
@@ -280,7 +281,9 @@ async fn sim_trigger_goliath_copy_fail(
 ) -> Result<ResponseResult, ApiErrorBody> {
     sim_trigger_access(state, cred, role, auth).await?;
     state.goliath.trigger_next_copy_fail();
-    Ok(ResponseResult::SimTrigger(kxprov_api::SimTriggerResult { ok: true }))
+    Ok(ResponseResult::SimTrigger(kxprov_api::SimTriggerResult {
+        ok: true,
+    }))
 }
 
 #[cfg(feature = "sim-fault-triggers")]

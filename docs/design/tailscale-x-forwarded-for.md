@@ -1,6 +1,6 @@
 # Tailscale Serve and `X-Forwarded-For`
 
-When the gateway web listener is bound to loopback and exposed with **Tailscale Serve**, the TCP connection to the gateway process appears from `127.0.0.1`. Login rate limiting therefore trusts `X-Forwarded-For` **only** when the peer address is loopback.
+When the gateway web listener is bound to loopback and exposed with **Tailscale Serve**, the TCP connection to the gateway process appears from `127.0.0.1`. Login rate limiting trusts `X-Forwarded-For` **only** on listeners configured with `web_https.trust_x_forwarded_for = true` (or the matching `[web_https]` table in `gateway.toml`).
 
 ## Does Serve append?
 
@@ -13,7 +13,7 @@ X-Forwarded-For: 203.0.113.5
                  ^ client Tailscale observed (trust this single value)
 ```
 
-The gateway’s `client_ip` helper (`kxprov-web`) uses the **first** non-empty hop when the peer is loopback (which is also the only hop Serve sets).
+The gateway’s `client_ip` helper (`kxprov-web`) uses the **first** non-empty hop when that listener flag is set (Serve sets a single hop).
 
 ## Loopback spoofing (non-Serve)
 

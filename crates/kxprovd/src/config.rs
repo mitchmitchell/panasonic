@@ -199,7 +199,11 @@ impl Config {
     }
 
     #[cfg(feature = "test-util")]
-    pub fn sim_test_gateway_caller(data_dir: PathBuf, socket_path: PathBuf, gateway_uid: u32) -> Self {
+    pub fn sim_test_gateway_caller(
+        data_dir: PathBuf,
+        socket_path: PathBuf,
+        gateway_uid: u32,
+    ) -> Self {
         let admin_uid = gateway_uid.wrapping_add(1);
         Self {
             profile: Profile::Sim,

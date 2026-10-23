@@ -33,6 +33,16 @@ fn validate_bind_override(bind: &str) -> anyhow::Result<()> {
     apply_unspecified_site_policy("bind", addr.ip())
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct WebListenerSettings {
+    /// When true, login rate limits use the first `X-Forwarded-For` hop (Tailscale Serve).
+    pub trust_x_forwarded_for: bool,
+    /// When non-empty, overrides global `allowed_hosts` for this listener only.
+    pub allowed_hosts: Vec<String>,
+    /// When non-empty, overrides global `allowed_origins` for this listener only.
+    pub allowed_origins: Vec<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct GatewayConfig {
     /// When set (CLI `--bind` or config `bind`), replaces the §5a LAN+loopback bind list.
@@ -56,6 +66,8 @@ pub struct GatewayConfig {
     pub allowed_origins: Vec<String>,
     /// Tailscale Serve hostname (e.g. `mybox.tailnet.ts.net`) when exposed via Serve.
     pub serve_hostname: Option<String>,
+    pub web_tailnet: WebListenerSettings,
+    pub web_https: WebListenerSettings,
 }
 
 impl Default for GatewayConfig {
@@ -79,31 +91,106 @@ impl Default for GatewayConfig {
             allowed_hosts: vec![],
             allowed_origins: vec![],
             serve_hostname: None,
+            web_tailnet: WebListenerSettings::default(),
+            web_https: WebListenerSettings::default(),
         }
     }
 }
 
 impl GatewayConfig {
-    /// Site Host / Origin allow-list: explicit config, else loopback names with listener ports.
+    /// Legacy union of all listener hosts (MCP host list). Prefer per-listener helpers for web.
     pub fn effective_allowed_hosts(&self) -> Vec<String> {
         if !self.allowed_hosts.is_empty() {
             return self.allowed_hosts.clone();
         }
-        self.derived_loopback_hosts()
+        let mut out = self.effective_web_tailnet_hosts();
+        out.extend(self.effective_web_https_hosts());
+        out.sort();
+        out.dedup();
+        out
     }
 
     pub fn effective_allowed_origins(&self) -> Vec<String> {
         if !self.allowed_origins.is_empty() {
             return self.allowed_origins.clone();
         }
-        self.derived_site_origins()
+        let mut out = self.effective_web_tailnet_origins();
+        out.extend(self.effective_web_https_origins());
+        out.sort();
+        out.dedup();
+        out
     }
 
-    fn derived_loopback_hosts(&self) -> Vec<String> {
+    pub fn effective_web_tailnet_hosts(&self) -> Vec<String> {
+        self.effective_listener_hosts(&self.web_tailnet.allowed_hosts, || {
+            self.derived_web_tailnet_hosts()
+        })
+    }
+
+    pub fn effective_web_tailnet_origins(&self) -> Vec<String> {
+        self.effective_listener_origins(&self.web_tailnet.allowed_origins, || {
+            self.derived_web_tailnet_origins()
+        })
+    }
+
+    pub fn effective_web_https_hosts(&self) -> Vec<String> {
+        self.effective_listener_hosts(&self.web_https.allowed_hosts, || {
+            self.derived_web_https_hosts()
+        })
+    }
+
+    pub fn effective_web_https_origins(&self) -> Vec<String> {
+        self.effective_listener_origins(&self.web_https.allowed_origins, || {
+            self.derived_web_https_origins()
+        })
+    }
+
+    fn effective_listener_hosts(
+        &self,
+        listener: &[String],
+        derive: impl FnOnce() -> Vec<String>,
+    ) -> Vec<String> {
+        if !listener.is_empty() {
+            return listener.to_vec();
+        }
+        if !self.allowed_hosts.is_empty() {
+            return self.allowed_hosts.clone();
+        }
+        derive()
+    }
+
+    fn effective_listener_origins(
+        &self,
+        listener: &[String],
+        derive: impl FnOnce() -> Vec<String>,
+    ) -> Vec<String> {
+        if !listener.is_empty() {
+            return listener.to_vec();
+        }
+        if !self.allowed_origins.is_empty() {
+            return self.allowed_origins.clone();
+        }
+        derive()
+    }
+
+    fn derived_web_tailnet_hosts(&self) -> Vec<String> {
         let mut out = Vec::new();
         if let Ok(addr) = self.web_tailnet_bind.parse::<SocketAddr>() {
             push_http_listener_hosts(&mut out, addr.port(), &["localhost", "127.0.0.1"]);
         }
+        out
+    }
+
+    fn derived_web_tailnet_origins(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        if let Ok(addr) = self.web_tailnet_bind.parse::<SocketAddr>() {
+            push_http_listener_origins(&mut out, addr.port(), &["localhost", "127.0.0.1"]);
+        }
+        out
+    }
+
+    fn derived_web_https_hosts(&self) -> Vec<String> {
+        let mut out = Vec::new();
         for bind in self.web_lan_bind_addresses() {
             let Ok(addr) = bind.parse::<SocketAddr>() else {
                 continue;
@@ -120,16 +207,11 @@ impl GatewayConfig {
                 push_https_listener_hosts(&mut out, self.web_https_port, &[trimmed]);
             }
         }
-        out.sort();
-        out.dedup();
         out
     }
 
-    fn derived_site_origins(&self) -> Vec<String> {
+    fn derived_web_https_origins(&self) -> Vec<String> {
         let mut out = Vec::new();
-        if let Ok(addr) = self.web_tailnet_bind.parse::<SocketAddr>() {
-            push_http_listener_origins(&mut out, addr.port(), &["localhost", "127.0.0.1"]);
-        }
         for bind in self.web_lan_bind_addresses() {
             let Ok(addr) = bind.parse::<SocketAddr>() else {
                 continue;
@@ -146,8 +228,6 @@ impl GatewayConfig {
                 push_https_listener_origins(&mut out, self.web_https_port, &[trimmed]);
             }
         }
-        out.sort();
-        out.dedup();
         out
     }
 
@@ -312,6 +392,12 @@ impl GatewayConfig {
                 self.serve_hostname = Some(trimmed.to_string());
             }
         }
+        if let Some(v) = file.web_tailnet {
+            merge_listener_settings(&mut self.web_tailnet, v);
+        }
+        if let Some(v) = file.web_https {
+            merge_listener_settings(&mut self.web_https, v);
+        }
         Ok(())
     }
 
@@ -338,6 +424,13 @@ impl GatewayConfig {
 }
 
 #[derive(Debug, Deserialize)]
+struct ListenerFileConfig {
+    trust_x_forwarded_for: Option<bool>,
+    allowed_hosts: Option<Vec<String>>,
+    allowed_origins: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize)]
 struct FileConfig {
     bind: Option<String>,
     lan_ip: Option<String>,
@@ -353,6 +446,20 @@ struct FileConfig {
     admin_password_path: Option<String>,
     daemon_socket_path: Option<String>,
     serve_hostname: Option<String>,
+    web_tailnet: Option<ListenerFileConfig>,
+    web_https: Option<ListenerFileConfig>,
+}
+
+fn merge_listener_settings(dst: &mut WebListenerSettings, file: ListenerFileConfig) {
+    if let Some(v) = file.trust_x_forwarded_for {
+        dst.trust_x_forwarded_for = v;
+    }
+    if let Some(v) = file.allowed_hosts {
+        dst.allowed_hosts = v;
+    }
+    if let Some(v) = file.allowed_origins {
+        dst.allowed_origins = v;
+    }
 }
 
 fn push_http_listener_hosts(out: &mut Vec<String>, port: u16, hosts: &[&str]) {
@@ -471,12 +578,31 @@ mod tests {
             serve_hostname: Some("gw.example.ts.net".into()),
             ..Default::default()
         };
-        let hosts = cfg.effective_allowed_hosts();
+        let hosts = cfg.effective_web_https_hosts();
         assert!(hosts.contains(&"10.0.0.5".to_string()));
         assert!(hosts.contains(&"gw.example.ts.net".to_string()));
-        let origins = cfg.effective_allowed_origins();
+        let origins = cfg.effective_web_https_origins();
         assert!(origins.contains(&"https://10.0.0.5".to_string()));
         assert!(origins.contains(&"https://gw.example.ts.net".to_string()));
+    }
+
+    #[test]
+    fn listener_specific_host_allowlist_overrides_defaults() {
+        let cfg = GatewayConfig {
+            web_tailnet: WebListenerSettings {
+                allowed_hosts: vec!["tail-only.example:8080".into()],
+                allowed_origins: vec!["http://tail-only.example:8080".into()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert_eq!(
+            cfg.effective_web_tailnet_hosts(),
+            vec!["tail-only.example:8080".to_string()]
+        );
+        assert!(cfg
+            .effective_web_https_hosts()
+            .contains(&"127.0.0.1:443".to_string()));
     }
 
     #[test]

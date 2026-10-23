@@ -6,7 +6,7 @@ use axum::extract::{ConnectInfo, Request};
 use axum::http::header;
 use axum::middleware::{from_fn, from_fn_with_state};
 use axum::Router;
-use kxprov_web::{reject_authenticated_login, require_web_session, WebState};
+use kxprov_web::{reject_authenticated_login, require_web_session, ClientIpPolicy, WebState};
 use tower_http::set_header::SetResponseHeaderLayer;
 use tower_sessions::cookie::time::Duration as CookieDuration;
 use tower_sessions::cookie::SameSite;
@@ -20,6 +20,7 @@ use crate::ratelimit::{rate_limit_middleware, RateLimitState, RateLimiter};
 pub fn production_web_router(
     web_state: WebState,
     host_origin: HostOriginConfig,
+    trust_x_forwarded_for: bool,
     session_ttl_secs: u64,
     rate_limiter: RateLimiter,
 ) -> Router {
@@ -41,6 +42,17 @@ pub fn production_web_router(
         .layer(from_fn(require_web_session))
         .layer(from_fn(reject_authenticated_login))
         .layer(session_layer)
+        .layer(from_fn({
+            move |mut req: Request<Body>, next: axum::middleware::Next| {
+                let trust = trust_x_forwarded_for;
+                async move {
+                    req.extensions_mut().insert(ClientIpPolicy {
+                        trust_x_forwarded_for: trust,
+                    });
+                    next.run(req).await
+                }
+            }
+        }))
         .layer(from_fn(inject_web_rate_limit_key))
         .layer(from_fn_with_state(
             web_rate.clone(),

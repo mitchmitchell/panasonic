@@ -36,6 +36,16 @@ path = "tests/https_origin_allowlist.rs"
 required-features = ["test-secret-skip"]
 
 [[test]]
+name = "login_xff_rate_limit"
+path = "tests/login_xff_rate_limit.rs"
+required-features = ["test-secret-skip"]
+
+[[test]]
+name = "run_a4_script"
+path = "tests/run_a4_script.rs"
+required-features = ["test-secret-skip"]
+
+[[test]]
 name = "run_seed"
 path = "tests/run_seed.rs"
 required-features = ["test-secret-skip"]

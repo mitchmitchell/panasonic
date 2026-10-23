@@ -9,7 +9,7 @@ mod templates;
 use std::sync::Arc;
 
 use askama::Template;
-use axum::extract::{ConnectInfo, Form, Path, State};
+use axum::extract::{ConnectInfo, Extension, Form, Path, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
@@ -25,6 +25,12 @@ use templates::{DashboardTemplate, ReadFieldRow};
 use tower_sessions::Session;
 
 pub use login_limit::{LoginBusy, LoginPrecheck, LoginRateLimiter};
+
+/// Set by the gateway per listener: trust `X-Forwarded-For` only on Tailscale Serve fronted binds.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ClientIpPolicy {
+    pub trust_x_forwarded_for: bool,
+}
 pub use session::{reject_authenticated_login, require_web_session, SESSION_AUTH_KEY};
 pub use static_files::serve_static;
 
@@ -217,20 +223,24 @@ fn caller_from_session(session: &Session) -> CallerIdentity {
     CallerIdentity::Web(WebSessionIdentity { session_key })
 }
 
-/// Client IP for login rate limiting. Trust `X-Forwarded-For` only when the TCP peer is loopback
-/// (e.g. tailscale serve forwarding from `127.0.0.1` on the gateway host).
+/// Client IP for login rate limiting. Trust `X-Forwarded-For` only when the listener sets
+/// [`ClientIpPolicy::trust_x_forwarded_for`] (Tailscale Serve fronted HTTPS).
 ///
 /// Tailscale Serve **replaces** `X-Forwarded-For` with the client it observed (see
 /// `docs/design/tailscale-x-forwarded-for.md`).
-pub fn client_ip(headers: &HeaderMap, peer: Option<SocketAddr>) -> String {
-    if let Some(peer) = peer {
-        if peer.ip().is_loopback() {
-            if let Some(v) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
-                if let Some(client) = v.split(',').map(str::trim).find(|s| !s.is_empty()) {
-                    return client.to_string();
-                }
+pub fn client_ip(
+    headers: &HeaderMap,
+    peer: Option<SocketAddr>,
+    trust_x_forwarded_for: bool,
+) -> String {
+    if trust_x_forwarded_for {
+        if let Some(v) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
+            if let Some(client) = v.split(',').map(str::trim).find(|s| !s.is_empty()) {
+                return client.to_string();
             }
         }
+    }
+    if let Some(peer) = peer {
         return peer.ip().to_string();
     }
     "unknown".into()
@@ -282,12 +292,17 @@ async fn login_submit(
     session: Session,
     headers: HeaderMap,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    policy: Option<Extension<ClientIpPolicy>>,
     Form(form): Form<LoginForm>,
 ) -> Response {
     if let Some(resp) = csrf::verify_form_csrf(&session, &headers, &form._csrf).await {
         return resp;
     }
-    let ip = client_ip(&headers, Some(peer));
+    let trust = policy
+        .as_ref()
+        .map(|Extension(p)| p.trust_x_forwarded_for)
+        .unwrap_or(false);
+    let ip = client_ip(&headers, Some(peer), trust);
     let acct_key = "acct:admin".to_string();
     let ip_key = format!("ip:{ip}");
     match state.login_limiter.precheck_login(&acct_key, &ip_key).await {
@@ -495,16 +510,15 @@ mod client_ip_tests {
     use axum::http::HeaderMap;
 
     #[test]
-    fn trusts_x_forwarded_for_only_from_loopback_peer() {
+    fn trusts_x_forwarded_for_only_when_listener_allows() {
         let mut headers = HeaderMap::new();
         headers.insert("x-forwarded-for", "203.0.113.5".parse().unwrap());
         let peer = "127.0.0.1:8080".parse().unwrap();
-        assert_eq!(client_ip(&headers, Some(peer)), "203.0.113.5");
-
-        headers.insert("x-forwarded-for", "203.0.113.5".parse().unwrap());
-        assert_eq!(client_ip(&headers, Some(peer)), "203.0.113.5");
+        assert_eq!(client_ip(&headers, Some(peer), true), "203.0.113.5");
+        assert_eq!(client_ip(&headers, Some(peer), false), "127.0.0.1");
 
         let peer = "10.0.0.2:443".parse().unwrap();
-        assert_eq!(client_ip(&headers, Some(peer)), "10.0.0.2");
+        assert_eq!(client_ip(&headers, Some(peer), true), "203.0.113.5");
+        assert_eq!(client_ip(&headers, Some(peer), false), "10.0.0.2");
     }
 }

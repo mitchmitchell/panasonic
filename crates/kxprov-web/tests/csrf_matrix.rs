@@ -48,6 +48,7 @@ fn production_app() -> Router {
                 "http://localhost:4321".into(),
             ],
         },
+        false,
         900,
         RateLimiter::new(120),
     )

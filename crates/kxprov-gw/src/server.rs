@@ -68,15 +68,24 @@ pub async fn serve(
         )),
     };
 
-    let host_origin = HostOriginConfig {
-        allowed_hosts: config.effective_allowed_hosts(),
-        allowed_origins: config.effective_allowed_origins(),
-    };
-
     let rate_limiter = RateLimiter::new(config.rate_limit_per_minute);
-    let web_app = production_web_router(
+    let web_app_tailnet = production_web_router(
+        web_state.clone(),
+        HostOriginConfig {
+            allowed_hosts: config.effective_web_tailnet_hosts(),
+            allowed_origins: config.effective_web_tailnet_origins(),
+        },
+        config.web_tailnet.trust_x_forwarded_for,
+        config.session_ttl_secs,
+        rate_limiter.clone(),
+    );
+    let web_app_https = production_web_router(
         web_state,
-        host_origin.clone(),
+        HostOriginConfig {
+            allowed_hosts: config.effective_web_https_hosts(),
+            allowed_origins: config.effective_web_https_origins(),
+        },
+        config.web_https.trust_x_forwarded_for,
         config.session_ttl_secs,
         rate_limiter.clone(),
     );
@@ -132,7 +141,6 @@ pub async fn serve(
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
     let (shutdown_tx_mcp, shutdown_rx_mcp) = oneshot::channel::<()>();
 
-    let web_app_tailnet = web_app.clone();
     tokio::spawn(async move {
         axum::serve(
             web_tailnet_listener,
@@ -152,7 +160,7 @@ pub async fn serve(
             bound_web_lan = Some(local);
         }
         let tls_cfg = tls.clone();
-        let web_app_lan = web_app.clone();
+        let web_app_lan = web_app_https.clone();
         tokio::spawn(async move {
             let _ = axum_server::from_tcp_rustls(listener.into_std().expect("tcp"), tls_cfg)
                 .serve(web_app_lan.into_make_service_with_connect_info::<SocketAddr>())

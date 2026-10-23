@@ -94,11 +94,7 @@ impl LoginRateLimiter {
     pub async fn delay_before_attempt(&self, account_key: &str, ip_key: &str) -> Duration {
         let map = self.by_key.lock().await;
         let now = Instant::now();
-        let acct = wait_for_key(
-            map.get(account_key),
-            now,
-            self.max_account_backoff,
-        );
+        let acct = wait_for_key(map.get(account_key), now, self.max_account_backoff);
         let ip = wait_for_key(map.get(ip_key), now, self.max_ip_backoff);
         acct.max(ip)
     }
@@ -213,9 +209,7 @@ mod tests {
             Duration::from_secs(30),
             Duration::from_secs(30),
         );
-        let _guard = limiter
-            .begin_password_verify("acct:admin")
-            .expect("first");
+        let _guard = limiter.begin_password_verify("acct:admin").expect("first");
         assert!(matches!(
             limiter.begin_password_verify("acct:admin"),
             Err(LoginBusy::AccountInProgress)

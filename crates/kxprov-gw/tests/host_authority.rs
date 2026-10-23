@@ -17,6 +17,7 @@ async fn host_header_mismatch_with_uri_authority_returns_400() {
             allowed_hosts: vec!["localhost:8080".into()],
             allowed_origins: vec!["http://localhost:8080".into()],
         },
+        false,
         900,
         RateLimiter::new(120),
     );

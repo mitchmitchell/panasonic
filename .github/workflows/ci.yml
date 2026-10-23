@@ -28,6 +28,8 @@ jobs:
       - run: cargo test --workspace --exclude kxprovd --exclude kxprov-gw --locked
       - run: cargo test -p kxprovd --features test-util --locked
       - run: cargo test -p kxprov-gw --features test-secret-skip --locked
+      - name: A4 local stack smoke (debug sim build)
+        run: bash scripts/run-a4.sh smoke
       - name: H5 tool absent from default workspace build
         run: |
           ! cargo build --locked -p kxprov-h5 2>/dev/null

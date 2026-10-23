@@ -107,8 +107,7 @@ async fn sim_triggers_forbidden_on_prod_profile() {
 async fn sim_triggers_forbidden_on_serial_transport() {
     let tmp = tempfile::tempdir().unwrap();
     let uid = nix::unistd::getuid().as_raw();
-    let (_d, socket) =
-        kxprovd::Daemon::sim_for_tests_serial_profile(tmp.path(), uid, Profile::Sim);
+    let (_d, socket) = kxprovd::Daemon::sim_for_tests_serial_profile(tmp.path(), uid, Profile::Sim);
     for _ in 0..100 {
         if socket.exists() {
             break;

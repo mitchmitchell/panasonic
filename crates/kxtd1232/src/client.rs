@@ -375,14 +375,11 @@ impl<T: Transport> Client<T> {
             return Err(e);
         }
         let sent_at = self.t.now_ms();
-        match self.send_frame(raw) {
-            // LinkDown: write() records the frame as possibly applied. PreSend: provably
-            // nothing left the host, so there is nothing to verify.
-            Err(e @ (Error::LinkDown(_) | Error::PreSend(_))) => {
-                self.note_link_down(None);
-                return Err(e);
-            }
-            _ => {}
+        // LinkDown: write() records the frame as possibly applied. PreSend: provably
+        // nothing left the host, so there is nothing to verify.
+        if let Err(e @ (Error::LinkDown(_) | Error::PreSend(_))) = self.send_frame(raw) {
+            self.note_link_down(None);
+            return Err(e);
         }
         let r = match self
             .drop_before_cutoff(sent_at + self.timing.reply_cutoff_ms(raw.len()))

@@ -29,6 +29,7 @@ async fn localhost_with_port_passes_host_and_origin_on_login_post() {
             allowed_hosts: vec!["localhost:8080".into()],
             allowed_origins: vec!["http://localhost:8080".into()],
         },
+        false,
         900,
         RateLimiter::new(120),
     );
