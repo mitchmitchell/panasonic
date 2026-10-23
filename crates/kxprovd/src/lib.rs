@@ -160,6 +160,9 @@ impl Daemon {
         let socket = data_dir.join("kxprovd.sock");
         let mut cfg = Config::sim_test(data_dir, socket.clone(), peer_uid);
         cfg.profile = profile;
+        if profile == Profile::Prod {
+            cfg.gates.live_writes_approved = true;
+        }
         let daemon = Self::start(cfg).expect("daemon starts");
         (daemon, socket)
     }

@@ -7,7 +7,7 @@ use crate::plan_store::{PlanSnapshot, PlanStore};
 use crate::queue::{field_kind_wire, JobKind, JobOutcome, JobRequest, JobState};
 use crate::time::now_ms;
 use crate::transport::{open, AnyTransport};
-use kxprov_api::{ApplyPlanStatus, BackupInfo, FieldRow, PlanChangeResult, Profile, TokenId};
+use kxprov_api::{BackupInfo, FieldRow, PlanChangeResult, Profile, TokenId};
 use kxtd1232::{build_plan, field_patch, Client, Granularity};
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -274,11 +274,7 @@ async fn run_apply_job(
     ) {
         Ok(_blocks) => {
             let _ = ctx.journal.truncate();
-            JobOutcome::ApplyPlan(kxprov_api::ApplyPlanResult {
-                plan_id,
-                diff_hash,
-                status: ApplyPlanStatus::Completed,
-            })
+            JobOutcome::ApplyPlan { plan_id, diff_hash }
         }
         Err(e) => {
             lock_on_apply_failure(&ctx.locked, &e.to_string(), job_id);

@@ -162,11 +162,7 @@ impl ModeStore {
     }
 }
 
-/// Whether apply requires a prior approval for this profile/mode (v2.7 F1).
-pub fn write_approval_required(profile: Profile, operational: OperationalMode) -> bool {
-    match profile {
-        Profile::Prod => true,
-        Profile::Test => operational == OperationalMode::Production,
-        Profile::Sim => false,
-    }
+/// G5: approval gate applies to prod profile writes only (v2.11).
+pub fn write_approval_required(profile: Profile, _operational: OperationalMode) -> bool {
+    profile == Profile::Prod
 }

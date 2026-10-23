@@ -2,8 +2,8 @@
 
 use kxprov_api::{http_dispatch, mcp_invoke, HttpMethod, HttpStatus};
 use kxprov_api::{
-    ApiClient, ApplyPlanStatus, FieldKindWire, OperationalMode, Profile, RequestAuth, RequestBody,
-    ResponseResult, SetModeParams, TokenId,
+    ApiClient, FieldKindWire, OperationalMode, Profile, RequestAuth, RequestBody, ResponseResult,
+    SetModeParams, TokenId,
 };
 use kxprovd::audit::AuditKind;
 use kxprovd::mode::{ModeFileBody, ModeStore};
@@ -60,7 +60,7 @@ async fn test_apply_without_backup_when_not_prod() {
     else {
         panic!("plan");
     };
-    let ResponseResult::ApplyPlan(ap) = gw
+    let ResponseResult::Job(job) = gw
         .call_auth(
             RequestBody::ApplyPlan {
                 params: kxprov_api::ApplyPlanParams {
@@ -75,7 +75,7 @@ async fn test_apply_without_backup_when_not_prod() {
     else {
         panic!("apply without prior backup on sim");
     };
-    assert_eq!(ap.status, ApplyPlanStatus::Completed);
+    assert!(job.job_id.starts_with('j'));
 }
 
 #[tokio::test]
@@ -116,7 +116,7 @@ async fn testing_to_production_mismatch_blocks_writes() {
     else {
         panic!("plan");
     };
-    let ResponseResult::ApplyPlan(_) = gw
+    let ResponseResult::Job(_) = gw
         .call_auth(
             RequestBody::ApplyPlan {
                 params: kxprov_api::ApplyPlanParams {

@@ -1,8 +1,8 @@
 #![allow(clippy::unwrap_used)]
 
 use kxprov_api::{
-    ApiClient, ApplyPlanStatus, FieldKindWire, OperationalMode, Profile, RequestAuth, RequestBody,
-    ResponseResult, SetModeParams, TokenId,
+    ApiClient, FieldKindWire, OperationalMode, Profile, RequestAuth, RequestBody, ResponseResult,
+    SetModeParams, TokenId,
 };
 use kxprovd::audit::AuditKind;
 use kxprovd::mode::{ModeFileBody, ModeStore, ProfileFileBody};
@@ -120,7 +120,7 @@ async fn sim_profile_skips_approval() {
     else {
         panic!("backup");
     };
-    let ResponseResult::ApplyPlan(ap) = gw
+    let ResponseResult::Job(job) = gw
         .call_auth(
             RequestBody::ApplyPlan {
                 params: kxprov_api::ApplyPlanParams {
@@ -133,11 +133,9 @@ async fn sim_profile_skips_approval() {
         .await
         .unwrap()
     else {
-        panic!("apply");
+        panic!("apply job");
     };
-    assert_eq!(ap.status, ApplyPlanStatus::Completed);
-    assert_eq!(ap.plan_id, plan.plan_id);
-    assert_eq!(ap.diff_hash, plan.diff_hash);
+    assert!(job.job_id.starts_with('j'));
 }
 
 #[tokio::test]
@@ -170,8 +168,9 @@ async fn submit_approval_accepts_eight_hex_prefix() {
         .call_auth(
             RequestBody::SubmitApproval {
                 params: kxprov_api::SubmitApprovalParams {
-                    plan_ref: prefix,
+                    plan_id: prefix,
                     diff_hash: plan.diff_hash.clone(),
+                    profile: Profile::Sim,
                 },
             },
             Some(gateway_auth("approver")),

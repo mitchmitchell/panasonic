@@ -1,8 +1,8 @@
 #![allow(clippy::unwrap_used)]
 
 use kxprov_api::{
-    ApiClient, ApplyPlanStatus, FieldKindWire, OperationalMode, Profile, RequestAuth, RequestBody,
-    ResponseResult, TokenId,
+    ApiClient, ApplyPlanAwaitingStatus, FieldKindWire, OperationalMode, Profile, RequestAuth,
+    RequestBody, ResponseResult, TokenId,
 };
 use kxprovd::locked::LockedStore;
 use kxprovd::mode::{ModeFileBody, ProfileFileBody};
@@ -74,13 +74,13 @@ async fn apply_requires_approval_on_prod() {
     std::fs::write(
         tmp.path().join("profile.json"),
         serde_json::to_vec_pretty(&ProfileFileBody {
-            profile: Profile::Test,
+            profile: Profile::Prod,
         })
         .unwrap(),
     )
     .unwrap();
     let uid = getuid().as_raw();
-    let (_d, sock) = Daemon::sim_for_tests_profile(tmp.path(), uid, Profile::Test);
+    let (_d, sock) = Daemon::sim_for_tests_profile(tmp.path(), uid, Profile::Prod);
     tokio::time::sleep(Duration::from_millis(50)).await;
     let mut c = ApiClient::connect(&sock).await.unwrap();
     let ResponseResult::PlanChange(plan) = c
@@ -100,7 +100,7 @@ async fn apply_requires_approval_on_prod() {
         panic!("plan");
     };
 
-    let err = c
+    let ResponseResult::ApplyApprovalRequired(r) = c
         .call_auth(
             RequestBody::ApplyPlan {
                 params: kxprov_api::ApplyPlanParams {
@@ -111,8 +111,12 @@ async fn apply_requires_approval_on_prod() {
             Some(gateway_auth("writer")),
         )
         .await
-        .expect_err("no approval");
-    assert!(err.to_string().contains("approval_required"));
+        .unwrap()
+    else {
+        panic!("approval_required result");
+    };
+    assert_eq!(r.plan_id, plan.plan_id);
+    assert_eq!(r.status, ApplyPlanAwaitingStatus::ApprovalRequired);
 }
 
 #[tokio::test]
@@ -147,7 +151,7 @@ async fn sim_apply_without_approval() {
         panic!("backup");
     };
 
-    let ResponseResult::ApplyPlan(applied) = gw
+    let ResponseResult::Job(job) = gw
         .call_auth(
             RequestBody::ApplyPlan {
                 params: kxprov_api::ApplyPlanParams {
@@ -160,12 +164,13 @@ async fn sim_apply_without_approval() {
         .await
         .unwrap()
     else {
-        panic!("apply");
+        panic!("apply job");
     };
-    assert_eq!(applied.status, ApplyPlanStatus::Completed);
+    assert!(job.job_id.starts_with('j'));
+    tokio::time::sleep(Duration::from_millis(150)).await;
 }
 
-/// Prod hardware cannot apply in the sim harness; Test + Production mode keeps approval gates.
+/// Prod profile: approval consumed once; second apply returns approval_required again.
 #[tokio::test]
 async fn prod_apply_single_use_approval() {
     let tmp = tempfile::tempdir().unwrap();
@@ -180,13 +185,13 @@ async fn prod_apply_single_use_approval() {
     std::fs::write(
         tmp.path().join("profile.json"),
         serde_json::to_vec_pretty(&ProfileFileBody {
-            profile: Profile::Test,
+            profile: Profile::Prod,
         })
         .unwrap(),
     )
     .unwrap();
     let uid = getuid().as_raw();
-    let (_d, sock) = Daemon::sim_for_tests_profile(tmp.path(), uid, Profile::Test);
+    let (_d, sock) = Daemon::sim_for_tests_profile(tmp.path(), uid, Profile::Prod);
     tokio::time::sleep(Duration::from_millis(50)).await;
     let mut gw = ApiClient::connect(&sock).await.unwrap();
     let ResponseResult::PlanChange(plan) = gw
@@ -211,8 +216,9 @@ async fn prod_apply_single_use_approval() {
         .call_auth(
             RequestBody::SubmitApproval {
                 params: kxprov_api::SubmitApprovalParams {
-                    plan_ref: plan.plan_id.as_str().to_string(),
+                    plan_id: plan.plan_id.as_str().to_string(),
                     diff_hash: plan.diff_hash.clone(),
+                    profile: Profile::Prod,
                 },
             },
             Some(gateway_auth("approver")),
@@ -231,7 +237,7 @@ async fn prod_apply_single_use_approval() {
         panic!("backup");
     };
 
-    let ResponseResult::ApplyPlan(_) = gw
+    let ResponseResult::Job(_) = gw
         .call_auth(
             RequestBody::ApplyPlan {
                 params: kxprov_api::ApplyPlanParams {
@@ -244,10 +250,22 @@ async fn prod_apply_single_use_approval() {
         .await
         .unwrap()
     else {
-        panic!("apply");
+        panic!("apply job");
     };
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    let _ = gw
+        .call_auth(
+            RequestBody::Unlock {
+                params: kxprov_api::UnlockParams {
+                    job_id: "test".into(),
+                    reason: "clear LOCKED after sim apply on prod profile".into(),
+                },
+            },
+            None,
+        )
+        .await;
 
-    let err = gw
+    let ResponseResult::ApplyApprovalRequired(_) = gw
         .call_auth(
             RequestBody::ApplyPlan {
                 params: kxprov_api::ApplyPlanParams {
@@ -258,8 +276,10 @@ async fn prod_apply_single_use_approval() {
             Some(gateway_auth("writer")),
         )
         .await
-        .expect_err("reuse approval");
-    assert!(err.to_string().contains("approval"));
+        .unwrap()
+    else {
+        panic!("reuse needs approval again");
+    };
 }
 
 #[tokio::test]
@@ -291,8 +311,9 @@ async fn token_b_cannot_apply_token_a_plan() {
         .call_auth(
             RequestBody::SubmitApproval {
                 params: kxprov_api::SubmitApprovalParams {
-                    plan_ref: plan.plan_id.as_str().to_string(),
+                    plan_id: plan.plan_id.as_str().to_string(),
                     diff_hash: plan.diff_hash.clone(),
+                    profile: Profile::Sim,
                 },
             },
             Some(gateway_auth("approver")),

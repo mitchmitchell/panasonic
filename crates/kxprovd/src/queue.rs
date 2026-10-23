@@ -45,9 +45,14 @@ pub enum JobOutcome {
     ReadFields(kxprov_api::ReadFieldsResult),
     PlanChange(kxprov_api::PlanChangeResult),
     BackupNow(kxprov_api::BackupNowResult),
-    ApplyPlan(kxprov_api::ApplyPlanResult),
-    ApplyDeferred(kxprov_api::ApplyDeferredResult),
-    Err { code: String, message: String },
+    ApplyPlan {
+        plan_id: PlanId,
+        diff_hash: DiffHash,
+    },
+    Err {
+        code: String,
+        message: String,
+    },
 }
 
 pub struct JobQueue {

@@ -1,7 +1,7 @@
 use crate::approval::ApprovalBook;
 use crate::backup::BackupStore;
 use crate::config::Config;
-use crate::gates::GateState;
+use crate::gates::{prod_write_gate, GateState, ProdWriteGate};
 use crate::locked::LockedStore;
 use crate::mode::{write_approval_required, ModeStore};
 use crate::peer::{PeerPolicy, PeerRole};
@@ -151,14 +151,11 @@ async fn dispatch(
             list_backups(state).await
         }
         RequestBody::ApplyPlan { params } => {
-            if locked {
-                return err_response(id, api_err("locked", "daemon is LOCKED"));
-            }
             let token = match require_access(state, role, &env.auth, Scope::Write) {
                 Ok(t) => t,
                 Err(e) => return err_response(id, e),
             };
-            apply_plan(state, params, token).await
+            apply_plan(state, params, token, locked).await
         }
         RequestBody::Unlock { params } => unlock(state, cred, params.clone()).await,
     };
@@ -290,14 +287,14 @@ async fn submit_approval(
 ) -> Result<ResponseResult, ApiErrorBody> {
     let plan_id = state
         .plans
-        .resolve_plan_ref(&params.plan_ref)
+        .resolve_plan_ref(&params.plan_id)
         .map_err(|e| match e {
             crate::plan_store::PlanError::AmbiguousPrefix => {
                 api_err("ambiguous_prefix", "plan prefix matches more than one plan")
             }
             crate::plan_store::PlanError::InvalidRef => api_err(
-                "invalid_plan_ref",
-                "plan_ref must be 32-hex id or 8-hex prefix",
+                "invalid_plan_id",
+                "plan_id must be 32-hex id or 8-hex prefix",
             ),
             _ => api_err("plan", &e.to_string()),
         })?;
@@ -308,14 +305,20 @@ async fn submit_approval(
     if rec.diff_hash != params.diff_hash {
         return Err(api_err("plan", "diff hash mismatch"));
     }
-    let profile = *state.profile.read().await;
+    let runtime_profile = *state.profile.read().await;
+    if params.profile != runtime_profile {
+        return Err(api_err("profile", "profile mismatch"));
+    }
+    if rec.profile != params.profile {
+        return Err(api_err("plan", "plan profile mismatch"));
+    }
     let now = now_ms();
     let approval = state
         .approvals
         .submit(
             plan_id,
             params.diff_hash.clone(),
-            profile,
+            params.profile,
             &rec.creator_token,
             approver,
             now,
@@ -373,17 +376,26 @@ async fn apply_plan(
     state: &ApiState,
     params: &ApplyPlanParams,
     token: TokenId,
+    locked: bool,
 ) -> Result<ResponseResult, ApiErrorBody> {
     let now = now_ms();
     let profile = *state.profile.read().await;
-    if state.transition.writes_blocked() {
-        return Err(api_err(
-            "transition_blocked",
-            "writes blocked after testing→production mismatch",
-        ));
-    }
-    if !state.gates.read().await.config.live_writes_approved && profile == Profile::Prod {
-        return Err(api_err("gate", "live_writes_approved is false"));
+    let live_writes = state.gates.read().await.config.live_writes_approved;
+    if let Some(gate) = prod_write_gate(
+        profile,
+        locked,
+        live_writes,
+        state.transition.writes_blocked(),
+    ) {
+        let (code, message) = match gate {
+            ProdWriteGate::LiveWrites => ("gate", "live_writes_approved is false"),
+            ProdWriteGate::Locked => ("locked", "daemon is LOCKED"),
+            ProdWriteGate::TransitionMismatch => (
+                "transition_blocked",
+                "writes blocked after testing→production mismatch",
+            ),
+        };
+        return Err(api_err(code, message));
     }
     state
         .plans
@@ -405,9 +417,12 @@ async fn apply_plan(
             .approvals
             .has_active(&params.plan_id, &params.diff_hash, profile, now)
         {
-            return Err(api_err(
-                "approval_required",
-                "no active approval for this plan",
+            return Ok(ResponseResult::ApplyApprovalRequired(
+                kxprov_api::ApplyApprovalRequiredResult {
+                    plan_id: params.plan_id.clone(),
+                    diff_hash: params.diff_hash.clone(),
+                    status: kxprov_api::ApplyPlanAwaitingStatus::ApprovalRequired,
+                },
             ));
         }
         state
@@ -416,23 +431,16 @@ async fn apply_plan(
             .map_err(|e| api_err("approval", &e.to_string()))?;
     }
 
-    if matches!(profile, Profile::Sim | Profile::Test) {
-        return run_job(
-            state,
-            JobKind::ApplyPlan {
-                plan_id: params.plan_id.clone(),
-                diff_hash: params.diff_hash.clone(),
-                token_id: token,
-            },
-        )
-        .await;
-    }
-
-    Ok(ResponseResult::ApplyPlan(kxprov_api::ApplyPlanResult {
-        plan_id: params.plan_id.clone(),
-        diff_hash: params.diff_hash.clone(),
-        status: kxprov_api::ApplyPlanStatus::Deferred,
-    }))
+    let (job_id, _rx) = state
+        .queue
+        .enqueue(JobKind::ApplyPlan {
+            plan_id: params.plan_id.clone(),
+            diff_hash: params.diff_hash.clone(),
+            token_id: token,
+        })
+        .await
+        .map_err(|_| api_err("queue", "daemon shutting down"))?;
+    Ok(ResponseResult::Job(kxprov_api::JobRef { job_id }))
 }
 
 async fn unlock(
@@ -467,8 +475,7 @@ fn map_outcome(outcome: JobOutcome) -> Result<ResponseResult, ApiErrorBody> {
         JobOutcome::ReadFields(r) => Ok(ResponseResult::ReadFields(r)),
         JobOutcome::PlanChange(r) => Ok(ResponseResult::PlanChange(r)),
         JobOutcome::BackupNow(r) => Ok(ResponseResult::BackupNow(r)),
-        JobOutcome::ApplyPlan(r) => Ok(ResponseResult::ApplyPlan(r)),
-        JobOutcome::ApplyDeferred(r) => Ok(ResponseResult::ApplyDeferred(r)),
+        JobOutcome::ApplyPlan { .. } => Err(api_err("internal", "apply uses job_id response")),
         JobOutcome::Err { code, message } => Err(api_err(&code, &message)),
     }
 }

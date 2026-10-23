@@ -111,9 +111,10 @@ pub struct RequestAuth {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SubmitApprovalParams {
-    /// Full 32-hex plan id or exactly 8-hex prefix (v2.7 F1).
-    pub plan_ref: String,
+    /// Full 32-hex plan id or exactly 8-hex prefix (v2.11).
+    pub plan_id: String,
     pub diff_hash: DiffHash,
+    pub profile: Profile,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -212,8 +213,7 @@ pub enum ResponseResult {
     ListBackups(ListBackupsResult),
     BackupNow(BackupNowResult),
     Job(JobRef),
-    ApplyDeferred(ApplyDeferredResult),
-    ApplyPlan(ApplyPlanResult),
+    ApplyApprovalRequired(ApplyApprovalRequiredResult),
     Unlock(UnlockResult),
 }
 
@@ -222,23 +222,18 @@ pub struct JobRef {
     pub job_id: String,
 }
 
+/// Returned when apply is blocked pending approval (v2.11).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ApplyDeferredResult {
-    pub message: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ApplyPlanStatus {
-    Completed,
-    Deferred,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ApplyPlanResult {
+pub struct ApplyApprovalRequiredResult {
     pub plan_id: PlanId,
     pub diff_hash: DiffHash,
-    pub status: ApplyPlanStatus,
+    pub status: ApplyPlanAwaitingStatus,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApplyPlanAwaitingStatus {
+    ApprovalRequired,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
