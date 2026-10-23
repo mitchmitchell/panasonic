@@ -1,13 +1,20 @@
 [workspace]
 resolver = "2"
-members = ["crates/kxtd1232", "crates/kxtd1232-sim", "crates/kxprov"]
-# Later phases (stubs only, not yet members): crates/kxprovd, crates/kxprov-api,
-# crates/kxprov-web, crates/kxprov-mcp, crates/kxprov-gw.
+members = [
+    "crates/kxtd1232",
+    "crates/kxtd1232-sim",
+    "crates/kxprov",
+    "crates/kxprov-api",
+    "crates/kxprov-web",
+    "crates/kxprov-mcp",
+    "crates/kxprov-gw",
+]
+# Later: crates/kxprovd
 
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.88"
 license = "LicenseRef-Proprietary"
 publish = false
 
@@ -24,3 +31,47 @@ lto = "thin"
 codegen-units = 1
 panic = "abort"
 strip = true
+
+[workspace.dependencies]
+anyhow = "1"
+argon2 = "0.5"
+askama = "0.12"
+axum = "0.8"
+axum-server = { version = "0.7", features = ["tls-rustls"] }
+axum_csrf = "0.12"
+base64 = "0.22"
+bytes = "1"
+hex = "0.4"
+http = "1"
+http-body-util = "0.1"
+hyper = "1"
+rmcp = { version = "2.2", features = [
+    "server",
+    "macros",
+    "schemars",
+    "transport-streamable-http-server",
+] }
+rustls = { version = "0.23", default-features = false, features = [
+    "ring",
+    "std",
+    "tls12",
+] }
+rustls-pemfile = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+subtle = "2"
+thiserror = "2"
+time = { version = "0.3", features = ["formatting", "parsing", "serde"] }
+tokio = { version = "1", features = ["full"] }
+tokio-util = "0.7"
+tower = "0.5"
+tower-http = { version = "0.6", features = ["trace"] }
+tower-sessions = "0.14"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "=1.11.0", features = ["v4", "serde"] }
+kxprov-api = { path = "crates/kxprov-api" }
+kxprov-web = { path = "crates/kxprov-web" }
+kxprov-mcp = { path = "crates/kxprov-mcp" }
+kxtd1232 = { path = "crates/kxtd1232" }
