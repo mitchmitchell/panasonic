@@ -8,6 +8,7 @@ use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, Weak};
+use std::time::{Duration, Instant};
 use thiserror::Error;
 
 use crate::queue::JobQueue;
@@ -30,6 +31,8 @@ pub enum TokenError {
     Expired,
     #[error("scope denied")]
     ScopeDenied,
+    #[error("token store unavailable")]
+    StoreUnavailable,
 }
 
 #[derive(Debug, Clone)]
@@ -46,6 +49,11 @@ struct TokenState {
     loaded_digest: Option<[u8; 32]>,
     /// When true, a reload from disk re-checks root ownership and mode 0600.
     enforce_secure_reload: bool,
+    /// First transient reload failure (ENOENT / torn JSON); serve cached file until this ages out.
+    reload_failure_since: Option<Instant>,
+    /// After grace expires, reject bearer auth until a good reload succeeds.
+    store_unavailable: bool,
+    store_unavailable_logged: bool,
 }
 
 pub struct TokenStore {
@@ -69,6 +77,9 @@ impl Clone for TokenStore {
                 entries: state.entries.clone(),
                 loaded_digest: state.loaded_digest,
                 enforce_secure_reload: state.enforce_secure_reload,
+                reload_failure_since: state.reload_failure_since,
+                store_unavailable: state.store_unavailable,
+                store_unavailable_logged: state.store_unavailable_logged,
             }),
             job_queue: Mutex::new(self.job_queue.lock().expect("token store lock").clone()),
         }
@@ -95,6 +106,14 @@ impl TokenStore {
     #[cfg(feature = "test-util")]
     pub fn load_insecure(path: PathBuf) -> Result<Self, TokenError> {
         Self::load_unchecked_insecure(path)
+    }
+
+    #[cfg(all(test, feature = "test-util"))]
+    pub fn set_enforce_secure_reload_for_test(&self, enforce: bool) {
+        self.inner
+            .lock()
+            .expect("token store lock")
+            .enforce_secure_reload = enforce;
     }
 
     fn load_unchecked(path: PathBuf) -> Result<Self, TokenError> {
@@ -151,42 +170,54 @@ impl TokenStore {
         serde_json::from_slice::<TokensFile>(raw).is_ok()
     }
 
-    /// Read `tokens.json` for reload; retries ENOENT and torn/partial JSON from concurrent writers.
-    fn read_tokens_bytes_resilient(path: &Path) -> Result<Vec<u8>, TokenError> {
+    const RELOAD_GRACE: Duration = Duration::from_secs(2);
+    const RELOAD_MAX_ATTEMPTS: usize = 3;
+
+    fn try_read_valid_tokens_bytes(path: &Path) -> Result<Vec<u8>, ()> {
         use std::io::ErrorKind;
-        const ATTEMPTS: usize = 5;
-        let mut last_io: Option<std::io::Error> = None;
-        for attempt in 0..ATTEMPTS {
-            match std::fs::read(path) {
-                Ok(raw) => {
-                    if Self::tokens_file_parse_ok(&raw) {
-                        return Ok(raw);
-                    }
-                    if attempt + 1 >= ATTEMPTS {
-                        return Err(TokenError::Invalid(
-                            "tokens.json invalid after retries".into(),
-                        ));
-                    }
-                }
-                Err(e) if e.kind() == ErrorKind::NotFound => {
-                    last_io = Some(e);
-                    if attempt + 1 >= ATTEMPTS {
-                        return Err(TokenError::Io(
-                            last_io.unwrap_or_else(|| std::io::Error::from(ErrorKind::NotFound)),
-                        ));
-                    }
-                }
-                Err(e) => return Err(TokenError::Io(e)),
-            }
-            std::thread::yield_now();
+        match std::fs::read(path) {
+            Ok(raw) if Self::tokens_file_parse_ok(&raw) => Ok(raw),
+            Ok(_) => Err(()),
+            Err(e) if e.kind() == ErrorKind::NotFound => Err(()),
+            Err(_) => Err(()),
         }
-        Err(TokenError::Io(last_io.unwrap_or_else(|| {
-            std::io::Error::from(ErrorKind::NotFound)
-        })))
+    }
+
+    /// Up to three read attempts within about [`Self::RELOAD_GRACE`].
+    fn read_tokens_bytes_transient_window(path: &Path) -> Result<Vec<u8>, ()> {
+        let deadline = Instant::now() + Self::RELOAD_GRACE;
+        for attempt in 0..Self::RELOAD_MAX_ATTEMPTS {
+            if let Ok(raw) = Self::try_read_valid_tokens_bytes(path) {
+                return Ok(raw);
+            }
+            if attempt + 1 >= Self::RELOAD_MAX_ATTEMPTS || Instant::now() >= deadline {
+                break;
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            std::thread::sleep(remaining.min(Duration::from_millis(700)));
+        }
+        Err(())
+    }
+
+    fn clear_reload_outage(state: &mut TokenState) {
+        state.reload_failure_since = None;
+        state.store_unavailable = false;
+        state.store_unavailable_logged = false;
+    }
+
+    fn empty_refresh_delta() -> TokenRefreshDelta {
+        TokenRefreshDelta {
+            newly_revoked: Vec::new(),
+            reactivated: Vec::new(),
+            rotated: Vec::new(),
+        }
     }
 
     fn read_state(path: &Path) -> Result<TokenState, TokenError> {
-        let raw = Self::read_tokens_bytes_resilient(path)?;
+        let raw = std::fs::read(path)?;
+        if !Self::tokens_file_parse_ok(&raw) {
+            return Err(TokenError::Invalid("tokens.json invalid".into()));
+        }
         let loaded_digest = Self::digest_bytes(&raw);
         let file: TokensFile = serde_json::from_slice(&raw)?;
         Ok(TokenState {
@@ -195,6 +226,9 @@ impl TokenStore {
             entries: file.tokens,
             loaded_digest: Some(loaded_digest),
             enforce_secure_reload: true,
+            reload_failure_since: None,
+            store_unavailable: false,
+            store_unavailable_logged: false,
         })
     }
 
@@ -206,6 +240,9 @@ impl TokenStore {
             entries: file.tokens,
             loaded_digest: Some(Self::digest_bytes(raw)),
             enforce_secure_reload: true,
+            reload_failure_since: None,
+            store_unavailable: false,
+            store_unavailable_logged: false,
         })
     }
 
@@ -251,45 +288,82 @@ impl TokenStore {
         Ok(())
     }
 
+    fn latch_store_unavailable(state: &mut TokenState) -> TokenError {
+        state.store_unavailable = true;
+        if !state.store_unavailable_logged {
+            tracing::error!(
+                path = %state.path.display(),
+                "tokens.json reload failed past grace; bearer-authenticated access rejected until file recovers"
+            );
+            state.store_unavailable_logged = true;
+        }
+        TokenError::StoreUnavailable
+    }
+
+    fn handle_transient_reload_failure(
+        state: &mut TokenState,
+    ) -> Result<TokenRefreshDelta, TokenError> {
+        let now = Instant::now();
+        if state.reload_failure_since.is_none() {
+            state.reload_failure_since = Some(now);
+            return Ok(Self::empty_refresh_delta());
+        }
+        if let Some(since) = state.reload_failure_since {
+            if now.duration_since(since) < Self::RELOAD_GRACE {
+                return Ok(Self::empty_refresh_delta());
+            }
+        }
+        Err(Self::latch_store_unavailable(state))
+    }
+
     fn refresh_if_modified(state: &mut TokenState) -> Result<TokenRefreshDelta, TokenError> {
         if state.loaded_digest.is_none() {
-            return Ok(TokenRefreshDelta {
-                newly_revoked: Vec::new(),
-                reactivated: Vec::new(),
-                rotated: Vec::new(),
-            });
+            return Ok(Self::empty_refresh_delta());
         }
-        let raw = match Self::read_tokens_bytes_resilient(&state.path) {
-            Ok(raw) => raw,
-            Err(e) => {
-                // Atomic replace or torn write: keep last good in-memory snapshot.
-                tracing::debug!("tokens reload skipped, using cached file: {e}");
-                return Ok(TokenRefreshDelta {
-                    newly_revoked: Vec::new(),
-                    reactivated: Vec::new(),
-                    rotated: Vec::new(),
-                });
+
+        if state.enforce_secure_reload {
+            Self::check_secure(&state.path)?;
+        }
+
+        if let Some(since) = state.reload_failure_since {
+            if !state.store_unavailable && since.elapsed() < Self::RELOAD_GRACE {
+                if let Ok(raw) = Self::try_read_valid_tokens_bytes(&state.path) {
+                    Self::clear_reload_outage(state);
+                    return Self::apply_reloaded_bytes(state, raw);
+                }
+                return Ok(Self::empty_refresh_delta());
             }
+        }
+
+        if state.store_unavailable {
+            let raw = match Self::read_tokens_bytes_transient_window(&state.path) {
+                Ok(r) => r,
+                Err(()) => return Err(Self::latch_store_unavailable(state)),
+            };
+            Self::clear_reload_outage(state);
+            return Self::apply_reloaded_bytes(state, raw);
+        }
+
+        let raw = match Self::read_tokens_bytes_transient_window(&state.path) {
+            Ok(r) => {
+                Self::clear_reload_outage(state);
+                r
+            }
+            Err(()) => return Self::handle_transient_reload_failure(state),
         };
+
+        Self::apply_reloaded_bytes(state, raw)
+    }
+
+    fn apply_reloaded_bytes(
+        state: &mut TokenState,
+        raw: Vec<u8>,
+    ) -> Result<TokenRefreshDelta, TokenError> {
         let digest = Self::digest_bytes(&raw);
         if Some(digest) == state.loaded_digest {
-            return Ok(TokenRefreshDelta {
-                newly_revoked: Vec::new(),
-                reactivated: Vec::new(),
-                rotated: Vec::new(),
-            });
+            return Ok(Self::empty_refresh_delta());
         }
         let enforce_secure = state.enforce_secure_reload;
-        if enforce_secure {
-            if let Err(e) = Self::check_secure(&state.path) {
-                tracing::debug!("tokens reload skipped (secure check): {e}");
-                return Ok(TokenRefreshDelta {
-                    newly_revoked: Vec::new(),
-                    reactivated: Vec::new(),
-                    rotated: Vec::new(),
-                });
-            }
-        }
         let prev_ids: HashSet<String> = state
             .entries
             .iter()
@@ -306,25 +380,8 @@ impl TokenStore {
             .iter()
             .map(|t| (t.id.as_str().to_string(), t.secret_hash.clone()))
             .collect();
-        let fresh = match Self::read_state_from_raw(&state.path, &raw) {
-            Ok(f) => f,
-            Err(e) => {
-                tracing::debug!("tokens reload parse skipped: {e}");
-                return Ok(TokenRefreshDelta {
-                    newly_revoked: Vec::new(),
-                    reactivated: Vec::new(),
-                    rotated: Vec::new(),
-                });
-            }
-        };
-        if let Err(e) = Self::validate_file(&fresh.entries, &fresh.approver_token_id) {
-            tracing::debug!("tokens reload validation skipped: {e}");
-            return Ok(TokenRefreshDelta {
-                newly_revoked: Vec::new(),
-                reactivated: Vec::new(),
-                rotated: Vec::new(),
-            });
-        }
+        let fresh = Self::read_state_from_raw(&state.path, &raw)?;
+        Self::validate_file(&fresh.entries, &fresh.approver_token_id)?;
         let fresh_ids: HashSet<String> = fresh
             .entries
             .iter()
@@ -436,6 +493,9 @@ impl TokenStore {
             entries: file.tokens,
             loaded_digest: None,
             enforce_secure_reload: false,
+            reload_failure_since: None,
+            store_unavailable: false,
+            store_unavailable_logged: false,
         };
         Self {
             inner: Mutex::new(state),
@@ -463,7 +523,10 @@ impl TokenStore {
         if !path.exists() {
             return Err(TokenError::Invalid("tokens file missing".into()));
         }
-        let meta = std::fs::metadata(path)?;
+        let meta = std::fs::symlink_metadata(path)?;
+        if meta.file_type().is_symlink() || !meta.is_file() {
+            return Err(TokenError::InsecurePermissions);
+        }
         if meta.uid() != 0 {
             return Err(TokenError::InsecurePermissions);
         }
@@ -481,6 +544,8 @@ impl TokenStore {
 
 #[cfg(all(test, feature = "test-util"))]
 mod tests {
+    #![allow(clippy::unwrap_used)]
+
     use super::*;
     use kxprov_api::hash_bearer_secret;
 
@@ -521,6 +586,77 @@ mod tests {
             }
         }
         TokenStore::write_test_file(path, &file).expect("write tokens");
+    }
+
+    #[test]
+    fn reload_corrupt_fails_closed_after_grace_window() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("tokens.json");
+        write_tokens_revoking_writer(&path, false);
+        let store = TokenStore::load_insecure(path.clone()).expect("load");
+        store
+            .verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan)
+            .expect("warm");
+        std::fs::write(&path, b"{not-json").unwrap();
+        store
+            .verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan)
+            .expect("grace snapshot");
+        std::thread::sleep(Duration::from_millis(2100));
+        assert!(matches!(
+            store.verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan),
+            Err(TokenError::StoreUnavailable)
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reload_insecure_path_fails_closed_immediately() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let real = tmp.path().join("tokens.real.json");
+        let path = tmp.path().join("tokens.json");
+        write_tokens_revoking_writer(&real, false);
+        std::os::unix::fs::symlink(&real, &path).expect("symlink");
+        let store = TokenStore::load_insecure(path.clone()).expect("load");
+        store
+            .verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan)
+            .expect("warm");
+        store.set_enforce_secure_reload_for_test(true);
+        if nix::unistd::getuid().is_root() {
+            std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o644)).unwrap();
+        } else {
+            std::fs::remove_file(&path).unwrap();
+            std::os::unix::fs::symlink(&real, &path).unwrap();
+        }
+        assert!(matches!(
+            store.verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan),
+            Err(TokenError::InsecurePermissions)
+        ));
+    }
+
+    #[test]
+    fn reload_revoke_honored_after_outage_recovers() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("tokens.json");
+        write_tokens_revoking_writer(&path, false);
+        let store = TokenStore::load_insecure(path.clone()).expect("load");
+        store
+            .verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan)
+            .expect("warm");
+        std::fs::write(&path, b"{bad").unwrap();
+        store
+            .verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan)
+            .expect("grace snapshot");
+        std::thread::sleep(Duration::from_millis(2100));
+        assert!(matches!(
+            store.verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan),
+            Err(TokenError::StoreUnavailable)
+        ));
+        write_tokens_revoking_writer(&path, true);
+        assert!(matches!(
+            store.verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan),
+            Err(TokenError::Revoked)
+        ));
     }
 
     #[test]

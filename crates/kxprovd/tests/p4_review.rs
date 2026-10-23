@@ -2,7 +2,7 @@
 
 mod common;
 
-use common::{init_test_daemon, WRITER_SECRET};
+use common::{bearer_auth, init_test_daemon, WRITER_SECRET};
 use kxprov_api::TokenId;
 use kxprov_api::{
     ApiClient, FieldKindWire, PlanChangeParams, Profile, RequestBody, ResponseResult,
@@ -242,4 +242,61 @@ async fn p4_r6_rotate_does_not_revive_queued_revoked_jobs() {
     else {
         panic!("plan after rotate");
     };
+}
+
+#[tokio::test]
+async fn synthetic_root_read_during_token_store_outage() {
+    let tmp = tempfile::tempdir().unwrap();
+    let uid = nix::unistd::getuid().as_raw();
+    let (_d, sock) = init_test_daemon(&tmp, uid, Profile::Sim);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let path = tmp.path().join("tokens.json");
+    std::fs::write(&path, b"{ corrupt").unwrap();
+
+    let mut admin = ApiClient::connect(&sock).await.unwrap();
+    let _ = admin
+        .call_auth(
+            RequestBody::PlanChange {
+                params: PlanChangeParams {
+                    kind: FieldKindWire::CidName,
+                    index: 0,
+                    value: "Y".into(),
+                },
+            },
+            Some(bearer_auth(WRITER_SECRET)),
+        )
+        .await
+        .expect("bearer may use grace snapshot during reload window");
+    tokio::time::sleep(Duration::from_millis(2100)).await;
+
+    let err = admin
+        .call_auth(
+            RequestBody::PlanChange {
+                params: PlanChangeParams {
+                    kind: FieldKindWire::CidName,
+                    index: 0,
+                    value: "X".into(),
+                },
+            },
+            Some(bearer_auth(WRITER_SECRET)),
+        )
+        .await
+        .expect_err("bearer blocked during outage");
+    assert!(err.to_string().contains("token store unavailable"), "{err}");
+
+    let ResponseResult::ReadFields(rows) = admin
+        .call(RequestBody::ReadFields {
+            params: kxprov_api::ReadFieldsParams {
+                kind: FieldKindWire::CidName,
+                first: 0,
+                count: 1,
+            },
+        })
+        .await
+        .expect("synthetic root read during outage")
+    else {
+        panic!("expected ReadFields");
+    };
+    assert!(!rows.rows.is_empty());
 }
