@@ -43,6 +43,28 @@ pub struct Timing {
     pub presend_quiet_ms: u64,
     /// Overall limit for the text login.
     pub login_timeout_ms: u64,
+    /// Line rate for the post-send cutoff (10 bits per byte).
+    pub link_baud: u32,
+    /// Margin added to the post-send cutoff for the PBX's turnaround.
+    pub reply_guard_ms: u64,
+}
+
+/// Shortest reply frame (an ack), for the post-send cutoff.
+const MIN_REPLY_LEN: usize = 4;
+
+impl Timing {
+    /// Milliseconds to transmit `n` bytes at `link_baud`, 10 bits per byte, rounded up.
+    pub fn tx_ms(&self, n: usize) -> u64 {
+        let bits = n as u64 * 10 * 1000;
+        bits.div_ceil(u64::from(self.link_baud.max(1)))
+    }
+
+    /// Earliest time after a send starts at which a genuine reply can have arrived: the
+    /// request must finish transmitting, the PBX turn round, and the shortest reply
+    /// arrive. Anything before that is stale and dropped.
+    pub fn reply_cutoff_ms(&self, request_len: usize) -> u64 {
+        self.tx_ms(request_len) + self.tx_ms(MIN_REPLY_LEN) + self.reply_guard_ms
+    }
 }
 
 impl Default for Timing {
@@ -54,6 +76,8 @@ impl Default for Timing {
             quiet_ms: 500,
             presend_quiet_ms: 100,
             login_timeout_ms: 30_000,
+            link_baud: 9600,
+            reply_guard_ms: 20,
         }
     }
 }
@@ -272,11 +296,15 @@ impl<T: Transport> Client<T> {
             }
             return Err(e);
         }
+        let sent_at = self.t.now_ms();
         if let Err(e @ Error::LinkDown(_)) = self.send(raw) {
             self.note_link_down(None);
             return Err(e);
         }
-        let r = match self.await_reply(cmd, timeout_ms) {
+        let r = match self
+            .drop_before_cutoff(sent_at + self.timing.reply_cutoff_ms(raw.len()))
+            .and_then(|()| self.await_reply(cmd, timeout_ms))
+        {
             Ok(reply) => self.check_trailing().map(|()| reply),
             Err(e) => Err(e),
         };
@@ -350,6 +378,29 @@ impl<T: Transport> Client<T> {
                 bytes: extra,
             });
             Err(Error::ExtraFrame)
+        }
+    }
+
+    /// Post-send cutoff (ported from prototype 3741820): drop (and log) every byte that
+    /// arrives before `cutoff`, since no genuine reply can be complete that soon. A write
+    /// that only saw such frames then times out and is unacked.
+    fn drop_before_cutoff(&mut self, cutoff: u64) -> Result<(), Error> {
+        loop {
+            let now = self.t.now_ms();
+            if now >= cutoff {
+                return Ok(());
+            }
+            match self.recv(cutoff - now - 1) {
+                Ok(bytes) => {
+                    let at_ms = self.t.now_ms();
+                    self.drained.push(Drained { at_ms, bytes });
+                }
+                Err(Error::Timeout) => {
+                    self.rx.clear();
+                    return Ok(());
+                }
+                Err(e) => return Err(e),
+            }
         }
     }
 

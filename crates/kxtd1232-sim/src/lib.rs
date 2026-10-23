@@ -454,8 +454,12 @@ impl Transport for SimTransport {
             self.link_down = true;
             return Ok(());
         }
+        // Model the 9600-baud line: the PBX acts once the request has been received, and
+        // each reply lands once it has been transmitted.
+        let t = kxtd1232::Timing::default();
+        let rx_done = self.now + t.tx_ms(data.len());
         for (delay, bytes) in self.sim.feed(data) {
-            let at = self.now + delay;
+            let at = rx_done + delay + t.tx_ms(bytes.len());
             self.schedule(at, bytes);
         }
         Ok(())

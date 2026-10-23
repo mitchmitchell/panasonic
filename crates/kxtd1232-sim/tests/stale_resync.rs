@@ -102,8 +102,9 @@ fn test_garbled_reply_resyncs_so_next_read_and_close_work() {
     let mut c = client();
     let mut g = reply_frame(Cmd::Read.byte(), &[0, 1, 2, 3, 4, 5, 6]);
     *g.last_mut().unwrap() ^= 0xFF;
-    // After the 100 ms pre-send quiet, before the real reply (+30 ms).
-    c.transport_mut().inject_inbound_after(110, g);
+    // After the 100 ms pre-send quiet and the post-send cutoff, before the real reply.
+    let cutoff = Timing::default().reply_cutoff_ms(8);
+    c.transport_mut().inject_inbound_after(100 + cutoff + 2, g);
     assert!(matches!(c.read(0x24, 0, 0, 3), Err(Error::Garbled(_))));
     assert_eq!(c.read(0x24, 0, 0, 3), Ok(db(&c, 0x24, 0, 6)));
     assert_eq!(c.end_binary(), Ok(()));
