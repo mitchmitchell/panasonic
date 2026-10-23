@@ -73,7 +73,7 @@ mod tests {
             st.complete();
         }
         assert_eq!(
-            st.try_reserve(base + JOBS_PER_MINUTE as u64),
+            st.try_reserve(base + u64::from(JOBS_PER_MINUTE)),
             Err(RateLimitError::JobsPerMinute)
         );
     }

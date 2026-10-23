@@ -141,6 +141,36 @@ impl TransientReloadFlight {
     }
 }
 
+/// If the leader panics before publishing `Done`, unblock waiters instead of wedging auth.
+struct TransientProbeLeaderGuard<'a> {
+    flight: &'a TransientReloadFlight,
+    on_drop: DiskProbe,
+    released: bool,
+}
+
+impl<'a> TransientProbeLeaderGuard<'a> {
+    fn new(flight: &'a TransientReloadFlight, on_drop: DiskProbe) -> Self {
+        Self {
+            flight,
+            on_drop,
+            released: false,
+        }
+    }
+}
+
+impl Drop for TransientProbeLeaderGuard<'_> {
+    fn drop(&mut self) {
+        if self.released {
+            return;
+        }
+        let mut guard = self.flight.inner.lock().expect("transient flight lock");
+        if matches!(*guard, TransientFlightState::Running) {
+            *guard = TransientFlightState::Done(self.on_drop.clone());
+            self.flight.cv.notify_all();
+        }
+    }
+}
+
 fn ct_eq_str(a: &str, b: &str) -> bool {
     if a.len() != b.len() {
         return false;
@@ -240,9 +270,6 @@ impl TokenStore {
     fn disk_fingerprint(path: &Path) -> DiskFingerprint {
         use std::io::ErrorKind;
         match std::fs::read(path) {
-            Ok(raw) if Self::tokens_file_parse_ok(&raw) => {
-                DiskFingerprint::InvalidDigest(Self::digest_bytes(&raw))
-            }
             Ok(raw) => DiskFingerprint::InvalidDigest(Self::digest_bytes(&raw)),
             Err(e) if e.kind() == ErrorKind::NotFound => DiskFingerprint::Missing,
             Err(_) => DiskFingerprint::Unreadable,
@@ -289,21 +316,26 @@ impl TokenStore {
     }
 
     fn timed_out_disk_probe() -> DiskProbe {
+        let outage_start = Instant::now()
+            .checked_sub(Self::RELOAD_GRACE)
+            .unwrap_or_else(Instant::now);
         DiskProbe::StillBad {
             fp: DiskFingerprint::Unreadable,
-            outage_start: Instant::now() - Self::RELOAD_GRACE,
+            outage_start,
         }
     }
 
     fn run_disk_probe_off_thread(plan: ReloadPlan) -> DiskProbe {
         let deadline = Instant::now() + Self::RELOAD_GRACE;
         let (tx, rx) = std::sync::mpsc::sync_channel(1);
-        std::thread::Builder::new()
+        let spawn_ok = std::thread::Builder::new()
             .name("token-reload-probe".into())
             .spawn(move || {
                 let _ = tx.send(Self::execute_disk_probe(&plan));
-            })
-            .expect("spawn token reload probe thread");
+            });
+        if spawn_ok.is_err() {
+            return Self::timed_out_disk_probe();
+        }
         let timeout = deadline
             .saturating_duration_since(Instant::now())
             .saturating_add(Duration::from_millis(300));
@@ -345,6 +377,8 @@ impl TokenStore {
                 TransientFlightState::Idle => {
                     *guard = TransientFlightState::Running;
                     drop(guard);
+                    let _leader =
+                        TransientProbeLeaderGuard::new(flight, Self::timed_out_disk_probe());
                     let probe = Self::run_disk_probe_off_thread(plan.clone());
                     let mut guard = flight.inner.lock().expect("transient flight lock");
                     *guard = TransientFlightState::Done(probe.clone());
@@ -546,7 +580,7 @@ impl TokenStore {
         };
 
         let probe = if plan.transient_done {
-            Self::execute_disk_probe(&plan)
+            Self::run_disk_probe_off_thread(plan)
         } else {
             Self::coordinated_transient_probe(&self.transient_flight, plan)
         };
@@ -842,6 +876,25 @@ mod tests {
         ));
     }
 
+    struct ReloadProbeHangGuard {
+        flag: Arc<AtomicBool>,
+    }
+
+    impl ReloadProbeHangGuard {
+        fn enable(store: &TokenStore) -> Self {
+            store.reload_probe_hang.store(true, Ordering::Relaxed);
+            Self {
+                flag: Arc::clone(&store.reload_probe_hang),
+            }
+        }
+    }
+
+    impl Drop for ReloadProbeHangGuard {
+        fn drop(&mut self) {
+            self.flag.store(false, Ordering::Relaxed);
+        }
+    }
+
     #[test]
     fn reload_hung_probe_fails_closed_and_recovers() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -852,17 +905,28 @@ mod tests {
             .verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan)
             .expect("warm");
         std::fs::write(&path, b"{bad").unwrap();
-        store.set_reload_probe_hang_for_test(true);
-        let wall = Instant::now();
-        assert!(matches!(
-            store.verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan),
-            Err(TokenError::StoreUnavailable)
-        ));
-        assert!(
-            wall.elapsed() <= Duration::from_secs(2) + Duration::from_millis(400),
-            "hung probe must fail closed within the reload window"
-        );
-        store.set_reload_probe_hang_for_test(false);
+        let bound = Duration::from_secs(2) + Duration::from_millis(400);
+        {
+            let _hang = ReloadProbeHangGuard::enable(&store);
+            let wall = Instant::now();
+            assert!(matches!(
+                store.verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan),
+                Err(TokenError::StoreUnavailable)
+            ));
+            assert!(
+                wall.elapsed() <= bound,
+                "first hung probe must fail closed within the reload window"
+            );
+            let wall2 = Instant::now();
+            assert!(matches!(
+                store.verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan),
+                Err(TokenError::StoreUnavailable)
+            ));
+            assert!(
+                wall2.elapsed() <= bound,
+                "follow-up reload must stay bounded while probe hangs"
+            );
+        }
         write_tokens_revoking_writer(&path, false);
         store
             .verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan)

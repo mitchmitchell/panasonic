@@ -343,9 +343,14 @@ async fn run_apply_job(
         }
         Err(e) => {
             if matches!(e, crate::apply::ApplyError::NotSim) {
-                let _ = ctx.journal.append(&JournalEntry::ApplyAbort {
+                if let Err(je) = ctx.journal.append(&JournalEntry::ApplyAbort {
                     job_id: job_id.to_string(),
-                });
+                }) {
+                    return JobOutcome::Err {
+                        code: "journal".into(),
+                        message: format!("ApplyAbort not persisted: {je}"),
+                    };
+                }
                 return JobOutcome::Err {
                     code: "apply".into(),
                     message: e.to_string(),
@@ -357,9 +362,14 @@ async fn run_apply_job(
                     message: "apply failed and LOCKED could not be persisted".into(),
                 };
             }
-            let _ = ctx.journal.append(&JournalEntry::ApplyAbort {
+            if let Err(je) = ctx.journal.append(&JournalEntry::ApplyAbort {
                 job_id: job_id.to_string(),
-            });
+            }) {
+                return JobOutcome::Err {
+                    code: "journal".into(),
+                    message: format!("ApplyAbort not persisted: {je}"),
+                };
+            }
             JobOutcome::Err {
                 code: "apply".into(),
                 message: e.to_string(),
