@@ -301,12 +301,17 @@ async fn run_apply_job(
             };
         }
     };
-    let _ = ctx.journal.append(&JournalEntry::ApplyStart {
+    if let Err(e) = ctx.journal.append(&JournalEntry::ApplyStart {
         job_id: job_id.to_string(),
         plan_id: plan_id.as_str().to_string(),
         diff_hash: diff_hash.0.clone(),
         backup_id,
-    });
+    }) {
+        return JobOutcome::Err {
+            code: "journal".into(),
+            message: format!("ApplyStart not persisted: {e}"),
+        };
+    }
     let profile = *ctx.profile.read().await;
     match run_apply(
         &ctx.config,
@@ -337,6 +342,15 @@ async fn run_apply_job(
             JobOutcome::ApplyPlan { plan_id, diff_hash }
         }
         Err(e) => {
+            if matches!(e, crate::apply::ApplyError::NotSim) {
+                let _ = ctx.journal.append(&JournalEntry::ApplyAbort {
+                    job_id: job_id.to_string(),
+                });
+                return JobOutcome::Err {
+                    code: "apply".into(),
+                    message: e.to_string(),
+                };
+            }
             if lock_on_apply_failure(&ctx.locked, &e.to_string(), job_id).is_err() {
                 return JobOutcome::Err {
                     code: "locked".into(),

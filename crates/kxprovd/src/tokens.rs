@@ -7,7 +7,7 @@ use kxprov_api::{
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, Weak};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 use thiserror::Error;
 
@@ -49,13 +49,13 @@ struct TokenState {
     loaded_digest: Option<[u8; 32]>,
     /// When true, a reload from disk re-checks root ownership and mode 0600.
     enforce_secure_reload: bool,
-    /// First transient reload failure (ENOENT / torn JSON); serve cached file until this ages out.
+    /// When transient reload began; stale snapshot allowed until this ages out (~2s total).
     reload_failure_since: Option<Instant>,
     /// After grace expires, reject bearer auth until a good reload succeeds.
     store_unavailable: bool,
     store_unavailable_logged: bool,
-    /// Skip disk probes until this instant (coalesce retries across concurrent requests).
-    reload_probe_backoff_until: Option<Instant>,
+    /// Initial 3-try window already consumed for this outage episode.
+    reload_transient_done: bool,
     /// Fingerprint of the last failed on-disk payload (avoid re-reading unchanged bad bytes).
     reload_failed_disk_fingerprint: Option<DiskFingerprint>,
 }
@@ -64,11 +64,28 @@ struct TokenState {
 enum DiskFingerprint {
     Missing,
     InvalidDigest([u8; 32]),
+    Unreadable,
+}
+
+struct ReloadPlan {
+    path: PathBuf,
+    outage_start: Option<Instant>,
+    transient_done: bool,
+    failed_fp: Option<DiskFingerprint>,
+}
+
+enum DiskProbe {
+    Ok(Vec<u8>),
+    UnchangedBad,
+    StillBad {
+        fp: DiskFingerprint,
+        outage_start: Instant,
+    },
 }
 
 pub struct TokenStore {
-    inner: Mutex<TokenState>,
-    job_queue: Mutex<Option<Weak<JobQueue>>>,
+    inner: Arc<Mutex<TokenState>>,
+    job_queue: Arc<Mutex<Option<Weak<JobQueue>>>>,
 }
 
 struct TokenRefreshDelta {
@@ -79,21 +96,9 @@ struct TokenRefreshDelta {
 
 impl Clone for TokenStore {
     fn clone(&self) -> Self {
-        let state = self.inner.lock().expect("token store lock");
         Self {
-            inner: Mutex::new(TokenState {
-                path: state.path.clone(),
-                approver_token_id: state.approver_token_id.clone(),
-                entries: state.entries.clone(),
-                loaded_digest: state.loaded_digest,
-                enforce_secure_reload: state.enforce_secure_reload,
-                reload_failure_since: state.reload_failure_since,
-                store_unavailable: state.store_unavailable,
-                store_unavailable_logged: state.store_unavailable_logged,
-                reload_probe_backoff_until: state.reload_probe_backoff_until,
-                reload_failed_disk_fingerprint: state.reload_failed_disk_fingerprint,
-            }),
-            job_queue: Mutex::new(self.job_queue.lock().expect("token store lock").clone()),
+            inner: Arc::clone(&self.inner),
+            job_queue: Arc::clone(&self.job_queue),
         }
     }
 }
@@ -133,8 +138,8 @@ impl TokenStore {
         state.enforce_secure_reload = true;
         Self::validate_file(&state.entries, &state.approver_token_id)?;
         Ok(Self {
-            inner: Mutex::new(state),
-            job_queue: Mutex::new(None),
+            inner: Arc::new(Mutex::new(state)),
+            job_queue: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -144,8 +149,8 @@ impl TokenStore {
         state.enforce_secure_reload = false;
         Self::validate_file(&state.entries, &state.approver_token_id)?;
         Ok(Self {
-            inner: Mutex::new(state),
-            job_queue: Mutex::new(None),
+            inner: Arc::new(Mutex::new(state)),
+            job_queue: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -185,13 +190,15 @@ impl TokenStore {
     const RELOAD_GRACE: Duration = Duration::from_secs(2);
     const RELOAD_MAX_ATTEMPTS: usize = 3;
 
-    fn disk_fingerprint(path: &Path) -> Result<DiskFingerprint, std::io::Error> {
+    fn disk_fingerprint(path: &Path) -> DiskFingerprint {
         use std::io::ErrorKind;
         match std::fs::read(path) {
-            Ok(raw) if Self::tokens_file_parse_ok(&raw) => Err(ErrorKind::InvalidData.into()),
-            Ok(raw) => Ok(DiskFingerprint::InvalidDigest(Self::digest_bytes(&raw))),
-            Err(e) if e.kind() == ErrorKind::NotFound => Ok(DiskFingerprint::Missing),
-            Err(e) => Err(e),
+            Ok(raw) if Self::tokens_file_parse_ok(&raw) => {
+                DiskFingerprint::InvalidDigest(Self::digest_bytes(&raw))
+            }
+            Ok(raw) => DiskFingerprint::InvalidDigest(Self::digest_bytes(&raw)),
+            Err(e) if e.kind() == ErrorKind::NotFound => DiskFingerprint::Missing,
+            Err(_) => DiskFingerprint::Unreadable,
         }
     }
 
@@ -201,13 +208,15 @@ impl TokenStore {
             Ok(raw) if Self::tokens_file_parse_ok(&raw) => Ok(raw),
             Ok(raw) => Err(DiskFingerprint::InvalidDigest(Self::digest_bytes(&raw))),
             Err(e) if e.kind() == ErrorKind::NotFound => Err(DiskFingerprint::Missing),
-            Err(_) => Err(DiskFingerprint::Missing),
+            Err(_) => Err(DiskFingerprint::Unreadable),
         }
     }
 
-    /// Up to [`Self::RELOAD_MAX_ATTEMPTS`] reads within about [`Self::RELOAD_GRACE`] total.
-    fn read_tokens_bytes_transient_window(path: &Path) -> Result<Vec<u8>, DiskFingerprint> {
-        let deadline = Instant::now() + Self::RELOAD_GRACE;
+    /// Up to [`Self::RELOAD_MAX_ATTEMPTS`] within `deadline` (about 2s from outage start).
+    fn read_tokens_until_deadline(
+        path: &Path,
+        deadline: Instant,
+    ) -> Result<Vec<u8>, DiskFingerprint> {
         let mut last_fp = DiskFingerprint::Missing;
         for attempt in 0..Self::RELOAD_MAX_ATTEMPTS {
             match Self::try_read_valid_tokens_bytes(path) {
@@ -227,28 +236,41 @@ impl TokenStore {
         state.reload_failure_since = None;
         state.store_unavailable = false;
         state.store_unavailable_logged = false;
-        state.reload_probe_backoff_until = None;
+        state.reload_transient_done = false;
         state.reload_failed_disk_fingerprint = None;
     }
 
-    fn set_reload_probe_backoff(state: &mut TokenState, fp: DiskFingerprint) {
-        state.reload_failed_disk_fingerprint = Some(fp);
-        state.reload_probe_backoff_until = Some(Instant::now() + Self::RELOAD_GRACE);
+    fn fingerprint_unchanged(expected: DiskFingerprint, path: &Path) -> bool {
+        Self::disk_fingerprint(path) == expected
     }
 
-    fn reload_probe_backoff_active(state: &TokenState) -> bool {
-        state
-            .reload_probe_backoff_until
-            .is_some_and(|until| Instant::now() < until)
-    }
+    fn execute_disk_probe(plan: &ReloadPlan) -> DiskProbe {
+        if plan.transient_done {
+            if let Some(fp) = plan.failed_fp {
+                if Self::fingerprint_unchanged(fp, &plan.path) {
+                    return DiskProbe::UnchangedBad;
+                }
+            }
+            if let Ok(raw) = Self::try_read_valid_tokens_bytes(&plan.path) {
+                return DiskProbe::Ok(raw);
+            }
+            if let Some(start) = plan.outage_start {
+                if start.elapsed() >= Self::RELOAD_GRACE {
+                    let fp = Self::disk_fingerprint(&plan.path);
+                    return DiskProbe::StillBad {
+                        fp,
+                        outage_start: start,
+                    };
+                }
+            }
+            return DiskProbe::UnchangedBad;
+        }
 
-    fn reload_disk_unchanged_since_failure(state: &TokenState, path: &Path) -> bool {
-        let Some(expected) = state.reload_failed_disk_fingerprint else {
-            return false;
-        };
-        match Self::disk_fingerprint(path) {
-            Ok(fp) => fp == expected,
-            Err(_) => false,
+        let outage_start = plan.outage_start.unwrap_or_else(Instant::now);
+        let deadline = outage_start + Self::RELOAD_GRACE;
+        match Self::read_tokens_until_deadline(&plan.path, deadline) {
+            Ok(raw) => DiskProbe::Ok(raw),
+            Err(fp) => DiskProbe::StillBad { fp, outage_start },
         }
     }
 
@@ -276,7 +298,7 @@ impl TokenStore {
             reload_failure_since: None,
             store_unavailable: false,
             store_unavailable_logged: false,
-            reload_probe_backoff_until: None,
+            reload_transient_done: false,
             reload_failed_disk_fingerprint: None,
         })
     }
@@ -292,7 +314,7 @@ impl TokenStore {
             reload_failure_since: None,
             store_unavailable: false,
             store_unavailable_logged: false,
-            reload_probe_backoff_until: None,
+            reload_transient_done: false,
             reload_failed_disk_fingerprint: None,
         })
     }
@@ -351,79 +373,60 @@ impl TokenStore {
         TokenError::StoreUnavailable
     }
 
-    fn handle_transient_reload_failure(
+    fn merge_disk_probe(
         state: &mut TokenState,
-        fp: DiskFingerprint,
+        probe: DiskProbe,
     ) -> Result<TokenRefreshDelta, TokenError> {
-        let now = Instant::now();
-        if state.reload_failure_since.is_none() {
-            state.reload_failure_since = Some(now);
-            Self::set_reload_probe_backoff(state, fp);
-            return Ok(Self::empty_refresh_delta());
-        }
-        if let Some(since) = state.reload_failure_since {
-            if now.duration_since(since) < Self::RELOAD_GRACE {
-                Self::set_reload_probe_backoff(state, fp);
-                return Ok(Self::empty_refresh_delta());
-            }
-        }
-        Self::set_reload_probe_backoff(state, fp);
-        Err(Self::latch_store_unavailable(state))
-    }
-
-    fn reload_from_disk(state: &mut TokenState) -> Result<TokenRefreshDelta, TokenError> {
-        if Self::reload_probe_backoff_active(state)
-            && Self::reload_disk_unchanged_since_failure(state, &state.path)
-        {
-            if state.store_unavailable {
-                return Err(TokenError::StoreUnavailable);
-            }
-            if state.reload_failure_since.is_some() {
-                return Ok(Self::empty_refresh_delta());
-            }
-        }
-
-        match Self::try_read_valid_tokens_bytes(&state.path) {
-            Ok(raw) => {
+        match probe {
+            DiskProbe::Ok(raw) => {
                 Self::clear_reload_outage(state);
                 Self::apply_reloaded_bytes(state, raw)
             }
-            Err(fp) => {
-                if state.reload_failure_since.is_none() && !state.store_unavailable {
-                    match Self::read_tokens_bytes_transient_window(&state.path) {
-                        Ok(raw) => {
-                            Self::clear_reload_outage(state);
-                            return Self::apply_reloaded_bytes(state, raw);
-                        }
-                        Err(window_fp) => {
-                            return Self::handle_transient_reload_failure(state, window_fp);
-                        }
-                    }
-                }
+            DiskProbe::UnchangedBad => {
                 if state.store_unavailable {
-                    Self::set_reload_probe_backoff(state, fp);
-                    return Err(Self::latch_store_unavailable(state));
+                    return Err(TokenError::StoreUnavailable);
                 }
                 if let Some(since) = state.reload_failure_since {
-                    if since.elapsed() < Self::RELOAD_GRACE {
-                        return Self::handle_transient_reload_failure(state, fp);
+                    if since.elapsed() >= Self::RELOAD_GRACE {
+                        return Err(Self::latch_store_unavailable(state));
                     }
                 }
-                Self::handle_transient_reload_failure(state, fp)
+                Ok(Self::empty_refresh_delta())
+            }
+            DiskProbe::StillBad { fp, outage_start } => {
+                state.reload_failure_since = Some(outage_start);
+                state.reload_transient_done = true;
+                state.reload_failed_disk_fingerprint = Some(fp);
+                if outage_start.elapsed() >= Self::RELOAD_GRACE || state.store_unavailable {
+                    Err(Self::latch_store_unavailable(state))
+                } else {
+                    Ok(Self::empty_refresh_delta())
+                }
             }
         }
     }
 
-    fn refresh_if_modified(state: &mut TokenState) -> Result<TokenRefreshDelta, TokenError> {
-        if state.loaded_digest.is_none() {
-            return Ok(Self::empty_refresh_delta());
-        }
+    fn refresh_if_modified(&self) -> Result<TokenRefreshDelta, TokenError> {
+        let plan = {
+            let state = self.inner.lock().expect("token store lock");
+            if state.loaded_digest.is_none() {
+                return Ok(Self::empty_refresh_delta());
+            }
+            if state.enforce_secure_reload {
+                Self::check_secure(&state.path)?;
+            }
+            ReloadPlan {
+                path: state.path.clone(),
+                outage_start: state.reload_failure_since,
+                transient_done: state.reload_transient_done,
+                failed_fp: state.reload_failed_disk_fingerprint,
+            }
+        };
 
-        if state.enforce_secure_reload {
-            Self::check_secure(&state.path)?;
-        }
+        let probe = Self::execute_disk_probe(&plan);
 
-        Self::reload_from_disk(state)
+        let mut state = self.inner.lock().expect("token store lock");
+        Self::merge_disk_probe(&mut state, probe)
     }
 
     fn apply_reloaded_bytes(
@@ -531,12 +534,13 @@ impl TokenStore {
         now_ms: u64,
         need: Scope,
     ) -> Result<VerifiedToken, TokenError> {
-        let mut state = self.inner.lock().expect("token store lock");
-        let delta = Self::refresh_if_modified(&mut state)?;
-        if state.store_unavailable {
-            return Err(TokenError::StoreUnavailable);
+        let delta = self.refresh_if_modified()?;
+        {
+            let state = self.inner.lock().expect("token store lock");
+            if state.store_unavailable {
+                return Err(TokenError::StoreUnavailable);
+            }
         }
-        drop(state);
         self.notify_token_revocation_changes(&delta);
         let state = self.inner.lock().expect("token store lock");
         let hash = hash_bearer_secret(bearer);
@@ -570,19 +574,17 @@ impl TokenStore {
             reload_failure_since: None,
             store_unavailable: false,
             store_unavailable_logged: false,
-            reload_probe_backoff_until: None,
+            reload_transient_done: false,
             reload_failed_disk_fingerprint: None,
         };
         Self {
-            inner: Mutex::new(state),
-            job_queue: Mutex::new(None),
+            inner: Arc::new(Mutex::new(state)),
+            job_queue: Arc::new(Mutex::new(None)),
         }
     }
 
     pub fn is_revoked(&self, token_id: &TokenId) -> Result<bool, TokenError> {
-        let mut state = self.inner.lock().expect("token store lock");
-        let delta = Self::refresh_if_modified(&mut state)?;
-        drop(state);
+        let delta = self.refresh_if_modified()?;
         self.notify_token_revocation_changes(&delta);
         let state = self.inner.lock().expect("token store lock");
         Ok(state
@@ -597,16 +599,26 @@ impl TokenStore {
     fn check_secure(path: &Path) -> Result<(), TokenError> {
         use std::os::unix::fs::MetadataExt;
         if !path.exists() {
+            tracing::error!(
+                path = %path.display(),
+                "tokens file missing on secure reload"
+            );
             return Err(TokenError::Invalid("tokens file missing".into()));
         }
         let meta = std::fs::symlink_metadata(path)?;
         if meta.file_type().is_symlink() || !meta.is_file() {
+            tracing::error!(
+                path = %path.display(),
+                "tokens file is not a regular root-owned file"
+            );
             return Err(TokenError::InsecurePermissions);
         }
         if meta.uid() != 0 {
+            tracing::error!(path = %path.display(), "tokens file is not root-owned");
             return Err(TokenError::InsecurePermissions);
         }
         if meta.mode() & 0o777 != 0o600 {
+            tracing::error!(path = %path.display(), "tokens file is not mode 0600");
             return Err(TokenError::InsecurePermissions);
         }
         Ok(())
@@ -692,9 +704,14 @@ mod tests {
             .verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan)
             .expect("warm");
         std::fs::write(&path, b"{not-json").unwrap();
+        let grace_start = Instant::now();
         store
             .verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan)
             .expect("grace snapshot");
+        assert!(
+            grace_start.elapsed() <= Duration::from_secs(2) + Duration::from_millis(200),
+            "transient reload must finish within ~2s"
+        );
         std::thread::sleep(Duration::from_millis(2100));
         assert!(matches!(
             store.verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan),
@@ -702,10 +719,28 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn reload_outage_verify_does_not_block_other_requests() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("tokens.json");
+        write_tokens_revoking_writer(&path, false);
+        let store = TokenStore::load_insecure(path.clone()).expect("load");
+        store
+            .verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan)
+            .expect("warm");
+        std::fs::write(&path, b"{bad").unwrap();
+        let _ = store.verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan);
+        let quick_start = Instant::now();
+        let _ = store.verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan);
+        assert!(
+            quick_start.elapsed() < Duration::from_millis(100),
+            "second verify during grace should not repeat the full retry sleep window"
+        );
+    }
+
     #[cfg(unix)]
     #[test]
-    fn reload_insecure_path_fails_closed_immediately() {
-        use std::os::unix::fs::PermissionsExt;
+    fn reload_insecure_symlink_fails_closed_immediately() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let real = tmp.path().join("tokens.real.json");
         let path = tmp.path().join("tokens.json");
@@ -716,12 +751,28 @@ mod tests {
             .verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan)
             .expect("warm");
         store.set_enforce_secure_reload_for_test(true);
-        if nix::unistd::getuid().is_root() {
-            std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o644)).unwrap();
-        } else {
-            std::fs::remove_file(&path).unwrap();
-            std::os::unix::fs::symlink(&real, &path).unwrap();
+        assert!(matches!(
+            store.verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan),
+            Err(TokenError::InsecurePermissions)
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reload_insecure_mode_fails_closed_immediately() {
+        use std::os::unix::fs::PermissionsExt;
+        if !nix::unistd::getuid().is_root() {
+            return;
         }
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("tokens.json");
+        write_tokens_revoking_writer(&path, false);
+        let store = TokenStore::load_insecure(path.clone()).expect("load");
+        store
+            .verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan)
+            .expect("warm");
+        store.set_enforce_secure_reload_for_test(true);
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
         assert!(matches!(
             store.verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan),
             Err(TokenError::InsecurePermissions)

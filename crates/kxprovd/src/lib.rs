@@ -9,6 +9,7 @@ pub mod audit;
 pub mod backup;
 pub mod config;
 pub mod dbh;
+pub mod epoch_store;
 pub mod gates;
 pub mod goliath;
 pub mod job_principal;

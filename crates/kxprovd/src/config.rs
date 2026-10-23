@@ -185,16 +185,18 @@ impl Config {
         if let Some(guard) = file.reply_guard_ms {
             timing.reply_guard_ms = guard;
         }
-        let data_dir = file
+        let provision_root = file
             .data_dir
-            .unwrap_or_else(|| profile_data_dir(&file.provision_root, file.profile));
+            .clone()
+            .unwrap_or_else(|| file.provision_root.clone());
+        let data_dir = profile_data_dir(&provision_root, file.profile);
         let goliath_target = file
             .goliath_target
             .unwrap_or_else(|| data_dir.join("goliath"));
         let cfg = Self {
             profile: file.profile,
             transport,
-            provision_root: file.provision_root,
+            provision_root,
             data_dir,
             socket_path: file.socket_path,
             password: password.trim().to_string(),

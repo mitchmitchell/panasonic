@@ -13,7 +13,7 @@ use std::time::Duration;
 #[test]
 fn rolled_back_mode_json_fails_closed_to_production() {
     let tmp = tempfile::tempdir().unwrap();
-    let store = ModeStore::new(tmp.path(), Profile::Sim);
+    let store = ModeStore::new(tmp.path(), Profile::Test);
     store
         .set_operational(OperationalMode::Testing, Profile::Test, true)
         .unwrap();
@@ -174,7 +174,7 @@ fn default_production_paths() {
 
 #[test]
 fn profile_data_dir_honors_configured_provision_root() {
-    use kxprovd::config::{profile_data_dir, Config};
+    use kxprovd::config::{profile_data_dir, profile_epoch_counter_path, Config};
     let p = tempfile::tempdir().unwrap();
     let root = p.path().join("custom-root");
     let pass = p.path().join("password");
@@ -190,6 +190,7 @@ fn profile_data_dir_honors_configured_provision_root() {
     )
     .unwrap();
     let cfg = Config::load_from_etc(&cfg_path).unwrap();
+    assert_eq!(cfg.provision_root, root);
     assert_eq!(
         cfg.data_dir,
         profile_data_dir(&root, kxprov_api::Profile::Sim)
@@ -197,6 +198,36 @@ fn profile_data_dir_honors_configured_provision_root() {
     assert_eq!(
         profile_data_dir(&root, kxprov_api::Profile::Prod),
         root.join("prod")
+    );
+    assert_eq!(
+        profile_epoch_counter_path(&root, Profile::Sim),
+        root.join(".epoch/sim.counter")
+    );
+}
+
+#[test]
+fn custom_data_dir_is_provision_root_with_profile_subdirs() {
+    use kxprovd::config::{profile_data_dir, profile_epoch_counter_path, Config};
+    let p = tempfile::tempdir().unwrap();
+    let data_root = p.path().join("data-root");
+    let pass = p.path().join("password");
+    std::fs::write(&pass, "0000").unwrap();
+    let cfg_path = p.path().join("kxprovd.json");
+    std::fs::write(
+        &cfg_path,
+        format!(
+            r#"{{"password_path":"{}","data_dir":"{}"}}"#,
+            pass.display(),
+            data_root.display()
+        ),
+    )
+    .unwrap();
+    let cfg = Config::load_from_etc(&cfg_path).unwrap();
+    assert_eq!(cfg.provision_root, data_root);
+    assert_eq!(cfg.data_dir, profile_data_dir(&data_root, Profile::Sim));
+    assert_eq!(
+        profile_epoch_counter_path(&data_root, Profile::Prod),
+        data_root.join(".epoch/prod.counter")
     );
 }
 
