@@ -31,6 +31,7 @@ async fn localhost_with_port_passes_host_and_origin_on_login_post() {
         },
         false,
         900,
+        kxprov_web::WEB_SESSION_ABSOLUTE_SECS,
         RateLimiter::new(120),
     );
 

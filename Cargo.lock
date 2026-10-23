@@ -1326,6 +1326,7 @@ dependencies = [
  "kxprov-api",
  "kxtd1232",
  "kxtd1232-sim",
+ "nix 0.29.0",
  "serde_json",
  "tempfile",
  "tokio",

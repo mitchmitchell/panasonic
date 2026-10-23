@@ -70,6 +70,7 @@ fn sample_config(dir: &TempDir) -> GatewayConfig {
         tls_cert_path: cert_path,
         tls_key_path: key_path,
         session_ttl_secs: 900,
+        session_absolute_secs: kxprov_web::WEB_SESSION_ABSOLUTE_SECS,
         rate_limit_per_minute: 120,
         allowed_hosts: vec![],
         allowed_origins: vec![],

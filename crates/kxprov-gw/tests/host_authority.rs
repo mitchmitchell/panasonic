@@ -19,6 +19,7 @@ async fn host_header_mismatch_with_uri_authority_returns_400() {
         },
         false,
         900,
+        kxprov_web::WEB_SESSION_ABSOLUTE_SECS,
         RateLimiter::new(120),
     );
     let peer: std::net::SocketAddr = "127.0.0.1:8080".parse().unwrap();

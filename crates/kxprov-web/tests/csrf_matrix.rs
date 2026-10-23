@@ -50,6 +50,7 @@ fn production_app() -> Router {
         },
         false,
         900,
+        kxprov_web::WEB_SESSION_ABSOLUTE_SECS,
         RateLimiter::new(120),
     )
 }

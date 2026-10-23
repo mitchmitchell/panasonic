@@ -6,7 +6,10 @@ use axum::extract::{ConnectInfo, Request};
 use axum::http::header;
 use axum::middleware::{from_fn, from_fn_with_state};
 use axum::Router;
-use kxprov_web::{reject_authenticated_login, require_web_session, ClientIpPolicy, WebState};
+use kxprov_web::{
+    enforce_absolute_session_limit, reject_authenticated_login, require_web_session,
+    ClientIpPolicy, WebState,
+};
 use tower_http::set_header::SetResponseHeaderLayer;
 use tower_sessions::cookie::time::Duration as CookieDuration;
 use tower_sessions::cookie::SameSite;
@@ -21,7 +24,8 @@ pub fn production_web_router(
     web_state: WebState,
     host_origin: HostOriginConfig,
     trust_x_forwarded_for: bool,
-    session_ttl_secs: u64,
+    session_idle_secs: u64,
+    session_absolute_secs: u64,
     rate_limiter: RateLimiter,
 ) -> Router {
     let web_rate = RateLimitState {
@@ -35,11 +39,15 @@ pub fn production_web_router(
         .with_http_only(true)
         .with_same_site(SameSite::Strict)
         .with_expiry(Expiry::OnInactivity(CookieDuration::seconds(
-            session_ttl_secs as i64,
+            session_idle_secs as i64,
         )));
 
+    let absolute_secs = session_absolute_secs;
     kxprov_web::router(web_state)
         .layer(from_fn(require_web_session))
+        .layer(from_fn(move |session, req, next| {
+            enforce_absolute_session_limit(session, req, next, absolute_secs)
+        }))
         .layer(from_fn(reject_authenticated_login))
         .layer(session_layer)
         .layer(from_fn({

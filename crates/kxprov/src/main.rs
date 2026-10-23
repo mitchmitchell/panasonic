@@ -379,6 +379,15 @@ fn sim_mark(cli: &Cli) -> Result<(), CliError> {
             Ok(())
         }
         SimMarkCommand::Write { data_dir } => {
+            #[cfg(unix)]
+            {
+                use nix::unistd::geteuid;
+                if !geteuid().is_root() {
+                    return Err(CliError::Usage(
+                        "sim-mark write requires root (root-owned sim-mark.json)".into(),
+                    ));
+                }
+            }
             let workspace = cargo_workspace_root()?;
             let status = std::process::Command::new("cargo")
                 .current_dir(&workspace)

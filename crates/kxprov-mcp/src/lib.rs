@@ -56,6 +56,24 @@ impl KxMcpServer {
             data: None,
         })
     }
+
+    /// Whether `tools/list` should expose a tool for the given MCP token scopes.
+    pub fn tool_visible_for_scopes(tool_name: &str, scopes: &ScopeSet) -> bool {
+        match tool_name {
+            "apply_plan" | "rollback" => scopes.allows_write(),
+            "submit_approval" => scopes.allows_approve(),
+            "backup_now" | "plan_change" => scopes.allows_plan(),
+            "read_fields" | "list_backups" | "status" => scopes.allows_read(),
+            _ => false,
+        }
+    }
+
+    fn filter_tools_by_scopes(tools: Vec<Tool>, scopes: &ScopeSet) -> Vec<Tool> {
+        tools
+            .into_iter()
+            .filter(|t| Self::tool_visible_for_scopes(t.name.as_ref(), scopes))
+            .collect()
+    }
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -252,13 +270,7 @@ impl ServerHandler for KxMcpServer {
                 bearer: String::new(),
             })
         });
-        let scopes = caller.scopes();
-        let mut tools: Vec<Tool> = self.tool_router.list_all();
-        tools.retain(|t| match t.name.as_ref() {
-            "apply_plan" | "rollback" => scopes.allows_write(),
-            "submit_approval" => scopes.allows_approve(),
-            _ => true,
-        });
+        let tools = Self::filter_tools_by_scopes(self.tool_router.list_all(), &caller.scopes());
         Ok(ListToolsResult {
             tools,
             next_cursor: None,

@@ -31,6 +31,7 @@ async fn spoofed_xff_on_non_serve_listener_still_rate_limits_peer_ip() {
         },
         false,
         900,
+        kxprov_web::WEB_SESSION_ABSOLUTE_SECS,
         RateLimiter::new(120),
     );
 

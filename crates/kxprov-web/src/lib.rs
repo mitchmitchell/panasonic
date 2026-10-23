@@ -32,7 +32,11 @@ pub use login_limit::{LoginBusy, LoginPrecheck, LoginRateLimiter};
 pub struct ClientIpPolicy {
     pub trust_x_forwarded_for: bool,
 }
-pub use session::{reject_authenticated_login, require_web_session, SESSION_AUTH_KEY};
+pub use session::{
+    enforce_absolute_session_limit, reject_authenticated_login, require_web_session,
+    absolute_session_valid, now_unix_ms, WEB_SESSION_ABSOLUTE_SECS, WEB_SESSION_IDLE_SECS,
+    SESSION_AUTH_KEY, SESSION_STARTED_MS_KEY,
+};
 pub use static_files::serve_static;
 
 pub trait PasswordVerifier: Send + Sync {
@@ -346,6 +350,12 @@ async fn login_submit(
     let _ = session.cycle_id().await;
     let _ = csrf::rotate_for_session(&session).await;
     let _ = session.insert(crate::session::SESSION_AUTH_KEY, true).await;
+    let _ = session
+        .insert(
+            crate::session::SESSION_STARTED_MS_KEY,
+            crate::session::now_unix_ms(),
+        )
+        .await;
     Redirect::to("/").into_response()
 }
 

@@ -28,3 +28,10 @@ fn cli_and_sim_mark_defaults_match_shared_paths() {
     assert_eq!(kxprov::cli_defaults::tokens_json(), TOKENS_JSON);
     assert_eq!(kxprov::cli_defaults::sim_mark_data_dir(), DATA_DIR);
 }
+
+#[test]
+fn tokens_and_goliath_live_under_unified_data_dir() {
+    assert!(TOKENS_JSON.starts_with(DATA_DIR));
+    assert!(GOLIATH_DIR.starts_with(DATA_DIR));
+    assert_ne!(DAEMON_SOCKET, DATA_DIR);
+}

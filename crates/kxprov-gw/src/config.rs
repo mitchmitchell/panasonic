@@ -2,6 +2,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 
 use kxprov_api::{DAEMON_SOCKET, TOKENS_JSON};
+use kxprov_web::{WEB_SESSION_ABSOLUTE_SECS, WEB_SESSION_IDLE_SECS};
 use serde::Deserialize;
 
 /// Rejects unspecified addresses (`0.0.0.0` / `::`). Used in unit tests for the error text.
@@ -34,6 +35,17 @@ fn validate_bind_override(bind: &str) -> anyhow::Result<()> {
     apply_unspecified_site_policy("bind", addr.ip())
 }
 
+/// MCP listeners must bind loopback only (v2.12).
+pub fn ensure_mcp_loopback_bind(field: &str, bind: &str) -> anyhow::Result<()> {
+    let addr: SocketAddr = bind
+        .parse()
+        .map_err(|_| anyhow::anyhow!("invalid {field} address {bind:?} (expected IP:port)"))?;
+    if !addr.ip().is_loopback() {
+        anyhow::bail!("{field} must use a loopback address (got {bind})");
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct WebListenerSettings {
     /// When true, login rate limits use the first `X-Forwarded-For` hop (Tailscale Serve).
@@ -61,7 +73,10 @@ pub struct GatewayConfig {
     pub daemon_socket_path: PathBuf,
     pub tls_cert_path: PathBuf,
     pub tls_key_path: PathBuf,
+    /// Idle timeout for web admin sessions (inactivity).
     pub session_ttl_secs: u64,
+    /// Maximum web session lifetime from login.
+    pub session_absolute_secs: u64,
     pub rate_limit_per_minute: u32,
     pub allowed_hosts: Vec<String>,
     pub allowed_origins: Vec<String>,
@@ -87,7 +102,8 @@ impl Default for GatewayConfig {
             daemon_socket_path: DAEMON_SOCKET.into(),
             tls_cert_path: "/etc/kx-provision/tls/lan.crt".into(),
             tls_key_path: "/etc/kx-provision/tls/lan.key".into(),
-            session_ttl_secs: 900,
+            session_ttl_secs: WEB_SESSION_IDLE_SECS,
+            session_absolute_secs: WEB_SESSION_ABSOLUTE_SECS,
             rate_limit_per_minute: 120,
             allowed_hosts: vec![],
             allowed_origins: vec![],
@@ -341,7 +357,14 @@ impl GatewayConfig {
         }
         config.apply_cli(std::env::args().skip(1))?;
         config.validate_site_bind_settings()?;
+        config.validate_mcp_loopback_binds()?;
         Ok(config)
+    }
+
+    pub fn validate_mcp_loopback_binds(&self) -> anyhow::Result<()> {
+        ensure_mcp_loopback_bind("mcp_public_bind", &self.mcp_public_bind)?;
+        ensure_mcp_loopback_bind("mcp_tailnet_bind", &self.mcp_tailnet_bind)?;
+        Ok(())
     }
 
     fn merge_file(&mut self, path: &Path) -> anyhow::Result<()> {
@@ -530,6 +553,26 @@ mod tests {
             addrs,
             vec!["127.0.0.1:443".to_string(), "10.20.30.40:443".to_string()]
         );
+    }
+
+    #[test]
+    fn mcp_public_bind_rejects_non_loopback() {
+        let err = ensure_mcp_loopback_bind("mcp_public_bind", "0.0.0.0:8444").unwrap_err();
+        assert!(err.to_string().contains("loopback"), "{err}");
+        let err = ensure_mcp_loopback_bind("mcp_public_bind", "192.168.1.1:8444").unwrap_err();
+        assert!(err.to_string().contains("loopback"), "{err}");
+    }
+
+    #[test]
+    fn mcp_public_bind_accepts_loopback() {
+        ensure_mcp_loopback_bind("mcp_public_bind", "127.0.0.1:8444").unwrap();
+    }
+
+    #[test]
+    fn default_gateway_config_passes_mcp_loopback_validation() {
+        GatewayConfig::default()
+            .validate_mcp_loopback_binds()
+            .unwrap();
     }
 
     #[test]

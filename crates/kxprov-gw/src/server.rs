@@ -77,6 +77,7 @@ pub async fn serve(
         },
         config.web_tailnet.trust_x_forwarded_for,
         config.session_ttl_secs,
+        config.session_absolute_secs,
         rate_limiter.clone(),
     );
     let web_app_https = production_web_router(
@@ -87,6 +88,7 @@ pub async fn serve(
         },
         config.web_https.trust_x_forwarded_for,
         config.session_ttl_secs,
+        config.session_absolute_secs,
         rate_limiter.clone(),
     );
 
