@@ -27,6 +27,7 @@ impl LinkDownError {
 
 /// Transport errors.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum TransportError {
     /// Nothing arrived within the timeout.
     Timeout,
@@ -376,13 +377,15 @@ impl<T: Transport> Client<T> {
         }
         let sent_at = self.t.now_ms();
         match self.send_frame(raw) {
+            Ok(()) => {}
             // LinkDown: write() records the frame as possibly applied. PreSend: provably
-            // nothing left the host, so there is nothing to verify.
-            Err(e @ (Error::LinkDown(_) | Error::PreSend(_))) => {
+            // nothing left the host. Timeout (a transport that breaks the no-timeout send
+            // contract) is treated as maybe-sent: it is returned, never ignored, so a
+            // write goes to Unacked/verify. Any other or future variant also returns here.
+            Err(e) => {
                 self.note_link_down(None);
                 return Err(e);
             }
-            _ => {}
         }
         let r = match self
             .drop_before_cutoff(sent_at + self.timing.reply_cutoff_ms(raw.len()))
