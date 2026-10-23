@@ -7,12 +7,14 @@ use crate::plan_store::{PlanSnapshot, PlanStore};
 use crate::queue::{field_kind_wire, JobKind, JobOutcome, JobRequest, JobState};
 use crate::time::now_ms;
 use crate::transport::{open, AnyTransport};
-use kxprov_api::{BackupInfo, FieldRow, PlanChangeResult, TokenId};
+use kxprov_api::{ApplyPlanStatus, BackupInfo, FieldRow, PlanChangeResult, Profile, TokenId};
 use kxtd1232::{build_plan, field_patch, Client, Granularity};
 use std::sync::Arc;
+use tokio::sync::RwLock;
 
 pub struct WorkerCtx {
     pub config: Config,
+    pub profile: Arc<RwLock<Profile>>,
     pub plans: PlanStore,
     pub backups: BackupStore,
     pub journal: Journal,
@@ -146,7 +148,8 @@ async fn run_plan(
     };
     let snap = PlanSnapshot::from(&plan);
     let now = now_ms();
-    let rec = match ctx.plans.put(ctx.config.profile, &token_id, &snap, now) {
+    let profile = *ctx.profile.read().await;
+    let rec = match ctx.plans.put(profile, &token_id, &snap, now) {
         Ok(r) => r,
         Err(e) => {
             return JobOutcome::Err {
@@ -258,19 +261,22 @@ async fn run_apply_job(
         diff_hash: diff_hash.0.clone(),
         backup_id,
     });
+    let profile = *ctx.profile.read().await;
     match run_apply(
         &ctx.config,
+        profile,
         &ctx.plans,
         &ctx.backups,
         &plan_id,
         &diff_hash,
         &token_id,
     ) {
-        Ok(blocks) => {
+        Ok(_blocks) => {
             let _ = ctx.journal.truncate();
             JobOutcome::ApplyPlan(kxprov_api::ApplyPlanResult {
                 plan_id,
-                blocks_verified: blocks as u32,
+                diff_hash,
+                status: ApplyPlanStatus::Completed,
             })
         }
         Err(e) => {

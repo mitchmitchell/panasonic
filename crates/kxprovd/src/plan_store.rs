@@ -1,6 +1,6 @@
 //! Immutable server-side plans (v2.3 §5b F7): random PlanId, canonical DiffHash, token-bound.
 
-use kxprov_api::{diff_hash, CanonicalPlan, CanonicalWrite, PLAN_EXPIRY_SECS};
+use kxprov_api::{diff_hash, CanonicalPlan, CanonicalWrite, PLAN_EXPIRY_SECS, PLAN_ID_PREFIX_LEN};
 use kxprov_api::{DiffHash, PlanId, Profile, TokenId};
 use kxtd1232::plan::{ChunkWrite, WritePlan};
 use serde::{Deserialize, Serialize};
@@ -25,6 +25,10 @@ pub enum PlanError {
     TokenMismatch,
     #[error("random plan id")]
     Random,
+    #[error("ambiguous plan prefix")]
+    AmbiguousPrefix,
+    #[error("invalid plan ref")]
+    InvalidRef,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -145,6 +149,48 @@ impl PlanStore {
     pub fn dir(&self) -> &Path {
         &self.dir
     }
+
+    fn list_plan_ids(&self) -> Result<Vec<PlanId>, PlanError> {
+        let mut ids = Vec::new();
+        for entry in std::fs::read_dir(&self.dir)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else {
+                continue;
+            };
+            if !name.ends_with(".json") {
+                continue;
+            }
+            let id = name.trim_end_matches(".json");
+            ids.push(PlanId(id.to_string()));
+        }
+        Ok(ids)
+    }
+
+    /// Resolve full plan id or 8-hex prefix (v2.7 F1).
+    pub fn resolve_plan_ref(&self, plan_ref: &str) -> Result<PlanId, PlanError> {
+        let plan_ref = plan_ref.trim();
+        if plan_ref.len() == 32 && plan_ref.chars().all(|c| c.is_ascii_hexdigit()) {
+            let id = PlanId(plan_ref.to_ascii_lowercase());
+            self.get(&id)?;
+            return Ok(id);
+        }
+        if plan_ref.len() != PLAN_ID_PREFIX_LEN || !plan_ref.chars().all(|c| c.is_ascii_hexdigit())
+        {
+            return Err(PlanError::InvalidRef);
+        }
+        let prefix = plan_ref.to_ascii_lowercase();
+        let matches: Vec<PlanId> = self
+            .list_plan_ids()?
+            .into_iter()
+            .filter(|id| id.as_str().starts_with(&prefix))
+            .collect();
+        match matches.len() {
+            0 => Err(PlanError::NotFound),
+            1 => Ok(matches[0].clone()),
+            _ => Err(PlanError::AmbiguousPrefix),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -207,6 +253,44 @@ pub fn diff_hash_with_live_table(
         record_size: rec.record_size,
         writes,
     }))
+}
+
+#[cfg(test)]
+mod resolve_tests {
+    use super::*;
+    use kxprov_api::TokenId;
+
+    #[test]
+    fn ambiguous_prefix_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = PlanStore::new(dir.path().to_path_buf()).unwrap();
+        for id in [
+            "aaaaaaaa11111111111111111111111",
+            "aaaaaaaa22222222222222222222222",
+        ] {
+            let rec = PlanRecord {
+                id: PlanId(id.into()),
+                diff_hash: DiffHash("00".into()),
+                profile: Profile::Sim,
+                creator_token: TokenId("w".into()),
+                created_at_ms: 0,
+                expires_at_ms: 999_999,
+                table: 0x24,
+                record_size: 32,
+                writes: vec![],
+                diff: vec![],
+            };
+            std::fs::write(
+                dir.path().join(format!("{id}.json")),
+                serde_json::to_vec(&rec).unwrap(),
+            )
+            .unwrap();
+        }
+        assert!(matches!(
+            store.resolve_plan_ref("aaaaaaaa"),
+            Err(PlanError::AmbiguousPrefix)
+        ));
+    }
 }
 
 pub fn compute_diff_hash(profile: Profile, snap: &PlanSnapshot) -> DiffHash {

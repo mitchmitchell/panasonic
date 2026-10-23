@@ -1,9 +1,7 @@
-//! Signed mode.json with fail-closed Production (v2.6 F1).
+//! Operational mode + runtime profile (v2.7 F1, unsigned, fail-closed Production).
 
 use crate::audit::{alert_mode_failure, AuditEntry, AuditKind, AuditLog};
-use crate::sshsig_verify::{verify_mode_nonce, SshsigError};
 use crate::time::now_ms;
-use kxprov_api::mode_sign_message;
 use kxprov_api::{OperationalMode, Profile};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -15,20 +13,22 @@ pub enum ModeError {
     Io(#[from] std::io::Error),
     #[error("json: {0}")]
     Json(#[from] serde_json::Error),
-    #[error("bad signature: {0}")]
-    BadSignature(#[from] SshsigError),
     #[error("counter rollback")]
     CounterRollback,
     #[error("testing mode requires Test profile")]
     TestingProfile,
+    #[error("daemon not idle")]
+    NotIdle,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModeFileBody {
     pub mode: OperationalMode,
-    pub counter: u64,
-    /// PEM armored OpenSSH signature over the mode nonce (`ssh-keygen -Y sign`).
-    pub signature: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProfileFileBody {
+    pub profile: Profile,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,23 +38,30 @@ pub struct EffectiveMode {
 
 pub struct ModeStore {
     mode_path: PathBuf,
+    profile_path: PathBuf,
     counter_path: PathBuf,
-    signers_path: PathBuf,
     audit: AuditLog,
+    boot_profile: Profile,
 }
 
 impl ModeStore {
-    pub fn new(data_dir: &Path, signers_path: PathBuf) -> Self {
+    pub fn new(data_dir: &Path, boot_profile: Profile) -> Self {
         Self {
             mode_path: data_dir.join("mode.json"),
+            profile_path: data_dir.join("profile.json"),
             counter_path: data_dir.join("mode.counter"),
-            signers_path,
             audit: AuditLog::new(data_dir),
+            boot_profile,
         }
     }
 
-    pub fn signers_path(&self) -> &Path {
-        &self.signers_path
+    pub fn load_profile(&self) -> Profile {
+        match std::fs::read_to_string(&self.profile_path) {
+            Ok(raw) => serde_json::from_str::<ProfileFileBody>(&raw)
+                .map(|b| b.profile)
+                .unwrap_or(self.boot_profile),
+            Err(_) => self.boot_profile,
+        }
     }
 
     fn last_counter(&self) -> Result<u64, ModeError> {
@@ -67,12 +74,6 @@ impl ModeStore {
 
     fn save_counter(&self, counter: u64) -> Result<(), ModeError> {
         std::fs::write(&self.counter_path, counter.to_string())?;
-        Ok(())
-    }
-
-    fn verify_signature(&self, body: &ModeFileBody) -> Result<(), ModeError> {
-        let nonce = mode_sign_message(body.mode, body.counter);
-        verify_mode_nonce(&nonce, &body.signature, &self.signers_path)?;
         Ok(())
     }
 
@@ -105,24 +106,6 @@ impl ModeStore {
                 return self.fail_closed(AuditKind::ModeCorrupt, e.to_string());
             }
         };
-        if let Err(e) = self.verify_signature(&body) {
-            return self.fail_closed(
-                AuditKind::ModeBadSignature,
-                format!("signature verification failed: {e}"),
-            );
-        }
-        let last = match self.last_counter() {
-            Ok(c) => c,
-            Err(e) => {
-                return self.fail_closed(AuditKind::ModeCorrupt, e.to_string());
-            }
-        };
-        if body.counter <= last {
-            return self.fail_closed(
-                AuditKind::ModeCounterRollback,
-                format!("counter {} <= committed {}", body.counter, last),
-            );
-        }
         if body.mode == OperationalMode::Testing && profile != Profile::Test {
             return self.fail_closed(
                 AuditKind::ModeTestingInvalidProfile,
@@ -134,18 +117,37 @@ impl ModeStore {
         }
     }
 
-    /// Root admin: install a new signed mode.json after verification.
-    pub fn set_signed(&self, body: ModeFileBody) -> Result<EffectiveMode, ModeError> {
-        self.verify_signature(&body)?;
+    /// Root admin: set mode/profile while daemon is idle.
+    pub fn set_operational(
+        &self,
+        mode: OperationalMode,
+        profile: Profile,
+        idle: bool,
+    ) -> Result<(EffectiveMode, Profile, u64), ModeError> {
+        if !idle {
+            return Err(ModeError::NotIdle);
+        }
+        if mode == OperationalMode::Testing && profile != Profile::Test {
+            return Err(ModeError::TestingProfile);
+        }
         let last = self.last_counter()?;
-        if body.counter <= last {
+        let counter = last.saturating_add(1);
+        if counter <= last {
             return Err(ModeError::CounterRollback);
         }
+        let body = ModeFileBody { mode };
         std::fs::write(&self.mode_path, serde_json::to_vec_pretty(&body)?)?;
-        self.save_counter(body.counter)?;
-        Ok(EffectiveMode {
-            operational: body.mode,
-        })
+        std::fs::write(
+            &self.profile_path,
+            serde_json::to_vec_pretty(&ProfileFileBody { profile })?,
+        )?;
+        self.save_counter(counter)?;
+        let _ = self.audit.append(&AuditEntry {
+            at_ms: now_ms(),
+            kind: AuditKind::ModeSet,
+            detail: format!("mode={mode:?} profile={profile:?} counter={counter}"),
+        });
+        Ok((EffectiveMode { operational: mode }, profile, counter))
     }
 
     pub fn audit(&self) -> &AuditLog {
@@ -153,7 +155,7 @@ impl ModeStore {
     }
 }
 
-/// Whether apply requires a prior approval for this profile/mode (v2.6 F1).
+/// Whether apply requires a prior approval for this profile/mode (v2.7 F1).
 pub fn write_approval_required(profile: Profile, operational: OperationalMode) -> bool {
     match profile {
         Profile::Prod => true,

@@ -1,6 +1,6 @@
 use crate::gates::GateConfig;
 use crate::peer::PeerPolicy;
-use kxprov_api::{Profile, MODE_SIGNERS_PATH};
+use kxprov_api::Profile;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -25,8 +25,6 @@ pub struct Config {
     /// Optional TOTP for admin re-auth (A4 wires verification; off by default).
     pub totp_enabled: bool,
     pub totp_secret_path: Option<PathBuf>,
-    /// Pinned OpenSSH allowed signers for mode.json (`ssh-keygen -Y verify -f`).
-    pub mode_signers_path: PathBuf,
 }
 
 impl Config {
@@ -45,12 +43,6 @@ impl Config {
             admin_uid: peer_uid,
             totp_enabled: false,
             totp_secret_path: None,
-            mode_signers_path: data_dir.join("mode-signers"),
         }
-    }
-
-    pub fn with_system_mode_signers(mut self) -> Self {
-        self.mode_signers_path = PathBuf::from(MODE_SIGNERS_PATH);
-        self
     }
 }

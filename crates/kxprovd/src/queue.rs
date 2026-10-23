@@ -102,6 +102,14 @@ impl JobQueue {
             .find(|(_, s)| **s == JobState::Running)
             .map(|(id, _)| id.clone())
     }
+
+    pub async fn is_idle(&self) -> bool {
+        self.jobs
+            .lock()
+            .await
+            .values()
+            .all(|s| !matches!(s, JobState::Queued | JobState::Running))
+    }
 }
 
 pub fn field_kind_wire(w: FieldKindWire) -> kxtd1232::FieldKind {

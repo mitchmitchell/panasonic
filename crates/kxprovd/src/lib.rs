@@ -18,7 +18,7 @@ pub mod peer;
 pub mod plan_live;
 pub mod plan_store;
 pub mod queue;
-pub mod sshsig_verify;
+pub mod sim_mark;
 pub mod time;
 pub mod tokens;
 pub mod transport;
@@ -59,6 +59,9 @@ impl Daemon {
         let goliath = GoliathQueue::new(config.goliath_target.clone())?;
         let approvals = ApprovalBook::new(&config.data_dir);
         let locked = LockedStore::new(&config.data_dir);
+        let mode = mode::ModeStore::new(&config.data_dir, config.profile);
+        let _ = sim_mark::SimMarkStore::new(&config.data_dir).clear_if_stale();
+        let profile = Arc::new(RwLock::new(mode.load_profile()));
 
         let (job_tx, job_rx) = mpsc::channel(32);
         let queue = Arc::new(queue::JobQueue::new(job_tx));
@@ -73,6 +76,7 @@ impl Daemon {
 
         let worker_ctx = Arc::new(worker::WorkerCtx {
             config: config.clone(),
+            profile: Arc::clone(&profile),
             plans: PlanStore::new(config.data_dir.join("plans"))?,
             backups: BackupStore::new(config.data_dir.join("backups"))?,
             journal: Journal::new(&config.data_dir),
@@ -83,7 +87,7 @@ impl Daemon {
         let q = Arc::clone(&queue);
         let api_state = Arc::new(ApiState {
             config: config.clone(),
-            profile: config.profile,
+            profile: Arc::clone(&profile),
             transport_label,
             gates,
             peer_policy: config.peer_policy.clone(),
@@ -94,7 +98,7 @@ impl Daemon {
             approvals,
             locked,
             goliath,
-            mode: mode::ModeStore::new(&config.data_dir, config.mode_signers_path.clone()),
+            mode,
         });
 
         let socket_path = config.socket_path.clone();

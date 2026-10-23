@@ -1,0 +1,193 @@
+#![allow(clippy::unwrap_used)]
+
+use kxprov_api::{
+    ApiClient, ApplyPlanStatus, FieldKindWire, OperationalMode, Profile, RequestAuth, RequestBody,
+    ResponseResult, SetModeParams, TokenId,
+};
+use kxprovd::audit::AuditKind;
+use kxprovd::mode::{ModeFileBody, ModeStore, ProfileFileBody};
+use kxprovd::sim_mark::SimMarkStore;
+use kxprovd::Daemon;
+use nix::unistd::getuid;
+use std::time::Duration;
+
+fn gateway_auth(id: &str) -> RequestAuth {
+    RequestAuth {
+        token_id: TokenId(id.into()),
+    }
+}
+
+fn write_mode(dir: &std::path::Path, mode: OperationalMode) {
+    std::fs::write(
+        dir.join("mode.json"),
+        serde_json::to_vec_pretty(&ModeFileBody { mode }).unwrap(),
+    )
+    .unwrap();
+}
+
+fn write_profile(dir: &std::path::Path, profile: Profile) {
+    std::fs::write(
+        dir.join("profile.json"),
+        serde_json::to_vec_pretty(&ProfileFileBody { profile }).unwrap(),
+    )
+    .unwrap();
+}
+
+#[tokio::test]
+async fn mode_missing_fail_closed_with_audit() {
+    let tmp = tempfile::tempdir().unwrap();
+    let uid = getuid().as_raw();
+    let (_d, sock) = Daemon::sim_for_tests(tmp.path(), uid);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let mut c = ApiClient::connect(&sock).await.unwrap();
+    let ResponseResult::Status(st) = c.call(RequestBody::Status).await.unwrap() else {
+        panic!("status");
+    };
+    assert_eq!(st.operational_mode, OperationalMode::Production);
+    let audit = ModeStore::new(tmp.path(), Profile::Sim)
+        .audit()
+        .load()
+        .unwrap();
+    assert!(audit.iter().any(|e| e.kind == AuditKind::ModeMissing));
+}
+
+#[tokio::test]
+async fn mode_set_via_root_socket_increments_counter() {
+    let tmp = tempfile::tempdir().unwrap();
+    let uid = getuid().as_raw();
+    let (_d, sock) = Daemon::sim_for_tests(tmp.path(), uid);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let mut admin = ApiClient::connect(&sock).await.unwrap();
+    let ResponseResult::SetMode(r) = admin
+        .call(RequestBody::SetMode {
+            params: SetModeParams {
+                mode: OperationalMode::Testing,
+                profile: Profile::Test,
+            },
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("set_mode");
+    };
+    assert_eq!(r.counter, 1);
+    assert_eq!(r.mode, OperationalMode::Testing);
+    assert_eq!(r.profile, Profile::Test);
+    assert!(tmp.path().join("mode.counter").exists());
+    let raw = std::fs::read_to_string(tmp.path().join("mode.json")).unwrap();
+    assert!(!raw.contains("counter"));
+}
+
+#[test]
+fn mode_set_rejected_when_not_idle() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = ModeStore::new(tmp.path(), Profile::Sim);
+    let err = store
+        .set_operational(OperationalMode::Production, Profile::Sim, false)
+        .unwrap_err();
+    assert!(err.to_string().contains("idle"));
+}
+
+#[tokio::test]
+async fn sim_profile_skips_approval() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_mode(tmp.path(), OperationalMode::Production);
+    write_profile(tmp.path(), Profile::Sim);
+    let uid = getuid().as_raw();
+    let (_d, sock) = Daemon::sim_for_tests(tmp.path(), uid);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let mut gw = ApiClient::connect(&sock).await.unwrap();
+    let ResponseResult::PlanChange(plan) = gw
+        .call_auth(
+            RequestBody::PlanChange {
+                params: kxprov_api::PlanChangeParams {
+                    kind: FieldKindWire::CidName,
+                    index: 2,
+                    value: "Z".into(),
+                },
+            },
+            Some(gateway_auth("writer")),
+        )
+        .await
+        .unwrap()
+    else {
+        panic!("plan");
+    };
+    let ResponseResult::BackupNow(_) = gw
+        .call_auth(RequestBody::BackupNow, Some(gateway_auth("writer")))
+        .await
+        .unwrap()
+    else {
+        panic!("backup");
+    };
+    let ResponseResult::ApplyPlan(ap) = gw
+        .call_auth(
+            RequestBody::ApplyPlan {
+                params: kxprov_api::ApplyPlanParams {
+                    plan_id: plan.plan_id.clone(),
+                    diff_hash: plan.diff_hash.clone(),
+                },
+            },
+            Some(gateway_auth("writer")),
+        )
+        .await
+        .unwrap()
+    else {
+        panic!("apply");
+    };
+    assert_eq!(ap.status, ApplyPlanStatus::Completed);
+    assert_eq!(ap.plan_id, plan.plan_id);
+    assert_eq!(ap.diff_hash, plan.diff_hash);
+}
+
+#[tokio::test]
+async fn submit_approval_accepts_eight_hex_prefix() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_mode(tmp.path(), OperationalMode::Production);
+    let uid = getuid().as_raw();
+    let (_d, sock) = Daemon::sim_for_tests(tmp.path(), uid);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let mut gw = ApiClient::connect(&sock).await.unwrap();
+    let ResponseResult::PlanChange(plan) = gw
+        .call_auth(
+            RequestBody::PlanChange {
+                params: kxprov_api::PlanChangeParams {
+                    kind: FieldKindWire::CidName,
+                    index: 3,
+                    value: "P".into(),
+                },
+            },
+            Some(gateway_auth("writer")),
+        )
+        .await
+        .unwrap()
+    else {
+        panic!("plan");
+    };
+    let prefix = plan.plan_id.as_str()[..8].to_string();
+    let mut approver = ApiClient::connect(&sock).await.unwrap();
+    let ResponseResult::SubmitApproval(_) = approver
+        .call_auth(
+            RequestBody::SubmitApproval {
+                params: kxprov_api::SubmitApprovalParams {
+                    plan_ref: prefix,
+                    diff_hash: plan.diff_hash.clone(),
+                },
+            },
+            Some(gateway_auth("approver")),
+        )
+        .await
+        .unwrap()
+    else {
+        panic!("submit");
+    };
+}
+
+#[test]
+fn sim_mark_cleared_on_build_change() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = SimMarkStore::new(tmp.path());
+    let stale = serde_json::json!({"build_hash":"old-build","marked_at_ms":1});
+    std::fs::write(tmp.path().join("sim-mark.json"), stale.to_string()).unwrap();
+    assert!(store.load_valid().unwrap().is_none());
+}

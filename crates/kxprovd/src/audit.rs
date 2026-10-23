@@ -17,9 +17,9 @@ pub enum AuditError {
 pub enum AuditKind {
     ModeMissing,
     ModeCorrupt,
-    ModeBadSignature,
     ModeCounterRollback,
     ModeTestingInvalidProfile,
+    ModeSet,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

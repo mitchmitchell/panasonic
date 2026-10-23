@@ -28,11 +28,5 @@ pub const BUSY_LIMIT_DEFAULT_MS: u64 = 12_000;
 /// Verified `.DBH` backups retained on disk (v2.4 default).
 pub const DEFAULT_BACKUP_KEEP: usize = 20;
 
-/// Canonical prefix for mode nonce file bytes (v2.6 F1).
-pub const MODE_SIGN_PREFIX: &str = "kxprov-mode-v1";
-
-/// OpenSSH `ssh-keygen -Y sign` namespace for mode changes (ed25519-sk in production).
-pub const MODE_SSH_NAMESPACE: &str = "kxprov-mode";
-
-/// Production path to pinned mode signers (`ssh-keygen -Y verify -f`).
-pub const MODE_SIGNERS_PATH: &str = "/etc/kx-provision/mode-signers";
+/// Plan id prefix length for submit_approval (v2.7 F1).
+pub const PLAN_ID_PREFIX_LEN: usize = 8;

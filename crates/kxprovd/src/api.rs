@@ -3,7 +3,7 @@ use crate::backup::BackupStore;
 use crate::config::Config;
 use crate::gates::GateState;
 use crate::locked::LockedStore;
-use crate::mode::{write_approval_required, ModeFileBody, ModeStore};
+use crate::mode::{write_approval_required, ModeStore};
 use crate::peer::{PeerPolicy, PeerRole};
 use crate::plan_live::verify_live_diff_hash;
 use crate::plan_store::PlanStore;
@@ -23,7 +23,7 @@ use tokio::sync::RwLock;
 
 pub struct ApiState {
     pub config: Config,
-    pub profile: Profile,
+    pub profile: Arc<tokio::sync::RwLock<Profile>>,
     pub transport_label: String,
     pub gates: Arc<RwLock<GateState>>,
     pub peer_policy: PeerPolicy,
@@ -213,7 +213,8 @@ fn require_access(
 
 async fn status_snapshot(state: &ApiState, locked: bool) -> kxprov_api::StatusResponse {
     let gates = state.gates.read().await;
-    let effective = state.mode.effective(state.profile);
+    let profile = *state.profile.read().await;
+    let effective = state.mode.effective(profile);
     let locked_alert = if locked {
         let st = state.locked.load().ok().unwrap_or_default();
         let now = chrono::Utc::now();
@@ -236,7 +237,7 @@ async fn status_snapshot(state: &ApiState, locked: bool) -> kxprov_api::StatusRe
         None
     };
     kxprov_api::StatusResponse {
-        profile: state.profile,
+        profile,
         mode: kxprov_api::DaemonMode::Simulator,
         operational_mode: effective.operational,
         transport: state.transport_label.clone(),
@@ -285,20 +286,34 @@ async fn submit_approval(
     params: &SubmitApprovalParams,
     approver: TokenId,
 ) -> Result<ResponseResult, ApiErrorBody> {
+    let plan_id = state
+        .plans
+        .resolve_plan_ref(&params.plan_ref)
+        .map_err(|e| match e {
+            crate::plan_store::PlanError::AmbiguousPrefix => {
+                api_err("ambiguous_prefix", "plan prefix matches more than one plan")
+            }
+            crate::plan_store::PlanError::InvalidRef => api_err(
+                "invalid_plan_ref",
+                "plan_ref must be 32-hex id or 8-hex prefix",
+            ),
+            _ => api_err("plan", &e.to_string()),
+        })?;
     let rec = state
         .plans
-        .get(&params.plan_id)
+        .get(&plan_id)
         .map_err(|e| api_err("plan", &e.to_string()))?;
     if rec.diff_hash != params.diff_hash {
         return Err(api_err("plan", "diff hash mismatch"));
     }
+    let profile = *state.profile.read().await;
     let now = now_ms();
     let approval = state
         .approvals
         .submit(
-            params.plan_id.clone(),
+            plan_id,
             params.diff_hash.clone(),
-            state.profile,
+            profile,
             &rec.creator_token,
             approver,
             now,
@@ -317,18 +332,18 @@ async fn set_mode(
     if !state.peer_policy.is_admin(cred) {
         return Err(api_err("forbidden", "root admin required"));
     }
-    let body = ModeFileBody {
-        mode: params.mode,
-        counter: params.counter,
-        signature: params.signature,
-    };
-    let effective = state
+    if !state.queue.is_idle().await {
+        return Err(api_err("busy", "daemon not idle"));
+    }
+    let (effective, profile, counter) = state
         .mode
-        .set_signed(body)
+        .set_operational(params.mode, params.profile, true)
         .map_err(|e| api_err("mode", &e.to_string()))?;
+    *state.profile.write().await = profile;
     Ok(ResponseResult::SetMode(SetModeResult {
         mode: effective.operational,
-        counter: params.counter,
+        profile,
+        counter,
     }))
 }
 
@@ -338,18 +353,13 @@ async fn apply_plan(
     token: TokenId,
 ) -> Result<ResponseResult, ApiErrorBody> {
     let now = now_ms();
-    if !state.gates.read().await.config.live_writes_approved && state.profile == Profile::Prod {
+    let profile = *state.profile.read().await;
+    if !state.gates.read().await.config.live_writes_approved && profile == Profile::Prod {
         return Err(api_err("gate", "live_writes_approved is false"));
     }
     state
         .plans
-        .verify_for_apply(
-            &params.plan_id,
-            &params.diff_hash,
-            state.profile,
-            &token,
-            now,
-        )
+        .verify_for_apply(&params.plan_id, &params.diff_hash, profile, &token, now)
         .map_err(|e| api_err("plan", &e.to_string()))?;
 
     verify_live_diff_hash(
@@ -360,11 +370,11 @@ async fn apply_plan(
     )
     .map_err(|_| api_err("diff", "live base diff hash mismatch"))?;
 
-    let operational = state.mode.effective(state.profile).operational;
-    if write_approval_required(state.profile, operational) {
+    let operational = state.mode.effective(profile).operational;
+    if write_approval_required(profile, operational) {
         if !state
             .approvals
-            .has_active(&params.plan_id, &params.diff_hash, state.profile, now)
+            .has_active(&params.plan_id, &params.diff_hash, profile, now)
         {
             return Err(api_err(
                 "approval_required",
@@ -373,11 +383,11 @@ async fn apply_plan(
         }
         state
             .approvals
-            .consume(&params.plan_id, &params.diff_hash, state.profile, now)
+            .consume(&params.plan_id, &params.diff_hash, profile, now)
             .map_err(|e| api_err("approval", &e.to_string()))?;
     }
 
-    if matches!(state.profile, Profile::Sim | Profile::Test) {
+    if matches!(profile, Profile::Sim | Profile::Test) {
         return run_job(
             state,
             JobKind::ApplyPlan {
@@ -389,11 +399,11 @@ async fn apply_plan(
         .await;
     }
 
-    Ok(ResponseResult::ApplyDeferred(
-        kxprov_api::ApplyDeferredResult {
-            message: "apply execution is milestone A5; approval consumed".into(),
-        },
-    ))
+    Ok(ResponseResult::ApplyPlan(kxprov_api::ApplyPlanResult {
+        plan_id: params.plan_id.clone(),
+        diff_hash: params.diff_hash.clone(),
+        status: kxprov_api::ApplyPlanStatus::Deferred,
+    }))
 }
 
 async fn unlock(

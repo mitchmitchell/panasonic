@@ -1,7 +1,8 @@
 # kxprovd
 
-Single serial owner for kx-provision (design v2.6 F1): signed **mode.json** (fail-closed Production),
-**submit_approval** on the socket (Approve scope, rate limits), profile-tied testing mode, live
+Single serial owner for kx-provision (design v2.7 F1): unsigned **mode.json** + **profile.json**
+(fail-closed Production), root **set_mode** while idle, **submit_approval** with plan id or 8-hex
+prefix, profile-tied testing mode, live
 DiffHash re-verify on apply. One-worker queue, flock lock, synthetic backups (keep **20**),
 journal replay, immutable token-bound plans, SO_PEERCRED + token scope, persisted LOCKED
 (`kxprov unlock` / `kxprov mode set`).

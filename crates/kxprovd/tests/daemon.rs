@@ -1,14 +1,13 @@
 #![allow(clippy::unwrap_used)]
 
 use kxprov_api::{
-    ApiClient, FieldKindWire, OperationalMode, Profile, RequestAuth, RequestBody, ResponseResult,
-    TokenId, MODE_SSH_NAMESPACE,
+    ApiClient, ApplyPlanStatus, FieldKindWire, OperationalMode, Profile, RequestAuth, RequestBody,
+    ResponseResult, TokenId,
 };
 use kxprovd::locked::LockedStore;
-use kxprovd::mode::ModeFileBody;
+use kxprovd::mode::{ModeFileBody, ProfileFileBody};
 use kxprovd::Daemon;
 use nix::unistd::getuid;
-use std::process::Command;
 use std::time::Duration;
 
 fn gateway_auth(id: &str) -> RequestAuth {
@@ -147,73 +146,29 @@ async fn sim_apply_without_approval() {
     else {
         panic!("apply");
     };
-    assert!(applied.blocks_verified >= 1);
-}
-
-fn install_test_mode_signers(dir: &std::path::Path) -> std::path::PathBuf {
-    let key = dir.join("mode-test-key");
-    Command::new("ssh-keygen")
-        .args(["-t", "ed25519", "-f"])
-        .arg(&key)
-        .args(["-N", ""])
-        .status()
-        .unwrap();
-    let pub_line = String::from_utf8(
-        Command::new("ssh-keygen")
-            .args(["-y", "-f"])
-            .arg(&key)
-            .output()
-            .unwrap()
-            .stdout,
-    )
-    .unwrap();
-    let parts: Vec<_> = pub_line.split_whitespace().collect();
-    std::fs::write(
-        dir.join("mode-signers"),
-        format!("{} {} {}\n", MODE_SSH_NAMESPACE, parts[0], parts[1]),
-    )
-    .unwrap();
-    key
-}
-
-fn sign_mode_nonce(key_path: &std::path::Path, nonce: &[u8]) -> String {
-    let dir = tempfile::tempdir().unwrap();
-    let nonce_path = dir.path().join("nonce");
-    let sig_path = dir.path().join("nonce.sig");
-    std::fs::write(&nonce_path, nonce).unwrap();
-    Command::new("ssh-keygen")
-        .args([
-            "-Y",
-            "sign",
-            "-f",
-            key_path.to_str().unwrap(),
-            "-n",
-            MODE_SSH_NAMESPACE,
-        ])
-        .arg(&nonce_path)
-        .status()
-        .unwrap();
-    std::fs::read_to_string(sig_path).unwrap()
+    assert_eq!(applied.status, ApplyPlanStatus::Completed);
 }
 
 /// Prod hardware cannot apply in the sim harness; Test + Production mode keeps approval gates.
 #[tokio::test]
 async fn prod_apply_single_use_approval() {
     let tmp = tempfile::tempdir().unwrap();
-    let key = install_test_mode_signers(tmp.path());
-    let counter = 1u64;
-    let nonce = kxprov_api::mode_sign_message(OperationalMode::Production, counter);
-    let body = ModeFileBody {
-        mode: OperationalMode::Production,
-        counter,
-        signature: sign_mode_nonce(&key, &nonce),
-    };
     std::fs::write(
         tmp.path().join("mode.json"),
-        serde_json::to_vec_pretty(&body).unwrap(),
+        serde_json::to_vec_pretty(&ModeFileBody {
+            mode: OperationalMode::Production,
+        })
+        .unwrap(),
     )
     .unwrap();
-    std::fs::write(tmp.path().join("mode.counter"), "0").unwrap();
+    std::fs::write(
+        tmp.path().join("profile.json"),
+        serde_json::to_vec_pretty(&ProfileFileBody {
+            profile: Profile::Test,
+        })
+        .unwrap(),
+    )
+    .unwrap();
     let uid = getuid().as_raw();
     let (_d, sock) = Daemon::sim_for_tests_profile(tmp.path(), uid, Profile::Test);
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -240,7 +195,7 @@ async fn prod_apply_single_use_approval() {
         .call_auth(
             RequestBody::SubmitApproval {
                 params: kxprov_api::SubmitApprovalParams {
-                    plan_id: plan.plan_id.clone(),
+                    plan_ref: plan.plan_id.as_str().to_string(),
                     diff_hash: plan.diff_hash.clone(),
                 },
             },
@@ -320,7 +275,7 @@ async fn token_b_cannot_apply_token_a_plan() {
         .call_auth(
             RequestBody::SubmitApproval {
                 params: kxprov_api::SubmitApprovalParams {
-                    plan_id: plan.plan_id.clone(),
+                    plan_ref: plan.plan_id.as_str().to_string(),
                     diff_hash: plan.diff_hash.clone(),
                 },
             },

@@ -12,7 +12,7 @@ pub enum DaemonMode {
     Simulator,
 }
 
-/// Signed operational mode from mode.json (v2.6 F1).
+/// Operational mode from mode.json (v2.7 F1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OperationalMode {
@@ -111,7 +111,8 @@ pub struct RequestAuth {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SubmitApprovalParams {
-    pub plan_id: PlanId,
+    /// Full 32-hex plan id or exactly 8-hex prefix (v2.7 F1).
+    pub plan_ref: String,
     pub diff_hash: DiffHash,
 }
 
@@ -123,14 +124,13 @@ pub struct SubmitApprovalResult {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SetModeParams {
     pub mode: OperationalMode,
-    pub counter: u64,
-    /// PEM armored OpenSSH signature (`ssh-keygen -Y sign`, ed25519-sk in production).
-    pub signature: String,
+    pub profile: Profile,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SetModeResult {
     pub mode: OperationalMode,
+    pub profile: Profile,
     pub counter: u64,
 }
 
@@ -228,9 +228,17 @@ pub struct ApplyDeferredResult {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApplyPlanStatus {
+    Completed,
+    Deferred,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ApplyPlanResult {
     pub plan_id: PlanId,
-    pub blocks_verified: u32,
+    pub diff_hash: DiffHash,
+    pub status: ApplyPlanStatus,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

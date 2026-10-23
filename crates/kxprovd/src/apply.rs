@@ -32,6 +32,7 @@ pub enum ApplyError {
 
 pub fn run_apply(
     config: &Config,
+    profile: Profile,
     plans: &PlanStore,
     backups: &BackupStore,
     plan_id: &kxprov_api::PlanId,
@@ -39,12 +40,12 @@ pub fn run_apply(
     token: &kxprov_api::TokenId,
 ) -> Result<usize, ApplyError> {
     let sim_transport = config.transport == crate::config::TransportKind::Sim;
-    let sim_profile = matches!(config.profile, Profile::Sim | Profile::Test);
+    let sim_profile = matches!(profile, Profile::Sim | Profile::Test);
     if !sim_profile || !sim_transport {
         return Err(ApplyError::NotSim);
     }
     let now = now_ms();
-    let rec = plans.verify_for_apply(plan_id, diff_hash, config.profile, token, now)?;
+    let rec = plans.verify_for_apply(plan_id, diff_hash, profile, token, now)?;
     backups.require_backup_for_write()?;
     let writes: Vec<ChunkWrite> = rec
         .writes
