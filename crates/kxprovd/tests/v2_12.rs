@@ -200,6 +200,27 @@ fn profile_data_dir_honors_configured_provision_root() {
 }
 
 #[test]
+#[cfg(unix)]
+fn fresh_install_set_operational_production_creates_secure_epoch() {
+    use kxprovd::epoch_store::{epoch_dir, EpochSecureChecksGuard};
+    use std::os::unix::fs::MetadataExt;
+    let _secure = EpochSecureChecksGuard::enable();
+    let tmp = tempfile::tempdir().unwrap();
+    let data = tmp.path().join("prod");
+    std::fs::create_dir_all(&data).unwrap();
+    assert!(!epoch_dir(tmp.path()).exists());
+    let store = ModeStore::new_with_epoch_root(&data, tmp.path(), Profile::Prod);
+    let (eff, profile, counter) = store
+        .set_operational(OperationalMode::Production, Profile::Prod, true)
+        .unwrap();
+    assert_eq!(eff.operational, OperationalMode::Production);
+    assert_eq!(profile, Profile::Prod);
+    assert_eq!(counter, 1);
+    let meta = std::fs::symlink_metadata(epoch_dir(tmp.path())).unwrap();
+    assert_eq!(meta.mode() & 0o777, 0o700);
+}
+
+#[test]
 fn custom_data_dir_is_provision_root_with_profile_subdirs() {
     use kxprovd::config::{profile_data_dir, profile_epoch_counter_path, Config};
     let p = tempfile::tempdir().unwrap();
