@@ -71,6 +71,22 @@ enum Command {
         #[command(subcommand)]
         cmd: SimMarkCommand,
     },
+    /// Daemon bearer token admin (root; tokens file 0600).
+    Token {
+        #[command(subcommand)]
+        cmd: TokenCommand,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum TokenCommand {
+    /// Replace a token secret (prints new bearer once).
+    Rotate {
+        #[arg(long)]
+        id: String,
+        #[arg(long, default_value = "/var/lib/kxprov/tokens.json")]
+        tokens_path: PathBuf,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -198,6 +214,9 @@ fn run(cli: &Cli) -> Result<(), CliError> {
     if matches!(cli.cmd, Command::SimMark { .. }) {
         return sim_mark(cli);
     }
+    if matches!(cli.cmd, Command::Token { .. }) {
+        return token_admin(cli);
+    }
     check_ranges(&cli.cmd)?;
     let TransportKind::Sim = cli.transport;
     let mut c = Client::new(SimTransport::new(SimPbx::default()));
@@ -258,6 +277,12 @@ fn command(c: &mut Client<SimTransport>, cmd: &Command) -> Result<(), CliError> 
                 plan.writes.len(),
                 diff.join(", ")
             );
+        }
+        Command::Unlock { .. }
+        | Command::Mode { .. }
+        | Command::SimMark { .. }
+        | Command::Token { .. } => {
+            return Err(CliError::Usage("daemon-only command".into()));
         }
     }
     Ok(())
@@ -357,6 +382,47 @@ fn sim_mark(cli: &Cli) -> Result<(), CliError> {
                     .map_err(|e| CliError::Usage(e.to_string()))?;
             }
             println!("sim-mark written for build {}", env!("KXPROV_BUILD_HASH"));
+            Ok(())
+        }
+    }
+}
+
+fn token_admin(cli: &Cli) -> Result<(), CliError> {
+    let Command::Token { cmd } = &cli.cmd else {
+        return Err(CliError::Usage("token".into()));
+    };
+    match cmd {
+        TokenCommand::Rotate { id, tokens_path } => {
+            let mut file: kxprov_api::TokensFile = if tokens_path.exists() {
+                let raw = std::fs::read(tokens_path).map_err(|e| CliError::Usage(e.to_string()))?;
+                serde_json::from_slice(&raw).map_err(|e| CliError::Usage(e.to_string()))?
+            } else {
+                return Err(CliError::Usage("tokens file missing".into()));
+            };
+            let entry = file
+                .tokens
+                .iter_mut()
+                .find(|t| t.id.as_str() == id)
+                .ok_or_else(|| CliError::Usage(format!("token id {id} not found")))?;
+            let mut secret_bytes = [0u8; 32];
+            getrandom::fill(&mut secret_bytes).map_err(|e| CliError::Usage(e.to_string()))?;
+            let bearer = hex::encode(secret_bytes);
+            entry.secret_hash = kxprov_api::hash_bearer_secret(&bearer);
+            entry.revoked = false;
+            let tmp = tokens_path.with_extension("json.tmp");
+            std::fs::write(
+                &tmp,
+                serde_json::to_vec_pretty(&file).map_err(|e| CliError::Usage(e.to_string()))?,
+            )
+            .map_err(|e| CliError::Usage(e.to_string()))?;
+            std::fs::rename(&tmp, tokens_path).map_err(|e| CliError::Usage(e.to_string()))?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(tokens_path, std::fs::Permissions::from_mode(0o600))
+                    .map_err(|e| CliError::Usage(e.to_string()))?;
+            }
+            println!("rotated token {id}; new bearer (store securely):\n{bearer}");
             Ok(())
         }
     }

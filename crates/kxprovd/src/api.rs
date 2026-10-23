@@ -7,9 +7,10 @@ use crate::mode::{write_approval_required, ModeStore};
 use crate::peer::{PeerPolicy, PeerRole};
 use crate::plan_live::verify_live_diff_hash;
 use crate::plan_store::PlanStore;
+use crate::queue::QueueError;
 use crate::queue::{JobKind, JobOutcome, JobQueue};
 use crate::time::now_ms;
-use crate::tokens::TokenStore;
+use crate::tokens::{TokenError, TokenStore};
 use crate::worker::backup_info;
 use kxprov_api::{
     ApiErrorBody, ApplyPlanParams, OperationalMode, PlanChangeParams, Profile, RequestAuth,
@@ -112,14 +113,16 @@ async fn dispatch(
     let result = match &env.body {
         RequestBody::Status => Ok(ResponseResult::Status(status_snapshot(state, locked).await)),
         RequestBody::ReadFields { params } => {
-            if let Err(e) = require_access(state, role, &env.auth, Scope::Read) {
-                return err_response(id, e);
-            }
+            let token = match require_access(state, role, &env.auth, Scope::Read) {
+                Ok(t) => t,
+                Err(e) => return err_response(id, e),
+            };
             run_job(
                 state,
                 JobKind::ReadFields {
                     params: params.clone(),
                 },
+                Some(token),
             )
             .await
         }
@@ -139,10 +142,21 @@ async fn dispatch(
         }
         RequestBody::SetMode { params } => set_mode(state, cred, params.clone()).await,
         RequestBody::BackupNow => {
-            if let Err(e) = require_access(state, role, &env.auth, Scope::Read) {
+            if let Err(e) = require_backup_access(state, role, &env.auth) {
                 return err_response(id, e);
             }
-            run_job(state, JobKind::BackupNow).await
+            let mode = state
+                .mode
+                .read_stored_mode()
+                .unwrap_or(OperationalMode::Production);
+            run_job(
+                state,
+                JobKind::BackupNow {
+                    operational_mode: mode,
+                },
+                None,
+            )
+            .await
         }
         RequestBody::ListBackups => {
             if let Err(e) = require_access(state, role, &env.auth, Scope::Read) {
@@ -180,6 +194,25 @@ fn err_response(id: String, e: ApiErrorBody) -> Response {
     }
 }
 
+fn verify_bearer(
+    state: &ApiState,
+    auth: &RequestAuth,
+    need: Scope,
+) -> Result<TokenId, ApiErrorBody> {
+    let now = now_ms();
+    state
+        .tokens
+        .verify_bearer(&auth.bearer, now, need)
+        .map(|v| v.id)
+        .map_err(|e| match e {
+            TokenError::Unauthorized | TokenError::Revoked | TokenError::Expired => {
+                api_err("unauthorized", "invalid bearer")
+            }
+            TokenError::ScopeDenied => api_err("forbidden", "token scope denied"),
+            _ => api_err("token", &e.to_string()),
+        })
+}
+
 fn require_access(
     state: &ApiState,
     role: PeerRole,
@@ -187,26 +220,39 @@ fn require_access(
     need: Scope,
 ) -> Result<TokenId, ApiErrorBody> {
     match role {
-        PeerRole::Admin | PeerRole::Gateway => {
-            let Some(auth) = auth else {
-                if role == PeerRole::Admin && need == Scope::Read {
-                    return Ok(TokenId("admin".into()));
-                }
-                return Err(api_err("token_required", "token id required"));
-            };
-            if !state.tokens.require_scope(&auth.token_id, need) {
-                return Err(api_err("forbidden", "token scope denied"));
+        PeerRole::Gateway => {
+            let auth = auth
+                .as_ref()
+                .ok_or_else(|| api_err("token_required", "bearer required"))?;
+            verify_bearer(state, auth, need)
+        }
+        PeerRole::Admin => {
+            if need == Scope::Read && auth.is_none() {
+                return Ok(TokenId("root".into()));
             }
-            Ok(auth.token_id.clone())
+            let auth = auth
+                .as_ref()
+                .ok_or_else(|| api_err("token_required", "bearer required"))?;
+            verify_bearer(state, auth, need)
         }
         PeerRole::ReadOnly => {
-            if need == Scope::Read || need == Scope::Plan {
-                Ok(TokenId("local".into()))
-            } else {
-                Err(api_err("forbidden", "read-only peer"))
+            if need != Scope::Read {
+                return Err(api_err("forbidden", "read-only peer"));
             }
+            Ok(TokenId("local".into()))
         }
     }
+}
+
+fn require_backup_access(
+    state: &ApiState,
+    role: PeerRole,
+    auth: &Option<RequestAuth>,
+) -> Result<(), ApiErrorBody> {
+    if role == PeerRole::Admin && auth.is_none() {
+        return Ok(());
+    }
+    require_access(state, role, auth, Scope::Write).map(|_| ())
 }
 
 async fn status_snapshot(state: &ApiState, locked: bool) -> kxprov_api::StatusResponse {
@@ -269,14 +315,19 @@ async fn run_plan(
     params: PlanChangeParams,
     token: TokenId,
 ) -> Result<ResponseResult, ApiErrorBody> {
+    let now = now_ms();
     let (_job_id, rx) = state
         .queue
-        .enqueue(JobKind::PlanChange {
-            params,
-            token_id: token,
-        })
+        .enqueue(
+            JobKind::PlanChange {
+                params,
+                token_id: token.clone(),
+            },
+            Some(token),
+            now,
+        )
         .await
-        .map_err(|_| api_err("queue", "daemon shutting down"))?;
+        .map_err(queue_err)?;
     map_outcome(rx.await.map_err(|_| api_err("queue", "job dropped"))?)
 }
 
@@ -340,25 +391,20 @@ async fn set_mode(
     if !state.queue.is_idle().await {
         return Err(api_err("busy", "daemon not idle"));
     }
-    let prior_mode = state.mode.read_stored_mode();
-    if prior_mode == Some(OperationalMode::Testing) && params.mode == OperationalMode::Production {
-        match crate::transition::verify_testing_to_production(&state.config, &state.backups) {
-            Ok(()) => {
-                let _ = state.transition.clear();
-            }
-            Err(crate::transition::TransitionError::Mismatch) => {
-                let _ = state
-                    .transition
-                    .set_blocked("live caller-id tables differ from last backup");
-                return Err(api_err(
-                    "transition_mismatch",
-                    "testing→production table verify failed; writes blocked",
-                ));
-            }
-            Err(e) => {
-                return Err(api_err("transition", &e.to_string()));
-            }
+    if params.mode == OperationalMode::Production {
+        if let Err(e) = crate::transition::verify_enter_production_or_block(
+            &state.config,
+            &state.backups,
+            &state.transition,
+        ) {
+            let code = match e {
+                crate::transition::TransitionError::Mismatch => "transition_mismatch",
+                crate::transition::TransitionError::NoDigest => "transition_no_backup",
+                _ => "transition",
+            };
+            return Err(api_err(code, &e.to_string()));
         }
+        let _ = state.transition.clear();
     }
     let (effective, profile, counter) = state
         .mode
@@ -433,13 +479,17 @@ async fn apply_plan(
 
     let (job_id, _rx) = state
         .queue
-        .enqueue(JobKind::ApplyPlan {
-            plan_id: params.plan_id.clone(),
-            diff_hash: params.diff_hash.clone(),
-            token_id: token,
-        })
+        .enqueue(
+            JobKind::ApplyPlan {
+                plan_id: params.plan_id.clone(),
+                diff_hash: params.diff_hash.clone(),
+                token_id: token.clone(),
+            },
+            Some(token),
+            now,
+        )
         .await
-        .map_err(|_| api_err("queue", "daemon shutting down"))?;
+        .map_err(queue_err)?;
     Ok(ResponseResult::Job(kxprov_api::JobRef { job_id }))
 }
 
@@ -460,12 +510,23 @@ async fn unlock(
     Ok(ResponseResult::Unlock(UnlockResult { unlocked: true }))
 }
 
-async fn run_job(state: &ApiState, kind: JobKind) -> Result<ResponseResult, ApiErrorBody> {
+fn queue_err(e: QueueError) -> ApiErrorBody {
+    match e {
+        QueueError::RateLimit => api_err("rate_limit", "per-token queue or rate cap exceeded"),
+        QueueError::Shutdown => api_err("queue", "daemon shutting down"),
+    }
+}
+
+async fn run_job(
+    state: &ApiState,
+    kind: JobKind,
+    token: Option<TokenId>,
+) -> Result<ResponseResult, ApiErrorBody> {
     let (_job_id, rx) = state
         .queue
-        .enqueue(kind)
+        .enqueue(kind, token, now_ms())
         .await
-        .map_err(|_| api_err("queue", "daemon shutting down"))?;
+        .map_err(queue_err)?;
     let outcome = rx.await.map_err(|_| api_err("queue", "job dropped"))?;
     map_outcome(outcome)
 }

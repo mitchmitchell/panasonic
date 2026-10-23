@@ -1,26 +1,21 @@
 #![allow(clippy::unwrap_used)]
 
+mod support;
+
 use kxprov_api::{
-    ApiClient, ApplyPlanAwaitingStatus, FieldKindWire, OperationalMode, Profile, RequestAuth,
-    RequestBody, ResponseResult, TokenId,
+    ApiClient, ApplyPlanAwaitingStatus, FieldKindWire, OperationalMode, Profile, RequestBody,
+    ResponseResult,
 };
 use kxprovd::locked::LockedStore;
 use kxprovd::mode::{ModeFileBody, ProfileFileBody};
-use kxprovd::Daemon;
-use nix::unistd::getuid;
 use std::time::Duration;
-
-fn gateway_auth(id: &str) -> RequestAuth {
-    RequestAuth {
-        token_id: TokenId(id.into()),
-    }
-}
+use support::{bearer_auth, init_test_daemon, APPROVER_SECRET, COMM_SECRET, WRITER_SECRET};
 
 #[tokio::test]
 async fn plan_immutable_and_token_bound() {
     let tmp = tempfile::tempdir().unwrap();
-    let uid = getuid().as_raw();
-    let (_d, sock) = Daemon::sim_for_tests(tmp.path(), uid);
+    let uid = nix::unistd::getuid().as_raw();
+    let (_d, sock) = init_test_daemon(&tmp, uid, Profile::Sim);
     tokio::time::sleep(Duration::from_millis(50)).await;
     let mut c = ApiClient::connect(&sock).await.unwrap();
     let ResponseResult::PlanChange(p) = c
@@ -32,7 +27,7 @@ async fn plan_immutable_and_token_bound() {
                     value: "SYNTH".into(),
                 },
             },
-            Some(gateway_auth("writer")),
+            Some(bearer_auth(WRITER_SECRET)),
         )
         .await
         .unwrap()
@@ -49,7 +44,7 @@ async fn plan_immutable_and_token_bound() {
                     value: "SYNTH".into(),
                 },
             },
-            Some(gateway_auth("writer")),
+            Some(bearer_auth(WRITER_SECRET)),
         )
         .await
         .unwrap()
@@ -79,8 +74,8 @@ async fn apply_requires_approval_on_prod() {
         .unwrap(),
     )
     .unwrap();
-    let uid = getuid().as_raw();
-    let (_d, sock) = Daemon::sim_for_tests_profile(tmp.path(), uid, Profile::Prod);
+    let uid = nix::unistd::getuid().as_raw();
+    let (_d, sock) = init_test_daemon(&tmp, uid, Profile::Prod);
     tokio::time::sleep(Duration::from_millis(50)).await;
     let mut c = ApiClient::connect(&sock).await.unwrap();
     let ResponseResult::PlanChange(plan) = c
@@ -92,7 +87,7 @@ async fn apply_requires_approval_on_prod() {
                     value: "456".into(),
                 },
             },
-            Some(gateway_auth("writer")),
+            Some(bearer_auth(WRITER_SECRET)),
         )
         .await
         .unwrap()
@@ -108,7 +103,7 @@ async fn apply_requires_approval_on_prod() {
                     diff_hash: plan.diff_hash.clone(),
                 },
             },
-            Some(gateway_auth("writer")),
+            Some(bearer_auth(WRITER_SECRET)),
         )
         .await
         .unwrap()
@@ -122,8 +117,8 @@ async fn apply_requires_approval_on_prod() {
 #[tokio::test]
 async fn sim_apply_without_approval() {
     let tmp = tempfile::tempdir().unwrap();
-    let uid = getuid().as_raw();
-    let (_d, sock) = Daemon::sim_for_tests(tmp.path(), uid);
+    let uid = nix::unistd::getuid().as_raw();
+    let (_d, sock) = init_test_daemon(&tmp, uid, Profile::Sim);
     tokio::time::sleep(Duration::from_millis(50)).await;
     let mut gw = ApiClient::connect(&sock).await.unwrap();
     let ResponseResult::PlanChange(plan) = gw
@@ -135,7 +130,7 @@ async fn sim_apply_without_approval() {
                     value: "OK".into(),
                 },
             },
-            Some(gateway_auth("writer")),
+            Some(bearer_auth(WRITER_SECRET)),
         )
         .await
         .unwrap()
@@ -144,7 +139,7 @@ async fn sim_apply_without_approval() {
     };
 
     let ResponseResult::BackupNow(_) = gw
-        .call_auth(RequestBody::BackupNow, Some(gateway_auth("writer")))
+        .call_auth(RequestBody::BackupNow, Some(bearer_auth(WRITER_SECRET)))
         .await
         .unwrap()
     else {
@@ -159,7 +154,7 @@ async fn sim_apply_without_approval() {
                     diff_hash: plan.diff_hash.clone(),
                 },
             },
-            Some(gateway_auth("writer")),
+            Some(bearer_auth(WRITER_SECRET)),
         )
         .await
         .unwrap()
@@ -190,8 +185,8 @@ async fn prod_apply_single_use_approval() {
         .unwrap(),
     )
     .unwrap();
-    let uid = getuid().as_raw();
-    let (_d, sock) = Daemon::sim_for_tests_profile(tmp.path(), uid, Profile::Prod);
+    let uid = nix::unistd::getuid().as_raw();
+    let (_d, sock) = init_test_daemon(&tmp, uid, Profile::Prod);
     tokio::time::sleep(Duration::from_millis(50)).await;
     let mut gw = ApiClient::connect(&sock).await.unwrap();
     let ResponseResult::PlanChange(plan) = gw
@@ -203,7 +198,7 @@ async fn prod_apply_single_use_approval() {
                     value: "P".into(),
                 },
             },
-            Some(gateway_auth("writer")),
+            Some(bearer_auth(WRITER_SECRET)),
         )
         .await
         .unwrap()
@@ -221,7 +216,7 @@ async fn prod_apply_single_use_approval() {
                     profile: Profile::Prod,
                 },
             },
-            Some(gateway_auth("approver")),
+            Some(bearer_auth(APPROVER_SECRET)),
         )
         .await
         .unwrap()
@@ -230,7 +225,7 @@ async fn prod_apply_single_use_approval() {
     };
 
     let ResponseResult::BackupNow(_) = gw
-        .call_auth(RequestBody::BackupNow, Some(gateway_auth("writer")))
+        .call_auth(RequestBody::BackupNow, Some(bearer_auth(WRITER_SECRET)))
         .await
         .unwrap()
     else {
@@ -245,7 +240,7 @@ async fn prod_apply_single_use_approval() {
                     diff_hash: plan.diff_hash.clone(),
                 },
             },
-            Some(gateway_auth("writer")),
+            Some(bearer_auth(WRITER_SECRET)),
         )
         .await
         .unwrap()
@@ -263,7 +258,7 @@ async fn prod_apply_single_use_approval() {
                     value: "P2".into(),
                 },
             },
-            Some(gateway_auth("writer")),
+            Some(bearer_auth(WRITER_SECRET)),
         )
         .await
         .unwrap()
@@ -279,7 +274,7 @@ async fn prod_apply_single_use_approval() {
                     diff_hash: plan2.diff_hash,
                 },
             },
-            Some(gateway_auth("writer")),
+            Some(bearer_auth(WRITER_SECRET)),
         )
         .await
         .unwrap()
@@ -291,8 +286,8 @@ async fn prod_apply_single_use_approval() {
 #[tokio::test]
 async fn token_b_cannot_apply_token_a_plan() {
     let tmp = tempfile::tempdir().unwrap();
-    let uid = getuid().as_raw();
-    let (_d, sock) = Daemon::sim_for_tests(tmp.path(), uid);
+    let uid = nix::unistd::getuid().as_raw();
+    let (_d, sock) = init_test_daemon(&tmp, uid, Profile::Sim);
     tokio::time::sleep(Duration::from_millis(50)).await;
     let mut a = ApiClient::connect(&sock).await.unwrap();
     let ResponseResult::PlanChange(plan) = a
@@ -304,7 +299,7 @@ async fn token_b_cannot_apply_token_a_plan() {
                     value: "X".into(),
                 },
             },
-            Some(gateway_auth("writer")),
+            Some(bearer_auth(WRITER_SECRET)),
         )
         .await
         .unwrap()
@@ -322,7 +317,7 @@ async fn token_b_cannot_apply_token_a_plan() {
                     profile: Profile::Sim,
                 },
             },
-            Some(gateway_auth("approver")),
+            Some(bearer_auth(APPROVER_SECRET)),
         )
         .await
         .unwrap();
@@ -337,7 +332,7 @@ async fn token_b_cannot_apply_token_a_plan() {
                     diff_hash: plan.diff_hash,
                 },
             },
-            Some(gateway_auth("comm")),
+            Some(bearer_auth(COMM_SECRET)),
         )
         .await
         .expect_err("wrong token owner");
@@ -349,8 +344,8 @@ async fn locked_persists_until_unlock() {
     let tmp = tempfile::tempdir().unwrap();
     let store = LockedStore::new(tmp.path());
     store.set_locked("test", Some("j1"), 1).expect("set locked");
-    let uid = getuid().as_raw();
-    let (_d, sock) = Daemon::sim_for_tests(tmp.path(), uid);
+    let uid = nix::unistd::getuid().as_raw();
+    let (_d, sock) = init_test_daemon(&tmp, uid, Profile::Sim);
     tokio::time::sleep(Duration::from_millis(50)).await;
     let mut c = ApiClient::connect(&sock).await.unwrap();
     let ResponseResult::Status(st) = c.call(RequestBody::Status).await.unwrap() else {

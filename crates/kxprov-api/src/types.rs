@@ -1,4 +1,4 @@
-use crate::ids::{Approval, DiffHash, PlanId, TokenId};
+use crate::ids::{Approval, DiffHash, PlanId};
 use serde::{Deserialize, Serialize};
 
 pub use crate::ids::Profile;
@@ -103,10 +103,10 @@ pub struct PlanChangeResult {
     pub expires_at_ms: u64,
 }
 
-/// Gateway forwards the MCP token id; daemon validates against its token store.
+/// Gateway forwards the **bearer secret**; the daemon verifies it and derives [`TokenId`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RequestAuth {
-    pub token_id: TokenId,
+    pub bearer: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

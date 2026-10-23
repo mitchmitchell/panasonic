@@ -7,7 +7,7 @@ use crate::plan_store::{PlanSnapshot, PlanStore};
 use crate::queue::{field_kind_wire, JobKind, JobOutcome, JobRequest, JobState};
 use crate::time::now_ms;
 use crate::transport::{open, AnyTransport};
-use kxprov_api::{BackupInfo, FieldRow, PlanChangeResult, Profile, TokenId};
+use kxprov_api::{BackupInfo, FieldRow, OperationalMode, PlanChangeResult, Profile, TokenId};
 use kxtd1232::frame::Access;
 use kxtd1232::{build_plan, field_patch, Client, Granularity};
 use std::sync::Arc;
@@ -42,6 +42,7 @@ pub async fn run_worker(
                 },
             )
             .await;
+        queue_jobs.release_token(job.token_id.as_ref()).await;
         let _ = job.reply.send(outcome);
     }
 }
@@ -50,7 +51,7 @@ async fn execute_job(ctx: &WorkerCtx, job_id: &str, kind: JobKind) -> JobOutcome
     match kind {
         JobKind::ReadFields { params } => run_read(ctx, params).await,
         JobKind::PlanChange { params, token_id } => run_plan(ctx, params, token_id).await,
-        JobKind::BackupNow => run_backup(ctx).await,
+        JobKind::BackupNow { operational_mode } => run_backup(ctx, operational_mode).await,
         JobKind::ApplyPlan {
             plan_id,
             diff_hash,
@@ -172,7 +173,7 @@ async fn run_plan(
     })
 }
 
-async fn run_backup(ctx: &WorkerCtx) -> JobOutcome {
+async fn run_backup(ctx: &WorkerCtx, operational_mode: OperationalMode) -> JobOutcome {
     let job_id = crate::queue::next_job_id();
     let temp = ctx.config.data_dir.join(format!("{job_id}.partial.dbh"));
     let _ = ctx.journal.append(&JournalEntry::BackupStart {
@@ -224,7 +225,10 @@ async fn run_backup(ctx: &WorkerCtx) -> JobOutcome {
         };
     }
     let digest = Some(crate::transition::caller_id_wire_digest(&wire));
-    let meta = match ctx.backups.save_verified(&dbh, &ctx.goliath, digest) {
+    let meta = match ctx
+        .backups
+        .save_verified(&dbh, &ctx.goliath, digest, operational_mode)
+    {
         Ok(m) => m,
         Err(e) => {
             return JobOutcome::Err {
@@ -277,6 +281,7 @@ async fn run_apply_job(
         &token_id,
     ) {
         Ok(_blocks) => {
+            let _ = ctx.plans.mark_applied(&plan_id, now_ms());
             let _ = ctx.journal.truncate();
             JobOutcome::ApplyPlan { plan_id, diff_hash }
         }

@@ -15,6 +15,9 @@ path = "src/main.rs"
 [lints]
 workspace = true
 
+[features]
+test-util = []
+
 [dependencies]
 kxtd1232 = { path = "../kxtd1232" }
 kxtd1232-sim = { path = "../kxtd1232-sim" }
@@ -36,3 +39,23 @@ chrono-tz = "0.10"
 
 [dev-dependencies]
 tempfile = "3"
+
+[[test]]
+name = "daemon"
+required-features = ["test-util"]
+
+[[test]]
+name = "f1_v27"
+required-features = ["test-util"]
+
+[[test]]
+name = "f1_v28_v29"
+required-features = ["test-util"]
+
+[[test]]
+name = "timing_and_readback"
+required-features = ["test-util"]
+
+[[test]]
+name = "security_b2_b3_b6"
+required-features = ["test-util"]

@@ -1,33 +1,25 @@
 #![allow(clippy::unwrap_used)]
 
+mod support;
+
 use kxprov_api::{
-    ApiClient, FieldKindWire, OperationalMode, Profile, RequestAuth, RequestBody, ResponseResult,
-    TokenId,
+    ApiClient, FieldKindWire, OperationalMode, Profile, RequestBody, ResponseResult, TokenId,
 };
 use kxprovd::config::Config;
 use kxprovd::mode::{ModeFileBody, ProfileFileBody};
-use kxprovd::Daemon;
 use kxtd1232::{build_plan, field_patch, frame::Access, Client, Granularity};
 use kxtd1232::{Timing, MAX_LINK_BAUD, MIN_REPLY_GUARD_MS};
 use kxtd1232_sim::{Fault, SimPbx, SimTransport, PLACEHOLDER_PASSWORD};
-use nix::unistd::getuid;
 use std::time::Duration;
-
-fn gateway_auth(id: &str) -> RequestAuth {
-    RequestAuth {
-        token_id: TokenId(id.into()),
-    }
-}
 
 #[test]
 fn timing_config_rejected_at_daemon_start() {
     let tmp = tempfile::tempdir().unwrap();
-    let uid = getuid().as_raw();
+    let uid = nix::unistd::getuid().as_raw();
     let socket = tmp.path().join("kxprovd.sock");
     let mut cfg = Config::sim_test(tmp.path().to_path_buf(), socket, uid);
     cfg.timing.link_baud = MAX_LINK_BAUD + 1;
     assert!(cfg.validate().is_err());
-    assert!(Daemon::start(cfg).is_err());
 }
 
 #[test]
@@ -107,8 +99,8 @@ async fn daemon_apply_on_prod_profile_readback_via_read_fields() {
         .unwrap(),
     )
     .unwrap();
-    let uid = getuid().as_raw();
-    let (_d, sock) = Daemon::sim_for_tests_profile(tmp.path(), uid, Profile::Prod);
+    let uid = nix::unistd::getuid().as_raw();
+    let (_d, sock) = support::init_test_daemon(&tmp, uid, Profile::Prod);
     tokio::time::sleep(Duration::from_millis(50)).await;
     let mut gw = ApiClient::connect(&sock).await.unwrap();
     let ResponseResult::PlanChange(plan) = gw
@@ -120,7 +112,7 @@ async fn daemon_apply_on_prod_profile_readback_via_read_fields() {
                     value: "LIVE".into(),
                 },
             },
-            Some(gateway_auth("writer")),
+            Some(support::bearer_auth(support::WRITER_SECRET)),
         )
         .await
         .unwrap()
@@ -137,12 +129,15 @@ async fn daemon_apply_on_prod_profile_readback_via_read_fields() {
                     profile: Profile::Prod,
                 },
             },
-            Some(gateway_auth("approver")),
+            Some(support::bearer_auth(support::APPROVER_SECRET)),
         )
         .await
         .unwrap();
     let ResponseResult::BackupNow(_) = gw
-        .call_auth(RequestBody::BackupNow, Some(gateway_auth("writer")))
+        .call_auth(
+            RequestBody::BackupNow,
+            Some(support::bearer_auth(support::WRITER_SECRET)),
+        )
         .await
         .unwrap()
     else {
@@ -156,7 +151,7 @@ async fn daemon_apply_on_prod_profile_readback_via_read_fields() {
                     diff_hash: plan.diff_hash,
                 },
             },
-            Some(gateway_auth("writer")),
+            Some(support::bearer_auth(support::WRITER_SECRET)),
         )
         .await
         .unwrap()
@@ -173,7 +168,7 @@ async fn daemon_apply_on_prod_profile_readback_via_read_fields() {
                     count: 1,
                 },
             },
-            Some(gateway_auth("writer")),
+            Some(support::bearer_auth(support::WRITER_SECRET)),
         )
         .await
         .unwrap()

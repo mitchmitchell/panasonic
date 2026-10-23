@@ -3,7 +3,7 @@ use crate::goliath::GoliathQueue;
 use crate::time::now_ms;
 use crate::transport::AnyTransport;
 use kxprov_api::DEFAULT_BACKUP_KEEP;
-use kxprov_api::{GoliathCopyStatus, Profile};
+use kxprov_api::{GoliathCopyStatus, OperationalMode, Profile};
 use kxtd1232::tables::TABLES;
 use kxtd1232::{Client, Transport};
 use serde::{Deserialize, Serialize};
@@ -37,6 +37,13 @@ pub struct BackupMeta {
     /// SHA-256 of 0x24+0x25 wire bytes at backup time (v2.8 N2).
     #[serde(default)]
     pub caller_id_digest: Option<String>,
+    /// Operational mode when the backup was taken (N2: prod transition uses prod backups only).
+    #[serde(default = "default_backup_operational_mode")]
+    pub operational_mode: OperationalMode,
+}
+
+fn default_backup_operational_mode() -> OperationalMode {
+    OperationalMode::Production
 }
 
 pub struct BackupStore {
@@ -101,10 +108,12 @@ impl BackupStore {
         }
     }
 
-    pub fn latest_caller_id_digest(&self) -> Option<String> {
+    pub fn latest_prod_caller_id_digest(&self) -> Option<String> {
         self.list()
-            .ok()
-            .and_then(|list| list.first().and_then(|m| m.caller_id_digest.clone()))
+            .ok()?
+            .into_iter()
+            .find(|m| m.operational_mode == OperationalMode::Production)
+            .and_then(|m| m.caller_id_digest.clone())
     }
 
     pub fn read_full_backup<T: Transport>(
@@ -125,6 +134,7 @@ impl BackupStore {
         data: &[u8],
         goliath: &GoliathQueue,
         caller_id_digest: Option<String>,
+        operational_mode: OperationalMode,
     ) -> Result<BackupMeta, BackupError> {
         parse_size(data)?;
         let hash = hex::encode(Sha256::digest(data));
@@ -144,9 +154,10 @@ impl BackupStore {
             sha256: hash.clone(),
             path: dbh_path.clone(),
             caller_id_digest,
+            operational_mode,
         };
         let meta_path = self.dir.join(format!("{id}.meta"));
-        std::fs::write(&meta_path, serde_json::to_vec_pretty(&meta)?)?;
+        crate::atomic_write::write(&meta_path, &serde_json::to_vec_pretty(&meta)?)?;
         goliath.enqueue_copy(&meta);
         self.prune_to_keep(DEFAULT_BACKUP_KEEP)?;
         Ok(meta)

@@ -1,4 +1,4 @@
-#![allow(clippy::unwrap_used)]
+#![allow(clippy::unwrap_used, clippy::field_reassign_with_default)]
 
 use kxtd1232::{Timing, MAX_LINK_BAUD, MIN_REPLY_GUARD_MS};
 

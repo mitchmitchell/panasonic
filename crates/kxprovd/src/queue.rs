@@ -1,5 +1,8 @@
-use kxprov_api::{DiffHash, FieldKindWire, PlanChangeParams, PlanId, ReadFieldsParams, TokenId};
-use std::collections::HashMap;
+use kxprov_api::{
+    DiffHash, FieldKindWire, PlanChangeParams, PlanId, ReadFieldsParams, TokenId,
+    TOKEN_JOBS_PER_MINUTE, TOKEN_QUEUE_DEPTH_MAX,
+};
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::{mpsc, oneshot, Mutex};
 
@@ -26,7 +29,9 @@ pub enum JobKind {
         params: PlanChangeParams,
         token_id: TokenId,
     },
-    BackupNow,
+    BackupNow {
+        operational_mode: kxprov_api::OperationalMode,
+    },
     ApplyPlan {
         plan_id: PlanId,
         diff_hash: DiffHash,
@@ -37,6 +42,7 @@ pub enum JobKind {
 pub struct JobRequest {
     pub id: String,
     pub kind: JobKind,
+    pub token_id: Option<TokenId>,
     pub reply: oneshot::Sender<JobOutcome>,
 }
 
@@ -55,9 +61,16 @@ pub enum JobOutcome {
     },
 }
 
+#[derive(Default)]
+struct TokenRateState {
+    active: u32,
+    start_times_ms: VecDeque<u64>,
+}
+
 pub struct JobQueue {
     tx: mpsc::Sender<JobRequest>,
     pub jobs: Mutex<HashMap<String, JobState>>,
+    token_rates: Mutex<HashMap<String, TokenRateState>>,
 }
 
 impl JobQueue {
@@ -65,25 +78,65 @@ impl JobQueue {
         Self {
             tx,
             jobs: Mutex::new(HashMap::new()),
+            token_rates: Mutex::new(HashMap::new()),
         }
     }
 
     pub async fn enqueue(
         &self,
         kind: JobKind,
-    ) -> Result<(String, oneshot::Receiver<JobOutcome>), ()> {
+        token_id: Option<TokenId>,
+        now_ms: u64,
+    ) -> Result<(String, oneshot::Receiver<JobOutcome>), QueueError> {
+        if let Some(ref tid) = token_id {
+            self.check_token_limits(tid, now_ms).await?;
+        }
         let id = next_job_id();
         let (reply_tx, reply_rx) = oneshot::channel();
         self.jobs.lock().await.insert(id.clone(), JobState::Queued);
+        if let Some(ref tid) = token_id {
+            let mut rates = self.token_rates.lock().await;
+            let st = rates.entry(tid.as_str().to_string()).or_default();
+            st.active += 1;
+            st.start_times_ms.push_back(now_ms);
+        }
+        let tid_clone = token_id.clone();
         self.tx
             .send(JobRequest {
                 id: id.clone(),
                 kind,
+                token_id,
                 reply: reply_tx,
             })
             .await
-            .map_err(|_| ())?;
+            .map_err(|_| QueueError::Shutdown)?;
+        let _ = tid_clone;
         Ok((id, reply_rx))
+    }
+
+    async fn check_token_limits(&self, token_id: &TokenId, now_ms: u64) -> Result<(), QueueError> {
+        let mut rates = self.token_rates.lock().await;
+        let st = rates.entry(token_id.as_str().to_string()).or_default();
+        if st.active >= TOKEN_QUEUE_DEPTH_MAX {
+            return Err(QueueError::RateLimit);
+        }
+        let minute_ago = now_ms.saturating_sub(60_000);
+        while st.start_times_ms.front().is_some_and(|t| *t < minute_ago) {
+            st.start_times_ms.pop_front();
+        }
+        if st.start_times_ms.len() as u32 >= TOKEN_JOBS_PER_MINUTE {
+            return Err(QueueError::RateLimit);
+        }
+        Ok(())
+    }
+
+    pub async fn release_token(&self, token_id: Option<&TokenId>) {
+        if let Some(tid) = token_id {
+            let mut rates = self.token_rates.lock().await;
+            if let Some(st) = rates.get_mut(tid.as_str()) {
+                st.active = st.active.saturating_sub(1);
+            }
+        }
     }
 
     pub async fn set_state(&self, id: &str, state: JobState) {
@@ -115,6 +168,12 @@ impl JobQueue {
             .values()
             .all(|s| !matches!(s, JobState::Queued | JobState::Running))
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueueError {
+    Shutdown,
+    RateLimit,
 }
 
 pub fn field_kind_wire(w: FieldKindWire) -> kxtd1232::FieldKind {

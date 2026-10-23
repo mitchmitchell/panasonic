@@ -1,4 +1,8 @@
 # kxprov-api
 
-Shared Unix-socket API types and client for `kxprovd`. The daemon enforces [`Scope`] from
-SO_PEERCRED locally (v2.3); this crate does not carry trust metadata from the gateway.
+**Canonical shared API for `kxprovd` and the gateway (PR #4 owns this crate; PR #5 must match it byte-for-byte on types and protocol constants).**
+
+- Unix-socket JSON protocol types (`RequestBody`, `ResponseResult`, …)
+- Bearer auth shape: `RequestAuth { bearer }` — the daemon verifies secrets; gateways must not send bare token ids
+- On-disk token schema: `TokensFile`, `TokenEntry`, `hash_bearer_secret`
+- Rate-limit constants: `TOKEN_QUEUE_DEPTH_MAX`, `TOKEN_JOBS_PER_MINUTE`

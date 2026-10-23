@@ -59,7 +59,7 @@ impl ApprovalBook {
     }
 
     fn save(&self, store: &ApprovalStore) -> Result<(), ApprovalError> {
-        std::fs::write(&self.path, serde_json::to_vec_pretty(store)?)?;
+        crate::atomic_write::write(&self.path, &serde_json::to_vec_pretty(store)?)?;
         Ok(())
     }
 
@@ -161,6 +161,7 @@ impl ApprovalBook {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use kxprov_api::{DiffHash, PlanId};

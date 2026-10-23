@@ -1,5 +1,7 @@
 #![allow(clippy::unwrap_used)]
 
+mod support;
+
 use kxprov_api::{http_dispatch, mcp_invoke, HttpMethod, HttpStatus};
 use kxprov_api::{
     ApiClient, FieldKindWire, OperationalMode, Profile, RequestAuth, RequestBody, ResponseResult,
@@ -9,16 +11,8 @@ use kxprovd::audit::AuditKind;
 use kxprovd::mode::{ModeFileBody, ModeStore};
 use kxprovd::sim_mark::SimMarkStore;
 use kxprovd::transition::TransitionBlockStore;
-use kxprovd::Daemon;
-use nix::unistd::getuid;
 use std::os::unix::fs::PermissionsExt;
 use std::time::Duration;
-
-fn gateway_auth(id: &str) -> RequestAuth {
-    RequestAuth {
-        token_id: TokenId(id.into()),
-    }
-}
 
 #[test]
 fn route_table_no_mode_profile_over_http_or_mcp() {
@@ -40,8 +34,8 @@ async fn test_apply_without_backup_when_not_prod() {
         .unwrap(),
     )
     .unwrap();
-    let uid = getuid().as_raw();
-    let (_d, sock) = Daemon::sim_for_tests(tmp.path(), uid);
+    let uid = nix::unistd::getuid().as_raw();
+    let (_d, sock) = support::init_test_daemon(&tmp, uid, Profile::Sim);
     tokio::time::sleep(Duration::from_millis(50)).await;
     let mut gw = ApiClient::connect(&sock).await.unwrap();
     let ResponseResult::PlanChange(plan) = gw
@@ -53,7 +47,7 @@ async fn test_apply_without_backup_when_not_prod() {
                     value: "T".into(),
                 },
             },
-            Some(gateway_auth("writer")),
+            Some(support::bearer_auth(support::WRITER_SECRET)),
         )
         .await
         .unwrap()
@@ -68,7 +62,7 @@ async fn test_apply_without_backup_when_not_prod() {
                     diff_hash: plan.diff_hash,
                 },
             },
-            Some(gateway_auth("writer")),
+            Some(support::bearer_auth(support::WRITER_SECRET)),
         )
         .await
         .unwrap()
@@ -89,17 +83,30 @@ async fn testing_to_production_mismatch_blocks_writes() {
         .unwrap(),
     )
     .unwrap();
-    let uid = getuid().as_raw();
-    let (_d, sock) = Daemon::sim_for_tests(tmp.path(), uid);
+    let uid = nix::unistd::getuid().as_raw();
+    let (_d, sock) = support::init_test_daemon(&tmp, uid, Profile::Sim);
     tokio::time::sleep(Duration::from_millis(50)).await;
     let mut gw = ApiClient::connect(&sock).await.unwrap();
-    let ResponseResult::BackupNow(_) = gw
-        .call_auth(RequestBody::BackupNow, Some(gateway_auth("writer")))
+    let ResponseResult::BackupNow(first) = gw
+        .call_auth(
+            RequestBody::BackupNow,
+            Some(support::bearer_auth(support::WRITER_SECRET)),
+        )
         .await
         .unwrap()
     else {
         panic!("backup");
     };
+    let digest = {
+        let meta_path = tmp
+            .path()
+            .join("backups")
+            .join(format!("{}.meta", first.backup.id));
+        let meta: kxprovd::backup::BackupMeta =
+            serde_json::from_slice(&std::fs::read(meta_path).unwrap()).unwrap();
+        meta.caller_id_digest.unwrap()
+    };
+    support::write_prod_mode_backup_meta(&tmp.path().join("backups"), &digest);
     let ResponseResult::PlanChange(plan) = gw
         .call_auth(
             RequestBody::PlanChange {
@@ -109,7 +116,7 @@ async fn testing_to_production_mismatch_blocks_writes() {
                     value: "CHANGED".into(),
                 },
             },
-            Some(gateway_auth("writer")),
+            Some(support::bearer_auth(support::WRITER_SECRET)),
         )
         .await
         .unwrap()
@@ -124,24 +131,13 @@ async fn testing_to_production_mismatch_blocks_writes() {
                     diff_hash: plan.diff_hash.clone(),
                 },
             },
-            Some(gateway_auth("writer")),
+            Some(support::bearer_auth(support::WRITER_SECRET)),
         )
         .await
         .unwrap()
     else {
         panic!("apply testing");
     };
-    // Stale backup digest (simulates last prod backup before test writes).
-    for ent in std::fs::read_dir(tmp.path().join("backups")).unwrap() {
-        let path = ent.unwrap().path();
-        if path.extension().is_some_and(|e| e == "meta") {
-            let mut meta: serde_json::Value =
-                serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-            meta["caller_id_digest"] = serde_json::json!("deadbeef");
-            std::fs::write(&path, serde_json::to_vec_pretty(&meta).unwrap()).unwrap();
-        }
-    }
-
     let mut admin = ApiClient::connect(&sock).await.unwrap();
     let err = admin
         .call(RequestBody::SetMode {

@@ -55,7 +55,14 @@ impl TransitionBlockStore {
             return Ok(TransitionBlockState::default());
         }
         let data = std::fs::read_to_string(&self.path)?;
-        Ok(serde_json::from_str(&data).unwrap_or_default())
+        match serde_json::from_str(&data) {
+            Ok(st) => Ok(st),
+            Err(_) => Ok(TransitionBlockState {
+                active: true,
+                detail: "corrupt transition-block file".into(),
+                alert_sent: false,
+            }),
+        }
     }
 
     pub fn set_blocked(&self, detail: impl Into<String>) -> Result<(), std::io::Error> {
@@ -71,7 +78,7 @@ impl TransitionBlockStore {
             detail,
             alert_sent: false,
         };
-        std::fs::write(&self.path, serde_json::to_vec_pretty(&st)?)?;
+        crate::atomic_write::write(&self.path, &serde_json::to_vec_pretty(&st)?)?;
         Ok(())
     }
 
@@ -83,7 +90,10 @@ impl TransitionBlockStore {
     }
 
     pub fn writes_blocked(&self) -> bool {
-        self.load().ok().is_some_and(|s| s.active)
+        match self.load() {
+            Ok(s) => s.active,
+            Err(_) => true,
+        }
     }
 
     pub fn maybe_fire_alert(&self) {
@@ -127,16 +137,43 @@ pub fn live_caller_id_digest(config: &Config) -> Result<String, TransitionError>
     Ok(caller_id_wire_digest(&wire))
 }
 
-pub fn verify_testing_to_production(
+/// N2: entering Production — compare live 0x24/0x25 to latest **Production-mode** backup.
+pub fn verify_enter_production(
     config: &Config,
     backups: &BackupStore,
 ) -> Result<(), TransitionError> {
     let expected = backups
-        .latest_caller_id_digest()
+        .latest_prod_caller_id_digest()
         .ok_or(TransitionError::NoDigest)?;
     let live = live_caller_id_digest(config)?;
     if live != expected {
         return Err(TransitionError::Mismatch);
     }
     Ok(())
+}
+
+pub fn verify_enter_production_or_block(
+    config: &Config,
+    backups: &BackupStore,
+    transition: &TransitionBlockStore,
+) -> Result<(), TransitionError> {
+    match verify_enter_production(config, backups) {
+        Ok(()) => Ok(()),
+        Err(e @ TransitionError::Mismatch) => {
+            let _ = transition.set_blocked("live caller-id tables differ from last prod backup");
+            Err(e)
+        }
+        Err(e @ TransitionError::NoDigest) => {
+            let _ = transition.set_blocked("no production-mode backup for transition verify");
+            Err(e)
+        }
+        Err(e @ TransitionError::Protocol(_)) | Err(e @ TransitionError::Transport(_)) => {
+            let _ = transition.set_blocked("live read failed during transition verify");
+            Err(e)
+        }
+        Err(e @ TransitionError::Backup(_)) => {
+            let _ = transition.set_blocked("backup read failed during transition verify");
+            Err(e)
+        }
+    }
 }

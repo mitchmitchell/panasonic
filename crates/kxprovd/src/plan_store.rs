@@ -29,6 +29,8 @@ pub enum PlanError {
     AmbiguousPrefix,
     #[error("invalid plan ref")]
     InvalidRef,
+    #[error("plan already applied")]
+    AlreadyApplied,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -64,6 +66,8 @@ pub struct PlanRecord {
     pub record_size: usize,
     pub writes: Vec<StoredWrite>,
     pub diff: Vec<String>,
+    #[serde(default)]
+    pub applied_at_ms: Option<u64>,
 }
 
 pub struct PlanStore {
@@ -100,9 +104,10 @@ impl PlanStore {
             record_size: snap.record_size,
             writes: snap.writes.clone(),
             diff: snap.diff.clone(),
+            applied_at_ms: None,
         };
         let data = serde_json::to_vec_pretty(&rec)?;
-        std::fs::write(self.path(&id), data)?;
+        crate::atomic_write::write(&self.path(&id), &data)?;
         Ok(rec)
     }
 
@@ -139,11 +144,24 @@ impl PlanStore {
         if rec.creator_token != *token {
             return Err(PlanError::TokenMismatch);
         }
+        if rec.applied_at_ms.is_some() {
+            return Err(PlanError::AlreadyApplied);
+        }
         let recomputed = compute_diff_hash(profile, &PlanSnapshot::from_record(&rec));
         if recomputed != rec.diff_hash {
             return Err(PlanError::DiffMismatch);
         }
         Ok(rec)
+    }
+
+    pub fn mark_applied(&self, id: &PlanId, now_ms: u64) -> Result<(), PlanError> {
+        let mut rec = self.get(id)?;
+        if rec.applied_at_ms.is_some() {
+            return Err(PlanError::AlreadyApplied);
+        }
+        rec.applied_at_ms = Some(now_ms);
+        crate::atomic_write::write(&self.path(id), &serde_json::to_vec_pretty(&rec)?)?;
+        Ok(())
     }
 
     pub fn dir(&self) -> &Path {
@@ -255,7 +273,28 @@ pub fn diff_hash_with_live_table(
     }))
 }
 
+pub fn compute_diff_hash(profile: Profile, snap: &PlanSnapshot) -> DiffHash {
+    let writes: Vec<CanonicalWrite<'_>> = snap
+        .writes
+        .iter()
+        .map(|w| CanonicalWrite {
+            table: w.table,
+            record: w.record,
+            word: w.word,
+            base: &w.base,
+            new: &w.new,
+        })
+        .collect();
+    diff_hash(&CanonicalPlan {
+        profile,
+        table: snap.table,
+        record_size: snap.record_size,
+        writes,
+    })
+}
+
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod resolve_tests {
     use super::*;
     use kxprov_api::TokenId;
@@ -279,6 +318,7 @@ mod resolve_tests {
                 record_size: 32,
                 writes: vec![],
                 diff: vec![],
+                applied_at_ms: None,
             };
             std::fs::write(
                 dir.path().join(format!("{id}.json")),
@@ -291,24 +331,4 @@ mod resolve_tests {
             Err(PlanError::AmbiguousPrefix)
         ));
     }
-}
-
-pub fn compute_diff_hash(profile: Profile, snap: &PlanSnapshot) -> DiffHash {
-    let writes: Vec<CanonicalWrite<'_>> = snap
-        .writes
-        .iter()
-        .map(|w| CanonicalWrite {
-            table: w.table,
-            record: w.record,
-            word: w.word,
-            base: &w.base,
-            new: &w.new,
-        })
-        .collect();
-    diff_hash(&CanonicalPlan {
-        profile,
-        table: snap.table,
-        record_size: snap.record_size,
-        writes,
-    })
 }

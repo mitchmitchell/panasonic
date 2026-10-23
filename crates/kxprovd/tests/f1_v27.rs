@@ -1,21 +1,14 @@
 #![allow(clippy::unwrap_used)]
 
+mod support;
+
 use kxprov_api::{
-    ApiClient, FieldKindWire, OperationalMode, Profile, RequestAuth, RequestBody, ResponseResult,
-    SetModeParams, TokenId,
+    ApiClient, FieldKindWire, OperationalMode, Profile, RequestBody, ResponseResult, SetModeParams,
 };
 use kxprovd::audit::AuditKind;
 use kxprovd::mode::{ModeFileBody, ModeStore, ProfileFileBody};
 use kxprovd::sim_mark::SimMarkStore;
-use kxprovd::Daemon;
-use nix::unistd::getuid;
 use std::time::Duration;
-
-fn gateway_auth(id: &str) -> RequestAuth {
-    RequestAuth {
-        token_id: TokenId(id.into()),
-    }
-}
 
 fn write_mode(dir: &std::path::Path, mode: OperationalMode) {
     std::fs::write(
@@ -36,8 +29,8 @@ fn write_profile(dir: &std::path::Path, profile: Profile) {
 #[tokio::test]
 async fn mode_missing_fail_closed_with_audit() {
     let tmp = tempfile::tempdir().unwrap();
-    let uid = getuid().as_raw();
-    let (_d, sock) = Daemon::sim_for_tests(tmp.path(), uid);
+    let uid = nix::unistd::getuid().as_raw();
+    let (_d, sock) = support::init_test_daemon(&tmp, uid, Profile::Sim);
     tokio::time::sleep(Duration::from_millis(50)).await;
     let mut c = ApiClient::connect(&sock).await.unwrap();
     let ResponseResult::Status(st) = c.call(RequestBody::Status).await.unwrap() else {
@@ -54,8 +47,8 @@ async fn mode_missing_fail_closed_with_audit() {
 #[tokio::test]
 async fn mode_set_via_root_socket_increments_counter() {
     let tmp = tempfile::tempdir().unwrap();
-    let uid = getuid().as_raw();
-    let (_d, sock) = Daemon::sim_for_tests(tmp.path(), uid);
+    let uid = nix::unistd::getuid().as_raw();
+    let (_d, sock) = support::init_test_daemon(&tmp, uid, Profile::Sim);
     tokio::time::sleep(Duration::from_millis(50)).await;
     let mut admin = ApiClient::connect(&sock).await.unwrap();
     let ResponseResult::SetMode(r) = admin
@@ -93,8 +86,8 @@ async fn sim_profile_skips_approval() {
     let tmp = tempfile::tempdir().unwrap();
     write_mode(tmp.path(), OperationalMode::Production);
     write_profile(tmp.path(), Profile::Sim);
-    let uid = getuid().as_raw();
-    let (_d, sock) = Daemon::sim_for_tests(tmp.path(), uid);
+    let uid = nix::unistd::getuid().as_raw();
+    let (_d, sock) = support::init_test_daemon(&tmp, uid, Profile::Sim);
     tokio::time::sleep(Duration::from_millis(50)).await;
     let mut gw = ApiClient::connect(&sock).await.unwrap();
     let ResponseResult::PlanChange(plan) = gw
@@ -106,7 +99,7 @@ async fn sim_profile_skips_approval() {
                     value: "Z".into(),
                 },
             },
-            Some(gateway_auth("writer")),
+            Some(support::bearer_auth(support::WRITER_SECRET)),
         )
         .await
         .unwrap()
@@ -114,7 +107,10 @@ async fn sim_profile_skips_approval() {
         panic!("plan");
     };
     let ResponseResult::BackupNow(_) = gw
-        .call_auth(RequestBody::BackupNow, Some(gateway_auth("writer")))
+        .call_auth(
+            RequestBody::BackupNow,
+            Some(support::bearer_auth(support::WRITER_SECRET)),
+        )
         .await
         .unwrap()
     else {
@@ -128,7 +124,7 @@ async fn sim_profile_skips_approval() {
                     diff_hash: plan.diff_hash.clone(),
                 },
             },
-            Some(gateway_auth("writer")),
+            Some(support::bearer_auth(support::WRITER_SECRET)),
         )
         .await
         .unwrap()
@@ -142,8 +138,8 @@ async fn sim_profile_skips_approval() {
 async fn submit_approval_accepts_eight_hex_prefix() {
     let tmp = tempfile::tempdir().unwrap();
     write_mode(tmp.path(), OperationalMode::Production);
-    let uid = getuid().as_raw();
-    let (_d, sock) = Daemon::sim_for_tests(tmp.path(), uid);
+    let uid = nix::unistd::getuid().as_raw();
+    let (_d, sock) = support::init_test_daemon(&tmp, uid, Profile::Sim);
     tokio::time::sleep(Duration::from_millis(50)).await;
     let mut gw = ApiClient::connect(&sock).await.unwrap();
     let ResponseResult::PlanChange(plan) = gw
@@ -155,7 +151,7 @@ async fn submit_approval_accepts_eight_hex_prefix() {
                     value: "P".into(),
                 },
             },
-            Some(gateway_auth("writer")),
+            Some(support::bearer_auth(support::WRITER_SECRET)),
         )
         .await
         .unwrap()
@@ -173,7 +169,7 @@ async fn submit_approval_accepts_eight_hex_prefix() {
                     profile: Profile::Sim,
                 },
             },
-            Some(gateway_auth("approver")),
+            Some(support::bearer_auth(support::APPROVER_SECRET)),
         )
         .await
         .unwrap()
