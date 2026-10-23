@@ -4,7 +4,7 @@
 
 use kxtd1232::error::{FrameError, NotAllowed};
 use kxtd1232::frame::{
-    checksum, classify, decode, encode, Access, Cmd, Encoder, ReplyKind, MAX_READ_WORDS,
+    checksum, classify, decode, Access, Cmd, Encoder, ReplyKind, MAX_READ_WORDS,
 };
 use kxtd1232::Error;
 
@@ -110,7 +110,7 @@ fn test_read_word_limit_fits_one_frame() {
         Err(Error::Frame(FrameError::BadWordCount(0)))
     );
     // A full data reply for 126 words fits in one LEN byte.
-    assert!(encode(Cmd::Read, &[0u8; 1 + 252]).is_ok());
+    assert!(Encoder::new(Access::ReadOnly).read(0x24, 0, 0, 126).is_ok());
 }
 
 #[test]

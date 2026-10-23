@@ -11,7 +11,7 @@ fn test_happy_path() {
     let mut l = Login::new("1234").unwrap();
     assert_eq!(l.feed(&[0x13, XON]), b"\r\n");
     assert_eq!(
-        l.feed(b"Welcome To KX-TD1232  Ver 2.0 Panasonic CO.,LTD.\r\nEnter Password\r\n"),
+        l.feed(b"<PBX SIGN-ON BANNER>\r\nEnter Password\r\n"),
         b"1234\r"
     );
     assert_eq!(l.feed(b"EIA Mode Start\r\n"), b"ECS OF\r\n");
@@ -78,4 +78,27 @@ fn test_login_line_length_capped() {
         l.state(),
         LoginState::Failed(LoginFailure::LineTooLong { .. })
     ));
+}
+
+#[test]
+fn test_total_line_cap_after_and_before_xon() {
+    use kxtd1232::session::MAX_LINES;
+    let mut l = Login::new("1234").unwrap();
+    let mut v = vec![0x11];
+    for _ in 0..=MAX_LINES {
+        v.extend(b"x\r\n");
+    }
+    l.feed(&v);
+    assert_eq!(
+        l.state(),
+        &LoginState::Failed(LoginFailure::TooManyLines { max: MAX_LINES })
+    );
+    let mut l = Login::new("1234").unwrap();
+    for _ in 0..=MAX_LINES {
+        l.feed(b"noise\r\n");
+    }
+    assert_eq!(
+        l.state(),
+        &LoginState::Failed(LoginFailure::TooManyLines { max: MAX_LINES })
+    );
 }

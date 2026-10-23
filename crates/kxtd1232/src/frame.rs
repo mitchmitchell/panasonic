@@ -48,14 +48,37 @@ pub fn checksum(data: &[u8]) -> u8 {
     data.iter().fold(0u8, |a, b| a.wrapping_add(*b))
 }
 
-/// Encode a frame for `cmd`. Only [`Cmd`] values can be encoded.
-pub fn encode(cmd: Cmd, body: &[u8]) -> Result<Vec<u8>, FrameError> {
+/// Encode a frame for `cmd`. Crate-private: the only public way to build a request is
+/// [`Encoder`], which applies the read/write guards. Neither this nor a raw-byte variant
+/// is reachable from outside the crate:
+///
+/// ```compile_fail
+/// let _ = kxtd1232::frame::encode(kxtd1232::frame::Cmd::Write, &[0x25, 0, 0, 0, 0, 0, 0, 0]);
+/// ```
+///
+/// ```compile_fail
+/// let _ = kxtd1232::frame::encode_raw(0x10, &[]);
+/// ```
+///
+/// ```compile_fail
+/// // No raw-byte constructor for Cmd either.
+/// let _ = kxtd1232::frame::Cmd::from(0x0Au8);
+/// ```
+///
+/// The guarded path refuses a table outside the allow-list:
+///
+/// ```
+/// use kxtd1232::frame::{Access, Encoder};
+/// let e = Encoder::new(Access::ReadWrite);
+/// assert!(e.write(0x10, 0, 0, &[0, 0]).is_err());
+/// assert!(Encoder::new(Access::ReadOnly).write(0x25, 0, 0, &[0, 0]).is_err());
+/// ```
+pub(crate) fn encode(cmd: Cmd, body: &[u8]) -> Result<Vec<u8>, FrameError> {
     encode_raw(cmd.byte(), body)
 }
 
-/// Encode with a raw command byte. Used for replies (the simulator) only; requests go
-/// through [`Encoder`], which takes a [`Cmd`].
-pub fn encode_raw(cmd: u8, body: &[u8]) -> Result<Vec<u8>, FrameError> {
+/// Encode with a raw command byte (crate-private; see [`encode`]).
+fn encode_raw(cmd: u8, body: &[u8]) -> Result<Vec<u8>, FrameError> {
     let len = 2 + body.len();
     if len > 0xFF {
         return Err(FrameError::TooLong(len));

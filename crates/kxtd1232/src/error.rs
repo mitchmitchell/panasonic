@@ -138,6 +138,10 @@ pub enum LoginFailure {
     LineTooLong { max: usize },
     /// Password empty or contains CR/LF.
     InvalidPassword,
+    /// More text lines than the cap before reaching binary mode.
+    TooManyLines { max: usize },
+    /// Login did not reach binary mode within the overall time limit.
+    TimedOut { ms: u64 },
 }
 
 impl fmt::Display for LoginFailure {
@@ -148,6 +152,8 @@ impl fmt::Display for LoginFailure {
             Self::PasswordRejected => write!(f, "password rejected"),
             Self::LineTooLong { max } => write!(f, "login line longer than {max} bytes"),
             Self::InvalidPassword => write!(f, "invalid password"),
+            Self::TooManyLines { max } => write!(f, "more than {max} login lines"),
+            Self::TimedOut { ms } => write!(f, "login not finished within {ms} ms"),
         }
     }
 }
@@ -177,6 +183,10 @@ pub enum UnackedReason {
     Nak(u8),
     /// A well-formed reply that is not an ack.
     NotAnAck,
+    /// Another frame followed the ack within the quiet window: the ack may be stale.
+    ExtraFrame,
+    /// The link dropped while waiting for the ack.
+    LinkDown(String),
 }
 
 impl fmt::Display for UnackedReason {
@@ -188,6 +198,8 @@ impl fmt::Display for UnackedReason {
             Self::MismatchedReply { got } => write!(f, "reply for command {got:#04x}"),
             Self::Nak(c) => write!(f, "NAK code {c:#04x}"),
             Self::NotAnAck => write!(f, "reply is not an ack"),
+            Self::ExtraFrame => write!(f, "extra frame after the ack (possibly stale)"),
+            Self::LinkDown(s) => write!(f, "link down ({s})"),
         }
     }
 }
@@ -201,6 +213,8 @@ pub enum Error {
     Login(LoginFailure),
     /// The transport reported the link is down.
     LinkDown(String),
+    /// The serial session was lost (link drop); log in again before reads, writes, or verify.
+    SessionLost,
     /// No reply within the timeout.
     Timeout,
     /// A busy run outlasted the bound: a link failure.
@@ -223,6 +237,11 @@ pub enum Error {
     },
     /// A well-formed reply of the wrong kind or size.
     UnexpectedReply(String),
+    /// The pre-send drain failed (line never quiet, or link down); nothing was sent.
+    PreSend(Box<Error>),
+    /// Another frame arrived within the quiet window after a reply, so the reply may be
+    /// stale. The stream was resynced; the data is discarded.
+    ExtraFrame,
     /// A write was not positively acked; verify by re-reading, never resend.
     Unacked(UnackedWrite),
     /// A write was attempted while an earlier one still awaits verify or rollback.
@@ -245,6 +264,7 @@ impl fmt::Display for Error {
             Self::Field(e) => write!(f, "invalid value: {e}"),
             Self::Login(e) => write!(f, "login failed: {e}"),
             Self::LinkDown(s) => write!(f, "link down: {s}"),
+            Self::SessionLost => write!(f, "session lost: login required"),
             Self::Timeout => write!(f, "timeout waiting for reply"),
             Self::BusyTimeout => write!(f, "busy run longer than the bound"),
             Self::Garbled(e) => write!(f, "bad reply: {e}"),
@@ -254,6 +274,8 @@ impl fmt::Display for Error {
             Self::Nak { cmd, code } => write!(f, "NAK {code:#04x} for command {cmd:#04x}"),
             Self::Refused { cmd } => write!(f, "refused by PBX (command {cmd:#04x})"),
             Self::UnexpectedReply(s) => write!(f, "unexpected reply: {s}"),
+            Self::PreSend(e) => write!(f, "not sent: line not ready ({e})"),
+            Self::ExtraFrame => write!(f, "extra frame after reply (possibly stale); discarded"),
             Self::Unacked(u) => write!(
                 f,
                 "write to table {:#04x} record {} not acked: {}",

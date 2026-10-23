@@ -10,6 +10,8 @@ pub const XOFF: u8 = 0x13;
 pub const XON: u8 = 0x11;
 /// Longest text line accepted during login before failing closed.
 pub const MAX_LINE: usize = 256;
+/// Most text lines accepted during login (the real flow has under ten).
+pub const MAX_LINES: usize = 32;
 
 /// Login states.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,6 +36,7 @@ pub struct Login {
     password: Vec<u8>,
     state: LoginState,
     buf: Vec<u8>,
+    lines: usize,
 }
 
 impl fmt::Debug for Login {
@@ -51,6 +54,7 @@ impl Login {
             password: password.as_bytes().to_vec(),
             state: LoginState::WaitXon,
             buf: Vec::new(),
+            lines: 0,
         })
     }
 
@@ -63,7 +67,15 @@ impl Login {
         let mut out = Vec::new();
         if self.state == LoginState::WaitXon {
             match data.iter().position(|&b| b == XON) {
-                None => return out,
+                None => {
+                    // Text before XON still counts against the line cap.
+                    self.lines += data.iter().filter(|&&b| b == b'\n').count();
+                    if self.lines > MAX_LINES {
+                        self.state =
+                            LoginState::Failed(LoginFailure::TooManyLines { max: MAX_LINES });
+                    }
+                    return out;
+                }
                 Some(i) => {
                     self.state = LoginState::WaitPrompt;
                     out.extend_from_slice(b"\r\n");
@@ -83,6 +95,11 @@ impl Login {
                 break;
             };
             let line: Vec<u8> = self.buf.drain(..=nl).collect();
+            self.lines += 1;
+            if self.lines > MAX_LINES {
+                self.state = LoginState::Failed(LoginFailure::TooManyLines { max: MAX_LINES });
+                break;
+            }
             if line.len() > MAX_LINE + 1 {
                 self.state = LoginState::Failed(LoginFailure::LineTooLong { max: MAX_LINE });
                 break;
