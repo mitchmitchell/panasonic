@@ -292,7 +292,7 @@ async fn sim_trigger_access(
     if state.peer_policy.is_admin(cred) {
         return Ok(());
     }
-    require_access(state, role, auth, Scope::Write).map(|_| ())
+    require_access(state, cred, role, auth, Scope::Write).map(|_| ())
 }
 
 fn verify_bearer(

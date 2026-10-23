@@ -74,7 +74,7 @@ fn p4_r1_deleted_token_id_is_revoked() {
 fn p4_r2_corrupt_mode_counter_fails_closed() {
     let tmp = tempfile::tempdir().unwrap();
     std::fs::write(tmp.path().join("mode.counter"), "not-a-number\n").unwrap();
-    let store = ModeStore::new(tmp.path(), tmp.path(), Profile::Sim);
+    let store = ModeStore::new(tmp.path(), Profile::Sim);
     assert_eq!(store.load_profile(), Profile::Prod);
     let eff = store.effective(Profile::Sim);
     assert_eq!(eff.operational, kxprov_api::OperationalMode::Production);
@@ -83,7 +83,7 @@ fn p4_r2_corrupt_mode_counter_fails_closed() {
 #[test]
 fn p4_r2_missing_mode_counter_is_first_boot_epoch_zero() {
     let tmp = tempfile::tempdir().unwrap();
-    let store = ModeStore::new(tmp.path(), tmp.path(), Profile::Test);
+    let store = ModeStore::new(tmp.path(), Profile::Test);
     assert_eq!(store.load_profile(), Profile::Test);
 }
 
@@ -91,7 +91,7 @@ fn p4_r2_missing_mode_counter_is_first_boot_epoch_zero() {
 fn p4_r3_missing_profile_after_epoch_fails_closed_to_prod() {
     let tmp = tempfile::tempdir().unwrap();
     std::fs::write(tmp.path().join("mode.counter"), "2\n").unwrap();
-    let store = ModeStore::new(tmp.path(), tmp.path(), Profile::Sim);
+    let store = ModeStore::new(tmp.path(), Profile::Sim);
     assert_eq!(store.load_profile(), Profile::Prod);
 }
 
