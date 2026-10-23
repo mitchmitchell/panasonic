@@ -16,6 +16,11 @@ pub const ETC_CONFIG: &str = DAEMON_ETC_CONFIG;
 
 pub use kxprov_api::{profile_epoch_counter_path, EPOCH_DIR_NAME};
 
+/// Profile-scoped tree under the provision root (`{root}/sim`, etc.).
+pub fn profile_data_dir(provision_root: impl AsRef<Path>, profile: Profile) -> PathBuf {
+    resolve_profile_data_dir(provision_root.as_ref(), profile)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TransportKind {
     Sim,
@@ -26,6 +31,7 @@ pub enum TransportKind {
 pub struct Config {
     pub profile: Profile,
     pub transport: TransportKind,
+    pub provision_root: PathBuf,
     pub data_dir: PathBuf,
     pub socket_path: PathBuf,
     pub password: String,
@@ -44,8 +50,10 @@ pub struct Config {
 
 #[derive(Debug, Deserialize)]
 struct EtcConfigFile {
-    #[serde(default = "default_data_dir")]
-    data_dir: PathBuf,
+    #[serde(default)]
+    data_dir: Option<PathBuf>,
+    #[serde(default = "default_provision_root")]
+    provision_root: PathBuf,
     #[serde(default = "default_socket")]
     socket_path: PathBuf,
     #[serde(default = "default_tokens_path")]
@@ -81,12 +89,12 @@ enum TransportKindWire {
     Serial,
 }
 
-fn default_socket() -> PathBuf {
-    PathBuf::from(DAEMON_SOCKET)
+fn default_provision_root() -> PathBuf {
+    PathBuf::from(DATA_DIR)
 }
 
-fn default_data_dir() -> PathBuf {
-    PathBuf::from(DATA_DIR)
+fn default_socket() -> PathBuf {
+    PathBuf::from(DAEMON_SOCKET)
 }
 
 fn default_tokens_path() -> PathBuf {
@@ -96,31 +104,34 @@ fn default_tokens_path() -> PathBuf {
 /// Production path defaults (serde defaults and package layout).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProductionPathDefaults {
-    pub socket_path: PathBuf,
+    pub provision_root: PathBuf,
     pub data_dir: PathBuf,
+    pub socket_path: PathBuf,
     pub tokens_path: PathBuf,
     pub goliath_target: PathBuf,
 }
 
 pub fn production_path_defaults() -> ProductionPathDefaults {
     let profile = Profile::Sim;
+    let provision_root = default_provision_root();
     ProductionPathDefaults {
         socket_path: default_socket(),
-        data_dir: default_data_dir(),
+        data_dir: profile_data_dir(&provision_root, profile),
+        provision_root,
         tokens_path: default_tokens_path(),
         goliath_target: PathBuf::from(goliath_dir(profile)),
     }
 }
 
 impl Config {
-    /// Profile-scoped state directory (plans, backups, mode.json, …).
+    /// Active profile state directory (plans, backups, mode.json, …).
     pub fn profile_data_dir(&self) -> PathBuf {
-        resolve_profile_data_dir(&self.data_dir, self.profile)
+        self.data_dir.clone()
     }
 
     /// Simulator pass marker path (same resolution as `kxprov sim-mark`).
     pub fn sim_passed_path(&self) -> PathBuf {
-        sim_passed_path(&self.data_dir)
+        sim_passed_path(&self.provision_root)
     }
 }
 
@@ -155,6 +166,7 @@ impl std::fmt::Debug for Config {
         f.debug_struct("Config")
             .field("profile", &self.profile)
             .field("transport", &self.transport)
+            .field("provision_root", &self.provision_root)
             .field("data_dir", &self.data_dir)
             .field("timing", &self.timing)
             .field("tokens_path", &self.tokens_path)
@@ -186,18 +198,24 @@ impl Config {
         if let Some(guard) = file.reply_guard_ms {
             timing.reply_guard_ms = guard;
         }
+        let provision_root = file
+            .data_dir
+            .clone()
+            .unwrap_or_else(|| file.provision_root.clone());
+        let data_dir = profile_data_dir(&provision_root, file.profile);
+        let goliath_target = file
+            .goliath_target
+            .unwrap_or_else(|| data_dir.join("goliath"));
         let sim_pbx = if transport == TransportKind::Sim {
             Some(Arc::new(Mutex::new(SimPbx::default())))
         } else {
             None
         };
-        let goliath_target = file.goliath_target.unwrap_or_else(|| {
-            resolve_profile_data_dir(&file.data_dir, file.profile).join("goliath")
-        });
         let cfg = Self {
             profile: file.profile,
             transport,
-            data_dir: file.data_dir,
+            provision_root,
+            data_dir,
             socket_path: file.socket_path,
             password: password.trim().to_string(),
             gates: file.gates,
@@ -218,15 +236,18 @@ impl Config {
 
     #[cfg(feature = "test-util")]
     pub fn sim_test(data_dir: PathBuf, socket_path: PathBuf, peer_uid: u32) -> Self {
+        let provision_root = data_dir.clone();
+        let profile_dir = profile_data_dir(&provision_root, Profile::Sim);
         Self {
             profile: Profile::Sim,
             transport: TransportKind::Sim,
-            data_dir: data_dir.clone(),
+            provision_root,
+            data_dir: profile_dir.clone(),
             socket_path,
             password: kxtd1232_sim::PLACEHOLDER_PASSWORD.to_string(),
             gates: GateConfig::default(),
             peer_policy: PeerPolicy::new(peer_uid.wrapping_add(1), peer_uid),
-            goliath_target: data_dir.join("goliath"),
+            goliath_target: profile_dir.join("goliath"),
             serial_device: PathBuf::from("/dev/kxpbx"),
             gateway_uid: peer_uid.wrapping_add(1),
             admin_uid: peer_uid,
@@ -245,15 +266,18 @@ impl Config {
         gateway_uid: u32,
     ) -> Self {
         let admin_uid = gateway_uid.wrapping_add(1);
+        let provision_root = data_dir.clone();
+        let profile_dir = profile_data_dir(&provision_root, Profile::Sim);
         Self {
             profile: Profile::Sim,
             transport: TransportKind::Sim,
-            data_dir: data_dir.clone(),
+            provision_root,
+            data_dir: profile_dir.clone(),
             socket_path,
             password: kxtd1232_sim::PLACEHOLDER_PASSWORD.to_string(),
             gates: GateConfig::default(),
             peer_policy: PeerPolicy::new(gateway_uid, admin_uid),
-            goliath_target: data_dir.join("goliath"),
+            goliath_target: profile_dir.join("goliath"),
             serial_device: PathBuf::from("/dev/kxpbx"),
             gateway_uid,
             admin_uid,

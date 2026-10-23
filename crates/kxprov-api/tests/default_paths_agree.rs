@@ -14,7 +14,11 @@ use kxprovd::sim_mark::SimMarkStore;
 fn daemon_defaults_match_shared_paths() {
     let d = production_path_defaults();
     assert_eq!(d.socket_path, PathBuf::from(DAEMON_SOCKET));
-    assert_eq!(d.data_dir, PathBuf::from(DATA_DIR));
+    assert_eq!(d.provision_root, PathBuf::from(DATA_DIR));
+    assert_eq!(
+        d.data_dir,
+        PathBuf::from(profile_data_dir(kxprov_api::Profile::Sim))
+    );
     assert_eq!(d.tokens_path, PathBuf::from(TOKENS_JSON));
     assert_eq!(
         d.goliath_target,

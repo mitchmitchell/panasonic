@@ -10,10 +10,6 @@ pub enum JobPrincipal {
 }
 
 impl JobPrincipal {
-    pub fn is_synthetic(&self) -> bool {
-        !matches!(self, Self::Token(_))
-    }
-
     /// Per-token / per-local-uid rate limit bucket key (`local:{uid}` for read-only peers).
     pub fn rate_limit_key(&self) -> Option<String> {
         match self {

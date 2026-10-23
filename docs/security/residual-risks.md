@@ -18,5 +18,6 @@ anchoring (e.g. off-box epoch, TPM, or installer-held secret).
 ## Token store transient grace
 
 While `tokens.json` is missing or unreadable JSON, the daemon may serve the last
-successfully loaded snapshot for about two seconds, then rejects bearer-authenticated
-access until a valid reload succeeds. Synthetic Unix principals are unaffected.
+successfully loaded snapshot for at most about two seconds **total** (including up
+to three read retries in that window), then rejects bearer-authenticated access until
+a valid reload succeeds. Synthetic Unix principals are unaffected.

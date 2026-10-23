@@ -9,6 +9,7 @@ pub mod audit;
 pub mod backup;
 pub mod config;
 pub mod dbh;
+pub mod epoch_store;
 pub mod gates;
 pub mod goliath;
 pub mod job_principal;
@@ -71,24 +72,26 @@ impl Daemon {
 
     pub fn start(config: Config) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         config.validate()?;
-        let profile_dir = config.profile_data_dir();
         let process_lock = lock::ProcessLock::acquire(&config.data_dir)?;
         std::fs::create_dir_all(&config.data_dir)?;
-        std::fs::create_dir_all(&profile_dir)?;
-        std::fs::create_dir_all(profile_dir.join("plans"))?;
-        std::fs::create_dir_all(profile_dir.join("backups"))?;
+        std::fs::create_dir_all(config.data_dir.join("plans"))?;
+        std::fs::create_dir_all(config.data_dir.join("backups"))?;
 
-        let journal = Journal::new(&profile_dir);
-        journal.replay(profile_dir.join("backups").as_path())?;
+        let journal = Journal::new(&config.data_dir);
+        journal.replay(config.data_dir.join("backups").as_path())?;
 
-        let plans = PlanStore::new(profile_dir.join("plans"))?;
-        let backups = BackupStore::new(profile_dir.join("backups"))?;
+        let plans = PlanStore::new(config.data_dir.join("plans"))?;
+        let backups = BackupStore::new(config.data_dir.join("backups"))?;
         let goliath = GoliathQueue::new(config.goliath_target.clone())?;
-        let approvals = ApprovalBook::new(&profile_dir);
-        let locked = LockedStore::new(&profile_dir);
-        let transition = transition::TransitionBlockStore::new(&profile_dir);
-        let mode = mode::ModeStore::new(&config.data_dir, config.profile);
-        let _ = sim_mark::SimMarkStore::new(&config.data_dir).clear_if_stale();
+        let approvals = ApprovalBook::new(&config.data_dir);
+        let locked = LockedStore::new(&config.data_dir);
+        let transition = transition::TransitionBlockStore::new(&config.data_dir);
+        let mode = mode::ModeStore::new_with_epoch_root(
+            &config.data_dir,
+            &config.provision_root,
+            config.profile,
+        );
+        let _ = sim_mark::SimMarkStore::new(&config.provision_root).clear_if_stale();
         let profile = Arc::new(RwLock::new(mode.load_profile()));
 
         let (job_tx, job_rx) = mpsc::channel(32);
@@ -108,11 +111,11 @@ impl Daemon {
         let worker_ctx = Arc::new(worker::WorkerCtx {
             config: config.clone(),
             profile: Arc::clone(&profile),
-            plans: PlanStore::new(profile_dir.join("plans"))?,
-            backups: BackupStore::new(profile_dir.join("backups"))?,
-            journal: Journal::new(&profile_dir),
+            plans: PlanStore::new(config.data_dir.join("plans"))?,
+            backups: BackupStore::new(config.data_dir.join("backups"))?,
+            journal: Journal::new(&config.data_dir),
             goliath: goliath.clone(),
-            locked: LockedStore::new(&profile_dir),
+            locked: LockedStore::new(&config.data_dir),
         });
 
         let q = Arc::clone(&queue);
@@ -193,6 +196,8 @@ impl Daemon {
         let socket = data_dir.join("kxprovd.sock");
         let mut cfg = Config::sim_test(data_dir, socket.clone(), peer_uid);
         cfg.profile = profile;
+        cfg.data_dir = config::profile_data_dir(&cfg.provision_root, profile);
+        cfg.goliath_target = cfg.data_dir.join("goliath");
         cfg.transport = TransportKind::Serial;
         cfg.sim_pbx = None;
         let daemon = Self::start_test(cfg).expect("daemon starts");
@@ -210,6 +215,8 @@ impl Daemon {
         let socket = data_dir.join("kxprovd.sock");
         let mut cfg = Config::sim_test_gateway_caller(data_dir, socket.clone(), gateway_uid);
         cfg.profile = profile;
+        cfg.data_dir = config::profile_data_dir(&cfg.provision_root, profile);
+        cfg.goliath_target = cfg.data_dir.join("goliath");
         if profile == Profile::Prod {
             cfg.gates.live_writes_approved = true;
         }
@@ -246,6 +253,8 @@ impl Daemon {
         let socket = data_dir.join("kxprovd.sock");
         let mut cfg = Config::sim_test(data_dir, socket.clone(), peer_uid);
         cfg.profile = profile;
+        cfg.data_dir = config::profile_data_dir(&cfg.provision_root, profile);
+        cfg.goliath_target = cfg.data_dir.join("goliath");
         cfg.gateway_uid = gateway_uid;
         cfg.admin_uid = admin_uid;
         cfg.peer_policy = peer::PeerPolicy::new(gateway_uid, admin_uid);
@@ -259,24 +268,26 @@ impl Daemon {
     #[cfg(feature = "test-util")]
     fn start_test(config: Config) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         config.validate()?;
-        let profile_dir = config.profile_data_dir();
         let process_lock = lock::ProcessLock::acquire(&config.data_dir)?;
         std::fs::create_dir_all(&config.data_dir)?;
-        std::fs::create_dir_all(&profile_dir)?;
-        std::fs::create_dir_all(profile_dir.join("plans"))?;
-        std::fs::create_dir_all(profile_dir.join("backups"))?;
+        std::fs::create_dir_all(config.data_dir.join("plans"))?;
+        std::fs::create_dir_all(config.data_dir.join("backups"))?;
 
-        let journal = Journal::new(&profile_dir);
-        journal.replay(profile_dir.join("backups").as_path())?;
+        let journal = Journal::new(&config.data_dir);
+        journal.replay(config.data_dir.join("backups").as_path())?;
 
-        let plans = PlanStore::new(profile_dir.join("plans"))?;
-        let backups = BackupStore::new(profile_dir.join("backups"))?;
+        let plans = PlanStore::new(config.data_dir.join("plans"))?;
+        let backups = BackupStore::new(config.data_dir.join("backups"))?;
         let goliath = GoliathQueue::new(config.goliath_target.clone())?;
-        let approvals = ApprovalBook::new(&profile_dir);
-        let locked = LockedStore::new(&profile_dir);
-        let transition = transition::TransitionBlockStore::new(&profile_dir);
-        let mode = mode::ModeStore::new(&config.data_dir, config.profile);
-        let _ = sim_mark::SimMarkStore::new(&config.data_dir).clear_if_stale();
+        let approvals = ApprovalBook::new(&config.data_dir);
+        let locked = LockedStore::new(&config.data_dir);
+        let transition = transition::TransitionBlockStore::new(&config.data_dir);
+        let mode = mode::ModeStore::new_with_epoch_root(
+            &config.data_dir,
+            &config.provision_root,
+            config.profile,
+        );
+        let _ = sim_mark::SimMarkStore::new(&config.provision_root).clear_if_stale();
         let profile = Arc::new(RwLock::new(mode.load_profile()));
 
         let (job_tx, job_rx) = mpsc::channel(32);
@@ -296,11 +307,11 @@ impl Daemon {
         let worker_ctx = Arc::new(worker::WorkerCtx {
             config: config.clone(),
             profile: Arc::clone(&profile),
-            plans: PlanStore::new(profile_dir.join("plans"))?,
-            backups: BackupStore::new(profile_dir.join("backups"))?,
-            journal: Journal::new(&profile_dir),
+            plans: PlanStore::new(config.data_dir.join("plans"))?,
+            backups: BackupStore::new(config.data_dir.join("backups"))?,
+            journal: Journal::new(&config.data_dir),
             goliath: goliath.clone(),
-            locked: LockedStore::new(&profile_dir),
+            locked: LockedStore::new(&config.data_dir),
         });
 
         let q = Arc::clone(&queue);

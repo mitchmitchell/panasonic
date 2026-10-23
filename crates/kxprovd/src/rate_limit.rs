@@ -28,7 +28,8 @@ impl TokenRateState {
         while self.start_times_ms.front().is_some_and(|t| *t < minute_ago) {
             self.start_times_ms.pop_front();
         }
-        if self.start_times_ms.len() as u32 >= JOBS_PER_MINUTE {
+        let starts = u32::try_from(self.start_times_ms.len()).unwrap_or(u32::MAX);
+        if starts >= JOBS_PER_MINUTE {
             return Err(RateLimitError::JobsPerMinute);
         }
         self.active += 1;
@@ -71,12 +72,8 @@ mod tests {
             st.try_reserve(base + u64::from(i)).expect("under cap");
             st.complete();
         }
-        st.active = 0;
-        for i in 0..JOBS_PER_MINUTE {
-            st.start_times_ms.push_back(base + u64::from(i));
-        }
         assert_eq!(
-            st.try_reserve(base + 60_000),
+            st.try_reserve(base + JOBS_PER_MINUTE as u64),
             Err(RateLimitError::JobsPerMinute)
         );
     }

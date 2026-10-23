@@ -1,8 +1,9 @@
 //! Operational mode + runtime profile (v2.7 F1, unsigned, fail-closed Production).
 
 use crate::audit::{alert_mode_failure, AuditEntry, AuditKind, AuditLog};
+use crate::epoch_store;
 use crate::time::now_ms;
-use kxprov_api::{profile_epoch_counter_path, resolve_profile_data_dir, OperationalMode, Profile};
+use kxprov_api::{resolve_profile_data_dir, OperationalMode, Profile};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
@@ -75,10 +76,6 @@ impl ModeStore {
         }
     }
 
-    fn epoch_counter_path(&self, profile: Profile) -> PathBuf {
-        profile_epoch_counter_path(&self.provision_root, profile)
-    }
-
     pub fn read_stored_mode(&self) -> Option<OperationalMode> {
         let raw = std::fs::read_to_string(&self.mode_path).ok()?;
         serde_json::from_str::<ModeFileBody>(&raw)
@@ -87,12 +84,7 @@ impl ModeStore {
     }
 
     pub fn load_profile(&self) -> Profile {
-        let stored_profile = std::fs::read_to_string(&self.profile_path)
-            .ok()
-            .and_then(|raw| serde_json::from_str::<ProfileFileBody>(&raw).ok())
-            .map(|b| b.profile);
-        let epoch_profile = stored_profile.unwrap_or(self.boot_profile);
-        let last = match self.last_counter(epoch_profile) {
+        let last = match self.last_counter(self.boot_profile) {
             Ok(n) => n,
             Err(e) => {
                 self.fail_closed(AuditKind::ModeCorrupt, format!("mode.counter: {e}"));
@@ -168,28 +160,19 @@ impl ModeStore {
     }
 
     fn last_counter(&self, profile: Profile) -> Result<u64, ModeError> {
-        let counter_path = self.epoch_counter_path(profile);
-        if !counter_path.exists() {
-            if self.missing_counter_with_stored_epoch() {
-                return Err(ModeError::CounterCorrupt);
+        match epoch_store::read_counter(&self.provision_root, profile).map_err(map_epoch_err)? {
+            None => {
+                if self.missing_counter_with_stored_epoch() {
+                    return Err(ModeError::CounterCorrupt);
+                }
+                Ok(0)
             }
-            return Ok(0);
+            Some(n) => Ok(n),
         }
-        let s = std::fs::read_to_string(&counter_path)?;
-        let trimmed = s.trim();
-        if trimmed.is_empty() {
-            return Err(ModeError::CounterCorrupt);
-        }
-        trimmed.parse().map_err(|_| ModeError::CounterCorrupt)
     }
 
     fn save_counter(&self, profile: Profile, counter: u64) -> Result<(), ModeError> {
-        let counter_path = self.epoch_counter_path(profile);
-        if let Some(parent) = counter_path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        std::fs::write(counter_path, counter.to_string())?;
-        Ok(())
+        epoch_store::write_counter(&self.provision_root, profile, counter).map_err(map_epoch_err)
     }
 
     fn fail_closed(&self, kind: AuditKind, detail: impl Into<String>) -> EffectiveMode {
@@ -221,7 +204,7 @@ impl ModeStore {
                 return self.fail_closed(AuditKind::ModeCorrupt, e.to_string());
             }
         };
-        let last = match self.last_counter(profile) {
+        let last = match self.last_counter(self.boot_profile) {
             Ok(n) => n,
             Err(e) => {
                 return self.fail_closed(AuditKind::ModeCorrupt, format!("mode.counter: {e}"));
@@ -282,10 +265,10 @@ impl ModeStore {
             return Err(ModeError::CounterRollback);
         }
         let body = ModeFileBody { mode, counter };
-        std::fs::write(&self.mode_path, serde_json::to_vec_pretty(&body)?)?;
-        std::fs::write(
+        crate::atomic_write::write(&self.mode_path, &serde_json::to_vec_pretty(&body)?)?;
+        crate::atomic_write::write(
             &self.profile_path,
-            serde_json::to_vec_pretty(&ProfileFileBody { profile, counter })?,
+            &serde_json::to_vec_pretty(&ProfileFileBody { profile, counter })?,
         )?;
         self.save_counter(profile, counter)?;
         let _ = self.audit.append(&AuditEntry {
@@ -304,4 +287,14 @@ impl ModeStore {
 /// G5: approval gate applies to prod profile writes only (v2.11).
 pub fn write_approval_required(profile: Profile, _operational: OperationalMode) -> bool {
     profile == Profile::Prod
+}
+
+fn map_epoch_err(e: epoch_store::EpochError) -> ModeError {
+    match e {
+        epoch_store::EpochError::Io(e) => ModeError::Io(e),
+        epoch_store::EpochError::InsecureDir | epoch_store::EpochError::InsecureCounter => {
+            ModeError::CounterCorrupt
+        }
+        epoch_store::EpochError::Corrupt => ModeError::CounterCorrupt,
+    }
 }
