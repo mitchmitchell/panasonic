@@ -206,7 +206,8 @@ impl TokenStore {
                 reactivated: Vec::new(),
             });
         }
-        if state.enforce_secure_reload {
+        let enforce_secure = state.enforce_secure_reload;
+        if enforce_secure {
             Self::check_secure(&state.path)?;
         }
         let prev_ids: HashSet<String> = state
@@ -243,6 +244,7 @@ impl TokenStore {
             .map(|t| t.id.clone())
             .collect();
         *state = fresh;
+        state.enforce_secure_reload = enforce_secure;
         Ok(TokenRefreshDelta {
             newly_revoked,
             reactivated,
