@@ -13,7 +13,7 @@ X-Forwarded-For: 203.0.113.5
                  ^ client Tailscale observed (trust this single value)
 ```
 
-The gateway’s `client_ip` helper (`kxprov-web`) uses the **first** non-empty hop when that listener flag is set (Serve sets a single hop).
+The gateway’s login rate limiter uses the **last** non-empty hop when the listener trusts XFF **and** the TCP peer is Tailscale Serve on loopback (detected via peer credentials). Direct loopback connections with XFF trust enabled still rate-limit on the socket peer only.
 
 ## Loopback spoofing (non-Serve)
 

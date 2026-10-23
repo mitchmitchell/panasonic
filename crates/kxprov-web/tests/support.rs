@@ -9,7 +9,13 @@ use axum::extract::ConnectInfo;
 use axum::http::Request;
 use axum::Router;
 use kxprov_mock::MockDaemon;
-use kxprov_web::{LoginRateLimiter, PasswordVerifier, WebState};
+use kxprov_web::{LoginRateLimiter, PasswordVerifier, WebConnectInfo, WebState};
+
+pub fn apply_web_connect(req: &mut Request<Body>, peer: SocketAddr, serve_proxy_trusted: bool) {
+    req.extensions_mut().insert(ConnectInfo(peer));
+    req.extensions_mut()
+        .insert(WebConnectInfo::from_parts(peer, serve_proxy_trusted));
+}
 
 pub struct TestVerifier;
 
@@ -82,8 +88,10 @@ pub fn merge_cookie_headers(existing: &str, headers: &axum::http::HeaderMap) -> 
 }
 
 pub fn with_peer(mut req: Request<Body>) -> Request<Body> {
-    req.extensions_mut().insert(ConnectInfo(
+    apply_web_connect(
+        &mut req,
         "127.0.0.1:10001".parse::<SocketAddr>().expect("peer"),
-    ));
+        false,
+    );
     req
 }

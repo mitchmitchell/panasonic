@@ -10,7 +10,10 @@ use kxprov_web::{LoginPrecheck, LoginRateLimiter};
 use tower::ServiceExt;
 
 mod support;
-use support::{cookie_header_from_set_cookies, form_urlencoded, test_web_state, TestVerifier};
+use support::{
+    apply_web_connect, cookie_header_from_set_cookies, form_urlencoded, test_web_state,
+    TestVerifier,
+};
 
 #[tokio::test]
 async fn login_limiter_tracks_account_and_ip_separately() {
@@ -57,7 +60,7 @@ async fn ip_backoff_returns_exact_429_with_retry_after() {
                 .header(header::HOST, "127.0.0.1:8080")
                 .body(Body::empty())
                 .unwrap();
-            req.extensions_mut().insert(ConnectInfo(peer));
+            apply_web_connect(&mut req, peer, false);
             req
         })
         .await
@@ -85,7 +88,7 @@ async fn ip_backoff_returns_exact_429_with_retry_after() {
                 form_urlencoded(csrf)
             )))
             .unwrap();
-        req.extensions_mut().insert(ConnectInfo(peer));
+        apply_web_connect(&mut req, peer, false);
         let resp = app.clone().oneshot(req).await.unwrap();
         if resp.status() == StatusCode::TOO_MANY_REQUESTS {
             assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
@@ -109,8 +112,12 @@ async fn account_soft_delay_capped_at_two_seconds() {
             .record_failure("acct:admin", &format!("ip:other-{i}"))
             .await;
     }
-    let soft = limiter.soft_account_delay("acct:admin").await;
-    assert!(soft <= Duration::from_secs(2));
+    let started = std::time::Instant::now();
+    limiter
+        .enter_account_login("acct:admin", "ip:clean", || async {})
+        .await
+        .expect("clean ip");
+    assert!(started.elapsed() <= Duration::from_millis(2100));
     assert!(matches!(
         limiter.precheck_login("acct:admin", "ip:clean").await,
         LoginPrecheck::Ready

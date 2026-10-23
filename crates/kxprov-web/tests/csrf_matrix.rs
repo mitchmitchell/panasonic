@@ -15,8 +15,8 @@ use kxprov_mock::WEB_ROUTES;
 use kxprov_web::require_web_session;
 use kxprov_web::LoginRateLimiter;
 use support::{
-    cookie_header_from_set_cookies, form_urlencoded, merge_cookie_headers, test_web_state,
-    TestVerifier,
+    apply_web_connect, cookie_header_from_set_cookies, form_urlencoded, merge_cookie_headers,
+    test_web_state, TestVerifier,
 };
 use tower::ServiceExt;
 use tower_sessions::cookie::time::Duration as CookieDuration;
@@ -26,8 +26,7 @@ use tower_sessions::{Expiry, MemoryStore, SessionManagerLayer};
 const PEER: &str = "127.0.0.1:4321";
 
 fn with_peer(mut req: Request<Body>) -> Request<Body> {
-    req.extensions_mut()
-        .insert(ConnectInfo(PEER.parse::<SocketAddr>().unwrap()));
+    apply_web_connect(&mut req, PEER.parse::<SocketAddr>().unwrap(), false);
     req
 }
 
@@ -107,7 +106,7 @@ fn post_form(uri: &str, cookie: Option<&str>, body: &str) -> Request<Body> {
         builder = builder.header(header::COOKIE, c);
     }
     let mut req = builder.body(Body::from(body.to_string())).unwrap();
-    req.extensions_mut().insert(ConnectInfo(peer));
+    apply_web_connect(&mut req, peer, false);
     req
 }
 

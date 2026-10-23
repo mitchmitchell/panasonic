@@ -1,13 +1,11 @@
 mod csrf;
 mod expiry;
 mod fields;
+mod login_client;
 mod login_limit;
 mod session;
 mod static_files;
 mod templates;
-
-use std::sync::Arc;
-use std::time::Duration;
 
 use askama::Template;
 use axum::extract::{ConnectInfo, Extension, Form, Path, State};
@@ -22,10 +20,12 @@ use kxprov_mock::{
 };
 use serde::Deserialize;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use templates::{DashboardTemplate, ReadFieldRow};
 use tower_sessions::Session;
 
-pub use login_limit::{LoginBusy, LoginPrecheck, LoginRateLimiter};
+pub use login_client::{login_rate_ip_key, ServeProxyTrusted, WebConnectInfo};
+pub use login_limit::{LoginGateError, LoginPrecheck, LoginRateLimiter};
 
 /// Set by the gateway per listener: trust `X-Forwarded-For` only on Tailscale Serve fronted binds.
 #[derive(Clone, Copy, Debug, Default)]
@@ -211,29 +211,20 @@ fn caller_from_session(session: &Session) -> CallerIdentity {
     CallerIdentity::Web(WebSessionIdentity { session_key })
 }
 
-/// Client IP for login rate limiting. Trust `X-Forwarded-For` only when the listener sets
-/// [`ClientIpPolicy::trust_x_forwarded_for`] (Tailscale Serve fronted plain HTTP on loopback).
-///
-/// Tailscale Serve **replaces** `X-Forwarded-For` with the client it observed (see
-/// `docs/design/tailscale-x-forwarded-for.md`).
+/// Display / audit client IP (last XFF hop when trusted Serve proxy, else socket peer).
 pub fn client_ip(
     headers: &HeaderMap,
     peer: Option<SocketAddr>,
     trust_x_forwarded_for: bool,
+    serve_proxy_trusted: bool,
 ) -> String {
-    if trust_x_forwarded_for {
-        if let Some(v) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
-            if let Some(client) = v.split(',').map(str::trim).find(|s| !s.is_empty()) {
-                if let Ok(ip) = client.parse::<std::net::IpAddr>() {
-                    return ip.to_string();
-                }
-            }
+    let peer = peer.unwrap_or_else(|| "0.0.0.0:0".parse().unwrap());
+    if trust_x_forwarded_for && serve_proxy_trusted {
+        if let Some(ip) = login_client::x_forwarded_for_last(headers) {
+            return ip.to_string();
         }
     }
-    if let Some(peer) = peer {
-        return peer.ip().to_string();
-    }
-    "unknown".into()
+    peer.ip().to_string()
 }
 
 fn login_rate_limited_response(message: &str, retry_after: std::time::Duration) -> Response {
@@ -282,6 +273,7 @@ async fn login_submit(
     session: Session,
     headers: HeaderMap,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    connect: Option<Extension<WebConnectInfo>>,
     policy: Option<Extension<ClientIpPolicy>>,
     Form(form): Form<LoginForm>,
 ) -> Response {
@@ -292,9 +284,14 @@ async fn login_submit(
         .as_ref()
         .map(|Extension(p)| p.trust_x_forwarded_for)
         .unwrap_or(false);
-    let ip = client_ip(&headers, Some(peer), trust);
+    let WebConnectInfo {
+        remote: peer,
+        serve_proxy_trusted,
+    } = connect
+        .map(|Extension(info)| info)
+        .unwrap_or_else(|| WebConnectInfo::from_parts(peer, false));
+    let ip_key = login_rate_ip_key(&headers, peer, trust, serve_proxy_trusted);
     let acct_key = "acct:admin".to_string();
-    let ip_key = format!("ip:{ip}");
     match state.login_limiter.precheck_login(&acct_key, &ip_key).await {
         LoginPrecheck::IpRateLimited(delay) => {
             return login_rate_limited_response(
@@ -302,44 +299,35 @@ async fn login_submit(
                 delay,
             );
         }
-        LoginPrecheck::AccountInProgress => {
-            return (
-                StatusCode::TOO_MANY_REQUESTS,
-                "Login already in progress. Try again shortly.",
-            )
-                .into_response();
-        }
         LoginPrecheck::Ready => {}
     }
-    let account_soft = state.login_limiter.soft_account_delay(&acct_key).await;
-    if account_soft > Duration::ZERO {
-        tokio::time::sleep(account_soft).await;
-    }
-    let _guard = match state.login_limiter.begin_password_verify(&acct_key) {
-        Ok(g) => g,
-        Err(LoginBusy::AccountInProgress) => {
-            return (
-                StatusCode::TOO_MANY_REQUESTS,
-                "Login already in progress. Try again shortly.",
-            )
-                .into_response();
-        }
-    };
-    if !state.admin.verify(&form.password) {
-        state.login_limiter.record_failure(&acct_key, &ip_key).await;
-        return Redirect::to("/login?error=1").into_response();
-    }
-    state.login_limiter.on_success(&acct_key, &ip_key).await;
-    let _ = session.cycle_id().await;
-    let _ = csrf::rotate_for_session(&session).await;
-    let _ = session.insert(crate::session::SESSION_AUTH_KEY, true).await;
-    let _ = session
-        .insert(
-            crate::session::SESSION_STARTED_MS_KEY,
-            crate::session::now_unix_ms(),
-        )
+    let outcome = state
+        .login_limiter
+        .enter_account_login(&acct_key, &ip_key, || async {
+            if !state.admin.verify(&form.password) {
+                state.login_limiter.record_failure(&acct_key, &ip_key).await;
+                return Redirect::to("/login?error=1").into_response();
+            }
+            state.login_limiter.on_success(&acct_key, &ip_key).await;
+            let _ = session.cycle_id().await;
+            let _ = csrf::rotate_for_session(&session).await;
+            let _ = session.insert(crate::session::SESSION_AUTH_KEY, true).await;
+            let _ = session
+                .insert(
+                    crate::session::SESSION_STARTED_MS_KEY,
+                    crate::session::now_unix_ms(),
+                )
+                .await;
+            Redirect::to("/").into_response()
+        })
         .await;
-    Redirect::to("/").into_response()
+    match outcome {
+        Ok(resp) => resp,
+        Err(LoginGateError::IpRateLimited(delay)) => login_rate_limited_response(
+            "Too many login attempts from this address. Try again later.",
+            delay,
+        ),
+    }
 }
 
 async fn logout(session: Session, headers: HeaderMap, Form(form): Form<LogoutForm>) -> Response {
@@ -514,11 +502,11 @@ mod client_ip_tests {
         let mut headers = HeaderMap::new();
         headers.insert("x-forwarded-for", "203.0.113.5".parse().unwrap());
         let peer = "127.0.0.1:8080".parse().unwrap();
-        assert_eq!(client_ip(&headers, Some(peer), true), "203.0.113.5");
-        assert_eq!(client_ip(&headers, Some(peer), false), "127.0.0.1");
+        assert_eq!(client_ip(&headers, Some(peer), true, true), "203.0.113.5");
+        assert_eq!(client_ip(&headers, Some(peer), false, false), "127.0.0.1");
 
         let peer = "10.0.0.2:443".parse().unwrap();
-        assert_eq!(client_ip(&headers, Some(peer), true), "203.0.113.5");
-        assert_eq!(client_ip(&headers, Some(peer), false), "10.0.0.2");
+        assert_eq!(client_ip(&headers, Some(peer), true, true), "203.0.113.5");
+        assert_eq!(client_ip(&headers, Some(peer), false, false), "10.0.0.2");
     }
 }

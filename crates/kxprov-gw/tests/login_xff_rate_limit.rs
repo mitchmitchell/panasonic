@@ -12,13 +12,17 @@ use kxprov_gw::{production_web_router, HostOriginConfig, RateLimiter};
 use kxprov_web::LoginRateLimiter;
 mod support;
 
-use support::{cookie_header_from_set_cookies, form_urlencoded, test_web_state, TestVerifier};
+use support::{
+    apply_web_connect, cookie_header_from_set_cookies, form_urlencoded, test_web_state,
+    TestVerifier,
+};
 use tower::ServiceExt;
 
 async fn fetch_login_csrf(
     app: &Router,
     peer: std::net::SocketAddr,
     login_uri: &str,
+    serve_proxy_trusted: bool,
 ) -> (String, String) {
     let get = app
         .clone()
@@ -27,7 +31,7 @@ async fn fetch_login_csrf(
                 .uri(login_uri)
                 .body(Body::empty())
                 .unwrap();
-            req.extensions_mut().insert(ConnectInfo(peer));
+            apply_web_connect(&mut req, peer, serve_proxy_trusted);
             req
         })
         .await
@@ -51,8 +55,9 @@ async fn assert_rotating_xff_hits_ip_backoff(
     host: &str,
     origin: &str,
     attempts: usize,
+    serve_proxy_trusted: bool,
 ) {
-    let (cookie, csrf) = fetch_login_csrf(&app, peer, login_uri).await;
+    let (cookie, csrf) = fetch_login_csrf(&app, peer, login_uri, serve_proxy_trusted).await;
     let mut last = StatusCode::OK;
     for i in 0..attempts {
         let mut req = Request::builder()
@@ -71,7 +76,7 @@ async fn assert_rotating_xff_hits_ip_backoff(
                 form_urlencoded(&csrf)
             )))
             .unwrap();
-        req.extensions_mut().insert(ConnectInfo(peer));
+        apply_web_connect(&mut req, peer, serve_proxy_trusted);
         let resp = app.clone().oneshot(req).await.unwrap();
         last = resp.status();
         if last == StatusCode::TOO_MANY_REQUESTS {
@@ -117,8 +122,65 @@ async fn spoofed_xff_on_non_serve_listener_still_rate_limits_peer_ip() {
         "localhost:8080",
         "http://localhost:8080",
         30,
+        false,
     )
     .await;
+}
+
+#[tokio::test]
+async fn loopback_xff_trust_without_serve_proxy_still_limits_socket_peer() {
+    let peer: std::net::SocketAddr = "127.0.0.1:8080".parse().unwrap();
+    let app = login_test_app("localhost:8080", "http://localhost:8080", true);
+    assert_rotating_xff_hits_ip_backoff(
+        app,
+        peer,
+        "http://localhost:8080/login",
+        "localhost:8080",
+        "http://localhost:8080",
+        30,
+        false,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn serve_trusted_proxy_uses_last_xff_hop_not_spoofed_first() {
+    let peer: std::net::SocketAddr = "127.0.0.1:8080".parse().unwrap();
+    let app = login_test_app("localhost:8080", "http://localhost:8080", true);
+    let login_uri = "http://localhost:8080/login";
+    let host = "localhost:8080";
+    let origin = "http://localhost:8080";
+    let (cookie, csrf) = fetch_login_csrf(&app, peer, login_uri, true).await;
+    let client_last = "203.0.113.50";
+    let mut saw_429 = false;
+    for i in 0..25 {
+        let mut req = Request::builder()
+            .method(Method::POST)
+            .uri(login_uri)
+            .header(header::HOST, host)
+            .header(header::ORIGIN, origin)
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .header(header::COOKIE, &cookie)
+            .header(
+                header::HeaderName::from_static("x-forwarded-for"),
+                format!("198.51.100.{i}, {client_last}"),
+            )
+            .body(Body::from(format!(
+                "password=wrong&_csrf={}",
+                form_urlencoded(&csrf)
+            )))
+            .unwrap();
+        apply_web_connect(&mut req, peer, true);
+        let resp = app.clone().oneshot(req).await.unwrap();
+        if resp.status() == StatusCode::TOO_MANY_REQUESTS {
+            saw_429 = true;
+            break;
+        }
+    }
+    assert!(
+        saw_429,
+        "last XFF hop must drive IP backoff when Serve proxy is trusted"
+    );
 }
 
 /// Direct TLS listener stack (`web_https`): `trust_x_forwarded_for` is false; rotating XFF must not bypass IP backoff.
@@ -133,6 +195,7 @@ async fn rotating_xff_on_direct_tls_listener_still_rate_limits() {
         "localhost:8443",
         "https://localhost:8443",
         10,
+        false,
     )
     .await;
 }

@@ -3,8 +3,20 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use axum::extract::ConnectInfo;
 use kxprov_mock::MockDaemon;
-use kxprov_web::{LoginRateLimiter, PasswordVerifier, WebState};
+use kxprov_web::{LoginRateLimiter, PasswordVerifier, WebConnectInfo, WebState};
+use std::net::SocketAddr;
+
+pub fn apply_web_connect(
+    req: &mut axum::http::Request<axum::body::Body>,
+    peer: SocketAddr,
+    serve_proxy_trusted: bool,
+) {
+    req.extensions_mut().insert(ConnectInfo(peer));
+    req.extensions_mut()
+        .insert(WebConnectInfo::from_parts(peer, serve_proxy_trusted));
+}
 
 pub struct TestVerifier;
 

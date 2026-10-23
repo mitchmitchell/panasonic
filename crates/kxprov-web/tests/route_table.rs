@@ -11,7 +11,7 @@ use kxprov_mcp::KxMcpServer;
 use kxprov_mock::{MCP_APPROVAL_TOOLS, MCP_TOOLS, WEB_APPROVAL_APPLY_HTTP_PATHS, WEB_ROUTES};
 use kxprov_web::LoginRateLimiter;
 use std::net::SocketAddr;
-use support::{test_web_state, TestVerifier};
+use support::{apply_web_connect, test_web_state, TestVerifier};
 use tower::ServiceExt;
 fn production_like_app() -> axum::Router {
     let mut state = test_web_state();
@@ -45,7 +45,7 @@ fn production_request(method: Method, uri: &str) -> Request<Body> {
         .header(header::HOST, "127.0.0.1:4321")
         .body(Body::empty())
         .unwrap();
-    req.extensions_mut().insert(ConnectInfo(peer));
+    apply_web_connect(&mut req, peer, false);
     req
 }
 
@@ -59,7 +59,7 @@ fn production_post(uri: &str, body: &str) -> Request<Body> {
         .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
         .body(Body::from(body.to_string()))
         .unwrap();
-    req.extensions_mut().insert(ConnectInfo(peer));
+    apply_web_connect(&mut req, peer, false);
     req
 }
 

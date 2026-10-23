@@ -174,3 +174,19 @@ fn sim_mark_file_mode_0600() {
         & 0o777;
     assert_eq!(mode, 0o600);
 }
+
+#[cfg(unix)]
+#[test]
+fn sim_mark_load_fails_closed_on_insecure_mode() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("sim-passed.json");
+    let body = serde_json::json!({
+        "build_hash": kxprovd::sim_mark::SimMarkStore::current_build_hash(),
+        "marked_at_ms": 1,
+    });
+    std::fs::write(&path, serde_json::to_vec_pretty(&body).unwrap()).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let store = SimMarkStore::new(tmp.path());
+    assert!(store.load_valid().unwrap().is_none());
+}

@@ -4,7 +4,7 @@ use axum::body::Body;
 use axum::extract::ConnectInfo;
 use axum::http::{Request, StatusCode};
 use kxprov_gw::{production_web_router, HostOriginConfig, RateLimiter};
-use support::test_web_state;
+use support::{apply_web_connect, test_web_state};
 use tower::ServiceExt;
 
 mod support;
@@ -28,7 +28,7 @@ async fn host_header_mismatch_with_uri_authority_returns_400() {
         .header(axum::http::header::HOST, "localhost:9090")
         .body(Body::empty())
         .unwrap();
-    req.extensions_mut().insert(ConnectInfo(peer));
+    apply_web_connect(&mut req, peer, false);
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }

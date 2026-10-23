@@ -4,7 +4,7 @@ use axum::body::Body;
 use axum::extract::ConnectInfo;
 use axum::http::{header, Method, Request, StatusCode};
 use kxprov_gw::{production_web_router, HostOriginConfig, RateLimiter};
-use support::{cookie_header_from_set_cookies, test_web_state};
+use support::{apply_web_connect, cookie_header_from_set_cookies, test_web_state};
 use tower::ServiceExt;
 
 mod support;
@@ -31,7 +31,7 @@ async fn https_origin_with_portless_host_allowed_on_443_listener() {
                 .header(header::HOST, "127.0.0.1")
                 .body(Body::empty())
                 .unwrap();
-            req.extensions_mut().insert(ConnectInfo(peer));
+            apply_web_connect(&mut req, peer, false);
             req
         })
         .await
@@ -48,7 +48,7 @@ async fn https_origin_with_portless_host_allowed_on_443_listener() {
         .header(header::COOKIE, cookie)
         .body(Body::from("password=x&_csrf=not-the-session-token"))
         .unwrap();
-    req.extensions_mut().insert(ConnectInfo(peer));
+    apply_web_connect(&mut req, peer, false);
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(
         resp.status(),

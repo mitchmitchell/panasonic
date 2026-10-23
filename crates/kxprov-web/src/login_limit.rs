@@ -5,17 +5,15 @@ use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LoginBusy {
-    /// Another login attempt for this account is already verifying a password.
-    AccountInProgress,
+pub enum LoginGateError {
+    /// Hard 429 + Retry-After: this IP (or peer|xff bucket) has failure backoff.
+    IpRateLimited(Duration),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LoginPrecheck {
     Ready,
-    /// Hard 429 + Retry-After: this IP has its own failure backoff only.
     IpRateLimited(Duration),
-    AccountInProgress,
 }
 
 #[derive(Clone)]
@@ -24,27 +22,13 @@ pub struct LoginRateLimiter {
     max_account_backoff: Duration,
     max_ip_backoff: Duration,
     by_key: Arc<Mutex<HashMap<String, Entry>>>,
-    account_active: Arc<std::sync::Mutex<HashMap<String, ()>>>,
+    account_serial: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
 }
 
 #[derive(Debug, Clone)]
 struct Entry {
     failures: u32,
     next_allowed: Instant,
-}
-
-/// Held only while the password is verified; releases the per-account slot on drop.
-pub struct LoginAttemptGuard {
-    limiter: LoginRateLimiter,
-    account_key: String,
-}
-
-impl Drop for LoginAttemptGuard {
-    fn drop(&mut self) {
-        if let Ok(mut active) = self.limiter.account_active.lock() {
-            active.remove(&self.account_key);
-        }
-    }
 }
 
 impl LoginRateLimiter {
@@ -58,29 +42,12 @@ impl LoginRateLimiter {
             max_account_backoff,
             max_ip_backoff,
             by_key: Arc::new(Mutex::new(HashMap::new())),
-            account_active: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            account_serial: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
-    /// Soft pacing when the account is in backoff: at most 2s, never a 429 by itself.
-    pub async fn soft_account_delay(&self, account_key: &str) -> Duration {
-        const MAX_SOFT: Duration = Duration::from_secs(2);
-        let remaining = self.delay_for_key(account_key).await;
-        if remaining == Duration::ZERO {
-            return Duration::ZERO;
-        }
-        remaining.min(MAX_SOFT)
-    }
-
-    /// Backoff / concurrency gate before password verification (does not take the verify slot).
-    /// Account backoff never hard-blocks a clean IP; only IP backoff yields 429.
-    pub async fn precheck_login(&self, account_key: &str, ip_key: &str) -> LoginPrecheck {
-        {
-            let active = self.account_active.lock().expect("account login lock");
-            if active.contains_key(account_key) {
-                return LoginPrecheck::AccountInProgress;
-            }
-        }
+    /// IP backoff only (account pacing runs inside [`Self::enter_account_login`]).
+    pub async fn precheck_login(&self, _account_key: &str, ip_key: &str) -> LoginPrecheck {
         let ip_delay = self.delay_for_key(ip_key).await;
         if ip_delay > Duration::ZERO {
             return LoginPrecheck::IpRateLimited(ip_delay);
@@ -88,17 +55,55 @@ impl LoginRateLimiter {
         LoginPrecheck::Ready
     }
 
-    /// Serialize password verification per account.
-    pub fn begin_password_verify(&self, account_key: &str) -> Result<LoginAttemptGuard, LoginBusy> {
-        let mut active = self.account_active.lock().expect("account login lock");
-        if active.contains_key(account_key) {
-            return Err(LoginBusy::AccountInProgress);
+    /// Serializes login attempts per account: reserves soft pacing before sleeping, then runs `attempt`.
+    pub async fn enter_account_login<T, F, Fut>(
+        &self,
+        account_key: &str,
+        ip_key: &str,
+        attempt: F,
+    ) -> Result<T, LoginGateError>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = T>,
+    {
+        let ip_delay = self.delay_for_key(ip_key).await;
+        if ip_delay > Duration::ZERO {
+            return Err(LoginGateError::IpRateLimited(ip_delay));
         }
-        active.insert(account_key.to_string(), ());
-        Ok(LoginAttemptGuard {
-            limiter: self.clone(),
-            account_key: account_key.to_string(),
-        })
+        let serial = self.account_serial_gate(account_key).await;
+        let _guard = serial.lock().await;
+        let soft = self.reserve_account_soft_delay(account_key).await;
+        if soft > Duration::ZERO {
+            tokio::time::sleep(soft).await;
+        }
+        Ok(attempt().await)
+    }
+
+    async fn account_serial_gate(&self, account_key: &str) -> Arc<Mutex<()>> {
+        let mut map = self.account_serial.lock().await;
+        map.entry(account_key.to_string())
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
+    }
+
+    /// Atomically reserve the next soft pacing slot for this account (max 2s sleep).
+    async fn reserve_account_soft_delay(&self, account_key: &str) -> Duration {
+        const MAX_SOFT: Duration = Duration::from_secs(2);
+        const SLOT_TAIL: Duration = Duration::from_millis(1);
+        let mut map = self.by_key.lock().await;
+        let now = Instant::now();
+        let entry = map.entry(account_key.to_string()).or_insert(Entry {
+            failures: 0,
+            next_allowed: now,
+        });
+        let scheduled = now.max(entry.next_allowed);
+        let mut wait = scheduled.saturating_duration_since(now);
+        if wait > MAX_SOFT {
+            wait = MAX_SOFT;
+        }
+        let release = scheduled + wait + SLOT_TAIL;
+        entry.next_allowed = release;
+        wait
     }
 
     pub async fn delay_before_attempt(&self, account_key: &str, ip_key: &str) -> Duration {
@@ -164,6 +169,7 @@ fn wait_for_key(entry: Option<&Entry>, now: Instant, cap: Duration) -> Duration 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU32, Ordering};
 
     #[tokio::test]
     async fn account_backoff_caps_and_never_hard_locks() {
@@ -213,20 +219,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn concurrent_password_verify_for_same_account_is_rejected() {
-        let limiter = LoginRateLimiter::new(
-            Duration::from_millis(1),
-            Duration::from_secs(30),
-            Duration::from_secs(30),
-        );
-        let _guard = limiter.begin_password_verify("acct:admin").expect("first");
-        assert!(matches!(
-            limiter.begin_password_verify("acct:admin"),
-            Err(LoginBusy::AccountInProgress)
-        ));
-    }
-
-    #[tokio::test]
     async fn ip_backoff_yields_rate_limited_precheck() {
         let limiter = LoginRateLimiter::new(
             Duration::from_millis(200),
@@ -260,11 +252,45 @@ mod tests {
             limiter.precheck_login("acct:admin", "ip:mitch-home").await,
             LoginPrecheck::Ready
         ));
-        let soft = limiter.soft_account_delay("acct:admin").await;
-        assert!(soft > Duration::ZERO && soft <= Duration::from_secs(2));
-        assert!(
-            limiter.begin_password_verify("acct:admin").is_ok(),
-            "clean IP may verify password during account backoff"
-        );
+        let started = Instant::now();
+        limiter
+            .enter_account_login("acct:admin", "ip:mitch-home", || async { "ok" })
+            .await
+            .expect("clean IP enters account slot");
+        assert!(started.elapsed() <= Duration::from_secs(3));
+    }
+
+    #[tokio::test]
+    async fn parallel_login_attempts_serialize_account_pacing() {
+        let limiter = Arc::new(LoginRateLimiter::new(
+            Duration::from_millis(80),
+            Duration::from_secs(30),
+            Duration::from_secs(300),
+        ));
+        limiter.record_failure("acct:admin", "ip:attacker").await;
+        let n = 5;
+        let barrier = Arc::new(tokio::sync::Barrier::new(n));
+        let order = Arc::new(AtomicU32::new(0));
+        let mut handles = Vec::new();
+        for _ in 0..n {
+            let limiter = Arc::clone(&limiter);
+            let barrier = Arc::clone(&barrier);
+            let order = Arc::clone(&order);
+            handles.push(tokio::spawn(async move {
+                barrier.wait().await;
+                limiter
+                    .enter_account_login("acct:admin", "ip:clean", || async {
+                        order.fetch_add(1, Ordering::SeqCst)
+                    })
+                    .await
+                    .expect("enter")
+            }));
+        }
+        let mut seq = Vec::new();
+        for h in handles {
+            seq.push(h.await.unwrap());
+        }
+        seq.sort();
+        assert_eq!(seq, (0..n as u32).collect::<Vec<_>>());
     }
 }

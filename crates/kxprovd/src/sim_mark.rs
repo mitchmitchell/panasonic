@@ -1,6 +1,6 @@
 //! Simulator test pass marker per build hash (v2.7 F1).
 
-use kxprov_api::sim_passed_path;
+use kxprov_api::{production_layout, sim_passed_path};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
@@ -13,6 +13,8 @@ pub enum SimMarkError {
     Io(#[from] std::io::Error),
     #[error("json: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("sim-passed.json must be a root-owned regular file mode 0600")]
+    InsecureMarker,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -23,12 +25,14 @@ pub struct SimMarkFile {
 
 pub struct SimMarkStore {
     path: PathBuf,
+    require_root_owner: bool,
 }
 
 impl SimMarkStore {
     pub fn new(state_base: &Path) -> Self {
         Self {
             path: sim_passed_path(state_base),
+            require_root_owner: production_layout(state_base),
         }
     }
 
@@ -40,10 +44,36 @@ impl SimMarkStore {
         BUILD_HASH
     }
 
-    /// Load marker if present and still valid for this build.
+    #[cfg(unix)]
+    fn validate_marker_metadata(&self, path: &Path) -> Result<(), SimMarkError> {
+        use std::os::unix::fs::MetadataExt;
+        let meta = std::fs::symlink_metadata(path)?;
+        if !meta.is_file() {
+            return Err(SimMarkError::InsecureMarker);
+        }
+        if self.require_root_owner && meta.uid() != 0 {
+            return Err(SimMarkError::InsecureMarker);
+        }
+        if meta.mode() & 0o777 != 0o600 {
+            return Err(SimMarkError::InsecureMarker);
+        }
+        Ok(())
+    }
+
+    #[cfg(not(unix))]
+    fn validate_marker_metadata(&self, _path: &Path) -> Result<(), SimMarkError> {
+        Ok(())
+    }
+
+    /// Load marker if present, secure on disk, and still valid for this build.
     pub fn load_valid(&self) -> Result<Option<SimMarkFile>, SimMarkError> {
         if !self.path.exists() {
             return Ok(None);
+        }
+        match self.validate_marker_metadata(&self.path) {
+            Ok(()) => {}
+            Err(SimMarkError::InsecureMarker) => return Ok(None),
+            Err(e) => return Err(e),
         }
         let mark: SimMarkFile = serde_json::from_slice(&std::fs::read(&self.path)?)?;
         if mark.build_hash != BUILD_HASH {
@@ -69,6 +99,10 @@ impl SimMarkStore {
 
     pub fn clear_if_stale(&self) -> Result<(), SimMarkError> {
         if !self.path.exists() {
+            return Ok(());
+        }
+        if self.validate_marker_metadata(&self.path).is_err() {
+            let _ = std::fs::remove_file(&self.path);
             return Ok(());
         }
         let mark: SimMarkFile = serde_json::from_slice(&std::fs::read(&self.path)?)?;

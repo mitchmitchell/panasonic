@@ -11,7 +11,10 @@ use kxprov_gw::{production_web_router, HostOriginConfig, RateLimiter};
 use kxprov_web::LoginRateLimiter;
 mod support;
 
-use support::{cookie_header_from_set_cookies, form_urlencoded, test_web_state, TestVerifier};
+use support::{
+    apply_web_connect, cookie_header_from_set_cookies, form_urlencoded, test_web_state,
+    TestVerifier,
+};
 use tower::ServiceExt;
 
 #[tokio::test]
@@ -43,7 +46,7 @@ async fn localhost_with_port_passes_host_and_origin_on_login_post() {
                 .uri("http://localhost:8080/login")
                 .body(Body::empty())
                 .unwrap();
-            req.extensions_mut().insert(ConnectInfo(peer));
+            apply_web_connect(&mut req, peer, false);
             req
         })
         .await
@@ -70,7 +73,7 @@ async fn localhost_with_port_passes_host_and_origin_on_login_post() {
             form_urlencoded(csrf)
         )))
         .unwrap();
-    req.extensions_mut().insert(ConnectInfo(peer));
+    apply_web_connect(&mut req, peer, false);
     let post = app.oneshot(req).await.unwrap();
     assert_eq!(post.status(), StatusCode::SEE_OTHER);
 }
