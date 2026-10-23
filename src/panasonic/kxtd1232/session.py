@@ -10,6 +10,7 @@ from enum import Enum, auto
 
 XOFF = 0x13
 XON = 0x11
+MAX_LINE = 256  # banner and prompts are well under this
 
 
 class State(Enum):
@@ -34,6 +35,7 @@ class Login:
         self.state = State.WAIT_XON
         self.failure: str | None = None
         self._buf = b""
+        self.leftover = b""  # bytes received after the switch to binary; hand to the client
 
     def __repr__(self) -> str:  # never expose the password
         return f"Login(state={self.state.name})"
@@ -53,6 +55,10 @@ class Login:
         while b"\n" in self._buf and self.state not in (State.BINARY, State.FAILED):
             line, self._buf = self._buf.split(b"\n", 1)
             out += self._line(line.strip(b"\r\x00 ").decode("ascii", "replace"))
+        if self.state is State.BINARY:
+            self.leftover, self._buf = self._buf, b""
+        elif self.state is not State.FAILED and len(self._buf) > MAX_LINE:
+            self._fail(f"text line longer than {MAX_LINE} bytes")
         return out
 
     def _fail(self, why: str) -> bytes:

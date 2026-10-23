@@ -76,3 +76,47 @@ def test_protocol_error_is_one_line_and_ends_binary(capsys, monkeypatch):
 def test_invalid_value_uses_error_prefix(capsys):
     assert main(["plan", "cid_number", "0", "abc"]) == 2
     assert capsys.readouterr().err.startswith("kxtd1232: error:")
+
+
+def _patched(monkeypatch, client_factory):
+    from panasonic.kxtd1232 import cli
+
+    monkeypatch.setattr(cli, "_connect", client_factory)
+
+
+def test_transport_timeout_is_one_line(capsys, monkeypatch):
+    from panasonic.kxtd1232.client import Client
+    from panasonic.sim import LoopbackTransport, SimPBX
+
+    class Dead(LoopbackTransport):
+        def recv(self, timeout):
+            raise TimeoutError
+
+    def factory():
+        c = Client(LoopbackTransport(SimPBX()))
+        c.login("0000")
+        c.t = Dead(SimPBX())
+        return c
+
+    _patched(monkeypatch, factory)
+    assert main(["version"]) == 1
+    err = capsys.readouterr().err
+    assert err.startswith("kxtd1232: error:") and "Traceback" not in err
+
+
+def test_malformed_record_is_one_line(capsys, monkeypatch):
+    from panasonic.kxtd1232.client import Client
+    from panasonic.sim import LoopbackTransport, SimPBX, synthetic_db
+
+    db = synthetic_db()
+    db[0x24][0:6] = b"\xff" * 6  # digit count 15: not decodable
+    sim = SimPBX(db=db)
+
+    def factory():
+        c = Client(LoopbackTransport(sim))
+        c.login("0000")
+        return c
+
+    _patched(monkeypatch, factory)
+    assert main(["read", "cid_number", "--count", "1"]) == 1
+    assert "does not decode" in capsys.readouterr().err

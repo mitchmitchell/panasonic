@@ -111,6 +111,15 @@ class SimPBX:
         if fault == "nak":
             return encode(cmd, b"\x01\x02")
         busy = BUSY_FRAME * 3 if fault == "busy" else b""
+        if fault == "stale_read":  # a leftover read reply arrives before the real one
+            busy = encode(Cmd.READ, b"\x00" + b"\xee" * 6)
+        if fault == "stale_ack":  # a leftover write ack arrives before the real one
+            busy = encode(Cmd.WRITE, b"\x00")
+        if fault == "garbled_ack":  # write applied, ack checksum corrupted
+            self._write(raw[2:-1], silent=False)
+            ack = bytearray(encode(Cmd.WRITE, b"\x00"))
+            ack[-1] ^= 0xFF
+            return bytes(ack)
         if fault == "busy_forever":
             return BUSY_FRAME * 200  # longer than any bound the client is given in tests
         if fault in ("no_ack_applied", "no_ack_dropped"):
@@ -159,6 +168,6 @@ class SimPBX:
         return encode(Cmd.WRITE, b"\x00")
 
 
-_WRITE_FAULTS = {"silent_write", "no_ack_applied", "no_ack_dropped"}
-_FAULTS = {"nak", "busy", "busy_forever"} | _WRITE_FAULTS
+_WRITE_FAULTS = {"silent_write", "no_ack_applied", "no_ack_dropped", "garbled_ack"}
+_FAULTS = {"nak", "busy", "busy_forever", "stale_read", "stale_ack"} | _WRITE_FAULTS
 _RECORD_SIZES = {0x24: 6, 0x25: 16, 0x05: 10}

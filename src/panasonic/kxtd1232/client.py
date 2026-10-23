@@ -5,7 +5,15 @@ from __future__ import annotations
 import time
 from collections.abc import Callable
 
-from .frame import Encoder, FrameError, Reply, classify, frame_length
+from .frame import (
+    Encoder,
+    FrameError,
+    Reply,
+    ReplyKind,
+    ReplyMismatchError,
+    classify,
+    frame_length,
+)
 from .session import Login, LoginError, State
 from .transport import Transport
 
@@ -13,6 +21,7 @@ DEFAULT_TIMEOUT = 5.0
 READ_BLOCK_BYTES = 150  # DSHSOMT reads 0x24 in 150-byte blocks
 # Observed busy run: ~128 ms cadence for ~7 s (live-capture §6). 12 s = 7 s plus margin.
 BUSY_LIMIT_S = 12.0
+MAX_STALE_FRAMES = 4
 
 
 class ProtocolError(RuntimeError):
@@ -21,13 +30,26 @@ class ProtocolError(RuntimeError):
         self.reply = reply
 
 
+class LinkTimeoutError(ProtocolError, TimeoutError):
+    """No bytes arrived from the transport within the timeout."""
+
+
+class RecordDecodeError(ProtocolError):
+    """A record read from the PBX did not decode with the expected field layout."""
+
+
+class WriteRejectedError(ProtocolError):
+    """The PBX answered a write with a NAK or refusal: nothing was applied (per spec)."""
+
+
 class BusyTimeoutError(ProtocolError):
     """The busy run outlasted the bound: treat as a link failure."""
 
 
 class UnackedWriteError(ProtocolError):
-    """A write got no ack (timeout or busy past the bound). Never resend: re-read and use
-    :meth:`Client.verify_block` to decide continue / rollback / LOCKED."""
+    """A write got no valid ack (timeout, busy past the bound, garbled or mismatched ack).
+    Never resend: re-read and use :meth:`Client.verify_block` to decide continue / rollback /
+    LOCKED."""
 
     def __init__(self, msg: str, table: int, record: int, word: int, payload: bytes) -> None:
         super().__init__(msg)
@@ -52,11 +74,18 @@ class Client:
     def login(self, password: str, timeout: float = DEFAULT_TIMEOUT) -> None:
         sm = Login(password)
         while sm.state not in (State.BINARY, State.FAILED):
-            out = sm.feed(self.t.recv(timeout))
+            out = sm.feed(self._recv(timeout))
             if out:
                 self.t.send(out)
         if sm.state is State.FAILED:
             raise LoginError(sm.failure or "login failed")
+        self._rx = sm.leftover
+
+    def _recv(self, timeout: float) -> bytes:
+        try:
+            return self.t.recv(timeout)
+        except TimeoutError as e:
+            raise LinkTimeoutError(f"no data within {timeout} s") from e
 
     # -- frames ---------------------------------------------------------------
     def _recv_frame(self, timeout: float) -> bytes:
@@ -65,7 +94,7 @@ class Client:
             if n is not None and len(self._rx) >= n:
                 raw, self._rx = self._rx[:n], self._rx[n:]
                 return raw
-            self._rx += self.t.recv(timeout)
+            self._rx += self._recv(timeout)
 
     def request(self, raw: bytes, timeout: float = DEFAULT_TIMEOUT) -> Reply:
         """Send once and return the reply. Busy frames are waited out, never answered with a
@@ -73,7 +102,7 @@ class Client:
         self.t.send(raw)
         try:
             return self._await_reply(raw[1], timeout)
-        except (BusyTimeoutError, TimeoutError, ProtocolError):
+        except (TimeoutError, ProtocolError):
             # Drop leftover busy or partial bytes so a following re-read (verify_block)
             # starts on a clean frame boundary.
             self._rx = b""
@@ -81,12 +110,19 @@ class Client:
 
     def _await_reply(self, request_cmd: int, timeout: float) -> Reply:
         busy_since: float | None = None
+        stale = 0
         while True:
             try:
                 reply = classify(self._recv_frame(timeout), request_cmd)
+            except ReplyMismatchError as e:
+                # A stale/out-of-order frame is skipped, never taken as the answer.
+                stale += 1
+                if stale > MAX_STALE_FRAMES:
+                    raise ProtocolError(f"too many mismatched replies: {e}") from e
+                continue
             except FrameError as e:
                 raise ProtocolError(f"bad reply: {e}") from e
-            if reply.kind != "busy":
+            if reply.kind != ReplyKind.BUSY:
                 return reply
             now = self.clock()
             busy_since = now if busy_since is None else busy_since
@@ -95,13 +131,13 @@ class Client:
 
     def version(self) -> str:
         r = self.request(self.enc.version_probe())
-        if r.kind != "data" or len(r.data) != 16:
+        if r.kind != ReplyKind.DATA or len(r.data) != 16:
             raise ProtocolError("unexpected version reply", r)
         return r.data.decode("ascii", "replace")
 
     def read(self, table: int, record: int, word: int, nwords: int) -> bytes:
         r = self.request(self.enc.read(table, record, word, nwords))
-        if r.kind != "data" or len(r.data) != 2 * nwords:
+        if r.kind != ReplyKind.DATA or len(r.data) != 2 * nwords:
             raise ProtocolError(f"read failed ({r.kind})", r)
         return r.data
 
@@ -118,12 +154,16 @@ class Client:
         return bytes(out)
 
     def write(self, table: int, record: int, word: int, payload: bytes) -> Reply:
-        """One write frame. Never resent here; callers verify by re-reading."""
+        """One write frame, never resent. Returns the ack. Raises UnackedWriteError when no
+        valid ack arrived (re-read with verify_block) and WriteRejectedError on a NAK."""
         raw = self.enc.write(table, record, word, payload)
         try:
-            return self.request(raw)
-        except (TimeoutError, BusyTimeoutError) as e:
+            r = self.request(raw)
+        except (TimeoutError, ProtocolError) as e:
             raise UnackedWriteError(f"write not acked: {e}", table, record, word, payload) from e
+        if r.kind != ReplyKind.ACK:
+            raise WriteRejectedError(f"write rejected ({r.kind}, code {r.code})", r)
+        return r
 
     def verify_block(self, table: int, record: int, word: int, new: bytes, base: bytes) -> str:
         """Re-read a block after an unacked write: "applied", "not_applied" or "neither"."""
@@ -134,5 +174,5 @@ class Client:
 
     def end_binary(self) -> None:
         r = self.request(self.enc.end_binary())
-        if r.kind != "ack":
+        if r.kind != ReplyKind.ACK:
             raise ProtocolError("end-binary not acked", r)

@@ -6,10 +6,16 @@ Unchanged bytes inside a chunk are re-sent exactly as read (design §3).
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import StrEnum
 
 from .fields import FIELDS
 from .frame import MAX_WRITE_PAYLOAD
 from .tables import check_writable
+
+
+class Granularity(StrEnum):
+    CHUNK = "chunk"  # only changed record groups (PC (a))
+    TABLE = "table"  # the whole table (PC (b))
 
 
 @dataclass(frozen=True)
@@ -60,10 +66,14 @@ def build_plan(
     record_size: int,
     base: bytes,
     patches: list[Patch],
-    granularity: str = "chunk",
+    granularity: Granularity | str = Granularity.CHUNK,
     records_per_chunk: int | None = None,
 ) -> WritePlan:
-    """``granularity``: "chunk" (only changed record groups, PC (a)) or "table" (PC (b))."""
+    """Build a dry-run plan. Raises ValueError for an unknown granularity or a chunk that
+    would not fit one write frame."""
+    granularity = Granularity(granularity)
+    if record_size <= 0 or record_size % 2:
+        raise ValueError("record size must be a positive whole number of words")
     check_writable(table)
     new = bytearray(base)
     for p in patches:
@@ -74,9 +84,11 @@ def build_plan(
         new[p.offset : p.offset + len(p.data)] = p.data
     per = records_per_chunk or max(1, MAX_WRITE_PAYLOAD // record_size)
     chunk = per * record_size
+    if per <= 0 or chunk > MAX_WRITE_PAYLOAD:
+        raise ValueError(f"chunk of {chunk} bytes exceeds {MAX_WRITE_PAYLOAD}-byte write limit")
     plan = WritePlan(table, record_size)
     for start in range(0, len(base), chunk):
         b, n = base[start : start + chunk], bytes(new[start : start + chunk])
-        if granularity == "table" or b != n:
+        if granularity is Granularity.TABLE or b != n:
             plan.writes.append(ChunkWrite(table, start // record_size, 0, b, n))
     return plan

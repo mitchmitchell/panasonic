@@ -7,7 +7,7 @@ preceding bytes. No escaping; one reply per request; same rule in both direction
 from __future__ import annotations
 
 from dataclasses import dataclass
-from enum import IntEnum
+from enum import IntEnum, StrEnum
 
 MAX_WRITE_PAYLOAD = 200
 # A data reply is LEN CMD 00 <2n> SUM, so LEN = 3 + 2n must fit in one byte.
@@ -26,14 +26,19 @@ class Cmd(IntEnum):
 
 READ_ONLY_COMMANDS = frozenset({Cmd.READ, Cmd.CLOCK, Cmd.PROBE, Cmd.END_BINARY})
 WRITE_COMMANDS = frozenset({Cmd.WRITE})
-# 0x0A/0x10 are never allowed until G3 is closed.
+# 0x0A/0x10 are never allowed until G3 is closed; Encoder rejects them structurally.
+FORBIDDEN_COMMANDS = frozenset({Cmd.END_UPLOAD_A, Cmd.END_UPLOAD_B})
 
 
 class FrameError(ValueError):
     pass
 
 
-class NotAllowedError(PermissionError):
+class ReplyMismatchError(FrameError):
+    """A well-formed reply whose cmd does not match the request (stale or out of order)."""
+
+
+class NotAllowedError(Exception):
     pass
 
 
@@ -81,6 +86,8 @@ class Encoder:
     """Builds request frames, enforcing a command allow-list (read-only by default)."""
 
     def __init__(self, allowed: frozenset[int] = READ_ONLY_COMMANDS) -> None:
+        if allowed & FORBIDDEN_COMMANDS:
+            raise NotAllowedError("0x0A/0x10 cannot be allowed until G3 is closed")
         self.allowed = allowed
 
     def _check(self, cmd: int) -> None:
@@ -117,8 +124,12 @@ class Encoder:
         from .tables import check_writable
 
         check_writable(table)
+        if not (0 <= record <= 0xFFFF and 0 <= word <= 0xFFFF):
+            raise FrameError("write address out of range")
         if not 0 < len(payload) <= MAX_WRITE_PAYLOAD:
             raise FrameError("payload must be 1..200 bytes")
+        if len(payload) % 2:
+            raise FrameError("payload must be whole words (even length)")
         body = bytes([table]) + record.to_bytes(2, "big") + word.to_bytes(2, "big") + b"\x00"
         return encode(Cmd.WRITE, body + payload)
 
@@ -128,25 +139,39 @@ class Encoder:
 BUSY_FRAME = bytes.fromhex("04FF010004")
 
 
+class ReplyKind(StrEnum):
+    ACK = "ack"
+    DATA = "data"
+    NAK = "nak"
+    REFUSED = "refused"
+    BUSY = "busy"
+    STATUS = "status"
+    OTHER = "other"
+
+
 @dataclass(frozen=True)
 class Reply:
-    kind: str  # ack | data | nak | refused | busy | status | other
+    kind: ReplyKind
     cmd: int
     data: bytes = b""
     code: int | None = None
 
 
 def classify(raw: bytes, request_cmd: int) -> Reply:
+    """Classify a reply to ``request_cmd``. Busy frames are accepted for any request; any
+    other frame whose cmd differs from the request raises ReplyMismatchError."""
     f = decode(raw)
     if raw == BUSY_FRAME:
-        return Reply("busy", 0xFF)
+        return Reply(ReplyKind.BUSY, 0xFF)
+    if f.cmd != request_cmd:
+        raise ReplyMismatchError(f"reply cmd {f.cmd:#04x} does not match {request_cmd:#04x}")
     if f.cmd == Cmd.PROBE and f.body == b"\x01\x03":
-        return Reply("status", f.cmd, data=f.body[1:])  # meaning of the value: UNKNOWN
+        return Reply(ReplyKind.STATUS, f.cmd, data=f.body[1:])  # meaning of the value: UNKNOWN
     if len(f.body) == 2 and f.body[0] == 0x01:
         code = f.body[1]
-        kind = "refused" if code == 0x03 and f.cmd == Cmd.READ else "nak"
+        kind = ReplyKind.REFUSED if code == 0x03 and f.cmd == Cmd.READ else ReplyKind.NAK
         return Reply(kind, f.cmd, code=code)
     if f.body[:1] == b"\x00":
         data = f.body[1:]
-        return Reply("data" if data else "ack", f.cmd, data=data)
-    return Reply("other", f.cmd, data=f.body)
+        return Reply(ReplyKind.DATA if data else "ack", f.cmd, data=data)
+    return Reply(ReplyKind.OTHER, f.cmd, data=f.body)

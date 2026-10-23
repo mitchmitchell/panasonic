@@ -77,7 +77,8 @@ def test_write_payload_bounds():
     ],
 )
 def test_classify_replies(raw, kind, code):
-    r = classify(H(raw.replace(" ", "")), 0)
+    b = H(raw.replace(" ", ""))
+    r = classify(b, b[1])
     assert r.kind == kind and r.code == code
 
 

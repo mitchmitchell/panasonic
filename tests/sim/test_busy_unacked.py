@@ -2,7 +2,12 @@ import itertools
 
 import pytest
 
-from panasonic.kxtd1232.client import BusyTimeoutError, Client, UnackedWriteError
+from panasonic.kxtd1232.client import (
+    BusyTimeoutError,
+    Client,
+    UnackedWriteError,
+    WriteRejectedError,
+)
 from panasonic.kxtd1232.frame import READ_ONLY_COMMANDS, WRITE_COMMANDS, Encoder
 from panasonic.kxtd1232.writeplan import build_plan, field_patch
 from panasonic.sim import LoopbackTransport, SimPBX
@@ -82,5 +87,41 @@ def test_busy_forever_then_verify_block_starts_clean():
     sim.inject("busy_forever")
     with pytest.raises(UnackedWriteError):
         c.write(w.table, w.record, w.word, w.new)
-    assert c._rx == b""
-    assert c.verify_block(w.table, w.record, w.word, w.new, w.base) in ("applied", "not_applied")
+    # busy_forever drops the write, so the re-read must say exactly not_applied
+    assert c.verify_block(w.table, w.record, w.word, w.new, w.base) == "not_applied"
+
+
+def test_garbled_ack_is_unacked_write():
+    sim, c = connect()
+    w = one_write(c)
+    sim.inject("garbled_ack")
+    with pytest.raises(UnackedWriteError):
+        c.write(w.table, w.record, w.word, w.new)
+    assert c.verify_block(w.table, w.record, w.word, w.new, w.base) == "applied"
+
+
+def test_stale_read_reply_during_write_ack_is_skipped():
+    sim, c = connect()
+    w = one_write(c)
+    sim.inject("stale_read")
+    assert c.write(w.table, w.record, w.word, w.new).kind == "ack"
+    assert c.verify_block(w.table, w.record, w.word, w.new, w.base) == "applied"
+
+
+def test_stale_ack_during_verify_block_is_skipped():
+    sim, c = connect()
+    w = one_write(c)
+    sim.inject("no_ack_dropped")
+    with pytest.raises(UnackedWriteError):
+        c.write(w.table, w.record, w.word, w.new)
+    sim.inject("stale_ack")
+    assert c.verify_block(w.table, w.record, w.word, w.new, w.base) == "not_applied"
+
+
+def test_write_nak_raises_rejected():
+    sim, c = connect()
+    w = one_write(c)
+    sim.inject("nak")
+    with pytest.raises(WriteRejectedError) as e:
+        c.write(w.table, w.record, w.word, w.new)
+    assert e.value.reply.code == 2

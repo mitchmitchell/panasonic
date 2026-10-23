@@ -14,7 +14,7 @@ import sys
 
 from panasonic.sim import LoopbackTransport, SimPBX
 
-from .client import Client, ProtocolError
+from .client import Client, ProtocolError, RecordDecodeError
 from .fields import FIELDS
 from .frame import FrameError, NotAllowedError
 from .session import LoginError
@@ -84,7 +84,7 @@ def _run(a: argparse.Namespace) -> int:
     finally:
         try:
             c.end_binary()
-        except Exception:  # noqa: BLE001 - best-effort teardown; keep the original error
+        except (ProtocolError, FrameError, TimeoutError):
             if ok:
                 raise
 
@@ -96,7 +96,12 @@ def _command(c: Client, a: argparse.Namespace) -> int:
         table, size, _enc, dec = FIELDS[a.kind]
         raw = c.read_records(table, size, a.first, a.count)
         for i in range(a.count):
-            print(f"{a.first + i}\t{dec(raw[i * size : (i + 1) * size])}")
+            rec = raw[i * size : (i + 1) * size]
+            try:
+                value = dec(rec)
+            except ValueError as e:
+                raise RecordDecodeError(f"record {a.first + i} does not decode: {e}") from e
+            print(f"{a.first + i}\t{value}")
     elif a.cmd == "plan":
         table, size, _enc, _dec = FIELDS[a.kind]
         n = a.index + 1
