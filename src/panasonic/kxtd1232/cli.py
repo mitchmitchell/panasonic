@@ -8,10 +8,31 @@ import sys
 
 from panasonic.sim import LoopbackTransport, SimPBX
 
-from .client import Client
+from .client import Client, ProtocolError
 from .fields import FIELDS
-from .frame import NotAllowedError
+from .frame import FrameError, NotAllowedError
+from .session import LoginError
 from .writeplan import build_plan, field_patch
+
+# Record counts per table from the RE table spec (single-cabinet KX-TD1232).
+FIELD_RECORDS = {"cid_number": 500, "cid_name": 500, "ext_name": 128}
+
+
+def _nonneg(text: str) -> int:
+    try:
+        v = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"invalid integer: {text!r}") from None
+    if v < 0:
+        raise argparse.ArgumentTypeError(f"must be >= 0: {v}")
+    return v
+
+
+def _positive(text: str) -> int:
+    v = _nonneg(text)
+    if v == 0:
+        raise argparse.ArgumentTypeError("must be >= 1")
+    return v
 
 
 def _connect() -> Client:
@@ -28,14 +49,26 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("version", help="version probe")
     r = sub.add_parser("read", help="read typed fields")
     r.add_argument("kind", choices=sorted(FIELDS))
-    r.add_argument("--first", type=int, default=0)
-    r.add_argument("--count", type=int, default=5)
+    r.add_argument("--first", type=_nonneg, default=0)
+    r.add_argument("--count", type=_positive, default=5)
     p = sub.add_parser("plan", help="dry-run a typed field edit")
     p.add_argument("kind", choices=sorted(FIELDS))
-    p.add_argument("index", type=int)
+    p.add_argument("index", type=_nonneg)
     p.add_argument("value")
     a = ap.parse_args(argv)
+    limit = FIELD_RECORDS[a.kind] if a.cmd in ("read", "plan") else 0
+    if a.cmd == "read" and a.first + a.count > limit:
+        ap.error(f"records {a.first}..{a.first + a.count - 1} out of range 0..{limit - 1}")
+    if a.cmd == "plan" and a.index >= limit:
+        ap.error(f"record {a.index} out of range 0..{limit - 1}")
+    try:
+        return _run(a)
+    except (ProtocolError, FrameError, LoginError, NotAllowedError) as e:
+        print(f"kxtd1232: error: {e}", file=sys.stderr)
+        return 1
 
+
+def _run(a: argparse.Namespace) -> int:
     c = _connect()
     if a.cmd == "version":
         print(c.version())
@@ -53,11 +86,7 @@ def main(argv: list[str] | None = None) -> int:
         except ValueError as e:
             print(f"error: {e}", file=sys.stderr)
             return 2
-        try:
-            plan = build_plan(table, size, base, [patch])
-        except NotAllowedError as e:
-            print(f"error: {e}", file=sys.stderr)
-            return 2
+        plan = build_plan(table, size, base, [patch])
         print(json.dumps({"table": table, "writes": len(plan.writes), "diff": plan.diff()}))
     c.end_binary()
     return 0

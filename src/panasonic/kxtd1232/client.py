@@ -69,7 +69,7 @@ class Client:
 
     def request(self, raw: bytes, timeout: float = DEFAULT_TIMEOUT) -> Reply:
         """Send once and return the reply. Busy frames are waited out, never answered with a
-        resend (design §3); bounding the busy run is A2."""
+        resend (design §3), for at most ``busy_limit`` seconds (BusyTimeoutError)."""
         self.t.send(raw)
         busy_since: float | None = None
         while True:
