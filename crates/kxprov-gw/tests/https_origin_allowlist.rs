@@ -32,6 +32,9 @@ async fn https_origin_with_portless_host_allowed_on_443_listener() {
         .unwrap();
     req.extensions_mut().insert(ConnectInfo(peer));
     let resp = app.oneshot(req).await.unwrap();
-    assert_ne!(resp.status(), StatusCode::MISDIRECTED_REQUEST);
-    assert_ne!(resp.status(), StatusCode::FORBIDDEN);
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "host/origin passed; invalid CSRF yields forbidden"
+    );
 }
