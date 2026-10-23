@@ -9,6 +9,13 @@ pub const STALE_FRAME_CAP: u32 = 4;
 /// Per-plan approval lifetime (single-use).
 pub const APPROVAL_TTL_SECS: u32 = 600;
 
+/// submit_approval rate limits (v2.6 F1).
+pub const APPROVAL_SUBMIT_LIMIT_HOUR: u32 = 5;
+pub const APPROVAL_SUBMIT_LIMIT_DAY: u32 = 20;
+
+/// Canonical prefix for mode.json ed25519 signatures.
+pub const MODE_SIGN_PREFIX: &str = "kxprov-mode-v1";
+
 /// Server-side plan retention.
 pub const PLAN_EXPIRY_SECS: u32 = 1800;
 

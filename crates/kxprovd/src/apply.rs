@@ -38,7 +38,9 @@ pub fn run_apply(
     diff_hash: &kxprov_api::DiffHash,
     token: &kxprov_api::TokenId,
 ) -> Result<usize, ApplyError> {
-    if config.profile != Profile::Sim || config.transport != crate::config::TransportKind::Sim {
+    let sim_transport = config.transport == crate::config::TransportKind::Sim;
+    let sim_profile = matches!(config.profile, Profile::Sim | Profile::Test);
+    if !sim_profile || !sim_transport {
         return Err(ApplyError::NotSim);
     }
     let now = now_ms();

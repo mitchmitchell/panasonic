@@ -1,17 +1,20 @@
 use crate::approval::ApprovalBook;
 use crate::backup::BackupStore;
+use crate::config::Config;
 use crate::gates::GateState;
 use crate::locked::LockedStore;
+use crate::mode::{write_approval_required, ModeFileBody, ModeStore};
 use crate::peer::{PeerPolicy, PeerRole};
+use crate::plan_live::verify_live_diff_hash;
 use crate::plan_store::PlanStore;
 use crate::queue::{JobKind, JobOutcome, JobQueue};
 use crate::time::now_ms;
 use crate::tokens::TokenStore;
 use crate::worker::backup_info;
 use kxprov_api::{
-    ApiErrorBody, ApplyPlanParams, MintApprovalParams, MintApprovalResult, PlanChangeParams,
-    Profile, RequestAuth, RequestBody, RequestEnvelope, Response, ResponseResult, Scope, TokenId,
-    UnlockParams, UnlockResult,
+    ApiErrorBody, ApplyPlanParams, PlanChangeParams, Profile, RequestAuth, RequestBody,
+    RequestEnvelope, Response, ResponseResult, Scope, SetModeParams, SetModeResult,
+    SubmitApprovalParams, SubmitApprovalResult, TokenId, UnlockParams, UnlockResult,
 };
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -19,6 +22,7 @@ use tokio::net::UnixListener;
 use tokio::sync::RwLock;
 
 pub struct ApiState {
+    pub config: Config,
     pub profile: Profile,
     pub transport_label: String,
     pub gates: Arc<RwLock<GateState>>,
@@ -30,7 +34,7 @@ pub struct ApiState {
     pub approvals: ApprovalBook,
     pub locked: LockedStore,
     pub goliath: crate::goliath::GoliathQueue,
-    pub approval_url_base: String,
+    pub mode: ModeStore,
 }
 
 pub async fn serve(listener: UnixListener, state: Arc<ApiState>) -> std::io::Result<()> {
@@ -66,7 +70,7 @@ async fn handle_conn(
                     id: "0".into(),
                     ok: false,
                     result: None,
-                    error: Some(api_err("bad_request", &e.to_string(), None)),
+                    error: Some(api_err("bad_request", &e.to_string())),
                 };
                 write_response(&mut write_half, &resp).await?;
                 continue;
@@ -88,16 +92,11 @@ async fn write_response(
     w.flush().await
 }
 
-fn api_err(code: &str, message: &str, approval_url: Option<String>) -> ApiErrorBody {
+fn api_err(code: &str, message: &str) -> ApiErrorBody {
     ApiErrorBody {
         code: code.into(),
         message: message.into(),
-        approval_url,
     }
-}
-
-fn approval_url(base: &str, plan_id: &str) -> String {
-    format!("{base}/{plan_id}/approve")
 }
 
 async fn dispatch(
@@ -130,7 +129,14 @@ async fn dispatch(
             };
             run_plan(state, params.clone(), token).await
         }
-        RequestBody::MintApproval { params } => mint_approval(state, cred, params.clone()).await,
+        RequestBody::SubmitApproval { params } => {
+            let approver = match require_access(state, role, &env.auth, Scope::Approve) {
+                Ok(t) => t,
+                Err(e) => return err_response(id, e),
+            };
+            submit_approval(state, params, approver).await
+        }
+        RequestBody::SetMode { params } => set_mode(state, cred, params.clone()).await,
         RequestBody::BackupNow => {
             if let Err(e) = require_access(state, role, &env.auth, Scope::Read) {
                 return err_response(id, e);
@@ -145,7 +151,7 @@ async fn dispatch(
         }
         RequestBody::ApplyPlan { params } => {
             if locked {
-                return err_response(id, api_err("locked", "daemon is LOCKED", None));
+                return err_response(id, api_err("locked", "daemon is LOCKED"));
             }
             let token = match require_access(state, role, &env.auth, Scope::Write) {
                 Ok(t) => t,
@@ -188,10 +194,10 @@ fn require_access(
                 if role == PeerRole::Admin && need == Scope::Read {
                     return Ok(TokenId("admin".into()));
                 }
-                return Err(api_err("token_required", "token id required", None));
+                return Err(api_err("token_required", "token id required"));
             };
             if !state.tokens.require_scope(&auth.token_id, need) {
-                return Err(api_err("forbidden", "token scope denied", None));
+                return Err(api_err("forbidden", "token scope denied"));
             }
             Ok(auth.token_id.clone())
         }
@@ -199,7 +205,7 @@ fn require_access(
             if need == Scope::Read || need == Scope::Plan {
                 Ok(TokenId("local".into()))
             } else {
-                Err(api_err("forbidden", "read-only peer", None))
+                Err(api_err("forbidden", "read-only peer"))
             }
         }
     }
@@ -207,6 +213,7 @@ fn require_access(
 
 async fn status_snapshot(state: &ApiState, locked: bool) -> kxprov_api::StatusResponse {
     let gates = state.gates.read().await;
+    let effective = state.mode.effective(state.profile);
     let locked_alert = if locked {
         let st = state.locked.load().ok().unwrap_or_default();
         let now = chrono::Utc::now();
@@ -231,6 +238,7 @@ async fn status_snapshot(state: &ApiState, locked: bool) -> kxprov_api::StatusRe
     kxprov_api::StatusResponse {
         profile: state.profile,
         mode: kxprov_api::DaemonMode::Simulator,
+        operational_mode: effective.operational,
         transport: state.transport_label.clone(),
         gates: kxprov_api::GateFlags {
             live_writes_approved: gates.config.live_writes_approved,
@@ -246,7 +254,7 @@ async fn list_backups(state: &ApiState) -> Result<ResponseResult, ApiErrorBody> 
     let list = state
         .backups
         .list()
-        .map_err(|e| api_err("io", &e.to_string(), None))?;
+        .map_err(|e| api_err("io", &e.to_string()))?;
     let backups = list
         .into_iter()
         .map(|m| backup_info(&m, &state.goliath))
@@ -268,44 +276,59 @@ async fn run_plan(
             token_id: token,
         })
         .await
-        .map_err(|_| api_err("queue", "daemon shutting down", None))?;
-    map_outcome(
-        rx.await
-            .map_err(|_| api_err("queue", "job dropped", None))?,
-    )
+        .map_err(|_| api_err("queue", "daemon shutting down"))?;
+    map_outcome(rx.await.map_err(|_| api_err("queue", "job dropped"))?)
 }
 
-async fn mint_approval(
+async fn submit_approval(
     state: &ApiState,
-    cred: crate::peer::PeerCred,
-    params: MintApprovalParams,
+    params: &SubmitApprovalParams,
+    approver: TokenId,
 ) -> Result<ResponseResult, ApiErrorBody> {
-    if !state.peer_policy.is_admin(cred) {
-        return Err(api_err(
-            "forbidden",
-            "admin role required to mint approval",
-            None,
-        ));
-    }
-    if params.admin_reauth_proof.is_empty() {
-        return Err(api_err("reauth", "admin re-auth proof required", None));
-    }
-    if !state.gates.read().await.config.live_writes_approved && params.profile == Profile::Prod {
-        return Err(api_err("gate", "live_writes_approved is false", None));
-    }
     let rec = state
         .plans
         .get(&params.plan_id)
-        .map_err(|e| api_err("plan", &e.to_string(), None))?;
-    if rec.diff_hash != params.diff_hash || rec.profile != params.profile {
-        return Err(api_err("plan", "plan id / diff / profile mismatch", None));
+        .map_err(|e| api_err("plan", &e.to_string()))?;
+    if rec.diff_hash != params.diff_hash {
+        return Err(api_err("plan", "diff hash mismatch"));
     }
+    let now = now_ms();
     let approval = state
         .approvals
-        .mint(params.plan_id, params.diff_hash, params.profile, now_ms())
-        .map_err(|e| api_err("approval", &e.to_string(), None))?;
-    Ok(ResponseResult::MintApproval(MintApprovalResult {
+        .submit(
+            params.plan_id.clone(),
+            params.diff_hash.clone(),
+            state.profile,
+            &rec.creator_token,
+            approver,
+            now,
+        )
+        .map_err(|e| api_err("approval", &e.to_string()))?;
+    Ok(ResponseResult::SubmitApproval(SubmitApprovalResult {
         approval,
+    }))
+}
+
+async fn set_mode(
+    state: &ApiState,
+    cred: crate::peer::PeerCred,
+    params: SetModeParams,
+) -> Result<ResponseResult, ApiErrorBody> {
+    if !state.peer_policy.is_admin(cred) {
+        return Err(api_err("forbidden", "root admin required"));
+    }
+    let body = ModeFileBody {
+        mode: params.mode,
+        counter: params.counter,
+        signature: params.signature,
+    };
+    let effective = state
+        .mode
+        .set_signed(body)
+        .map_err(|e| api_err("mode", &e.to_string()))?;
+    Ok(ResponseResult::SetMode(SetModeResult {
+        mode: effective.operational,
+        counter: params.counter,
     }))
 }
 
@@ -316,7 +339,7 @@ async fn apply_plan(
 ) -> Result<ResponseResult, ApiErrorBody> {
     let now = now_ms();
     if !state.gates.read().await.config.live_writes_approved && state.profile == Profile::Prod {
-        return Err(api_err("gate", "live_writes_approved is false", None));
+        return Err(api_err("gate", "live_writes_approved is false"));
     }
     state
         .plans
@@ -327,28 +350,34 @@ async fn apply_plan(
             &token,
             now,
         )
-        .map_err(|e| api_err("plan", &e.to_string(), None))?;
+        .map_err(|e| api_err("plan", &e.to_string()))?;
 
-    if !state
-        .approvals
-        .has_active(&params.plan_id, &params.diff_hash, state.profile, now)
-    {
-        return Err(api_err(
-            "approval_required",
-            "no active approval for this plan",
-            Some(approval_url(
-                &state.approval_url_base,
-                params.plan_id.as_str(),
-            )),
-        ));
+    verify_live_diff_hash(
+        &state.config,
+        &state.plans,
+        &params.plan_id,
+        &params.diff_hash,
+    )
+    .map_err(|_| api_err("diff", "live base diff hash mismatch"))?;
+
+    let operational = state.mode.effective(state.profile).operational;
+    if write_approval_required(state.profile, operational) {
+        if !state
+            .approvals
+            .has_active(&params.plan_id, &params.diff_hash, state.profile, now)
+        {
+            return Err(api_err(
+                "approval_required",
+                "no active approval for this plan",
+            ));
+        }
+        state
+            .approvals
+            .consume(&params.plan_id, &params.diff_hash, state.profile, now)
+            .map_err(|e| api_err("approval", &e.to_string()))?;
     }
 
-    state
-        .approvals
-        .consume(&params.plan_id, &params.diff_hash, state.profile, now)
-        .map_err(|e| api_err("approval", &e.to_string(), None))?;
-
-    if state.profile == Profile::Sim {
+    if matches!(state.profile, Profile::Sim | Profile::Test) {
         return run_job(
             state,
             JobKind::ApplyPlan {
@@ -373,14 +402,14 @@ async fn unlock(
     params: UnlockParams,
 ) -> Result<ResponseResult, ApiErrorBody> {
     if !state.peer_policy.is_admin(cred) {
-        return Err(api_err("forbidden", "root admin required", None));
+        return Err(api_err("forbidden", "root admin required"));
     }
     let _ = params.reason;
     let _ = params.job_id;
     state
         .locked
         .clear()
-        .map_err(|e| api_err("io", &e.to_string(), None))?;
+        .map_err(|e| api_err("io", &e.to_string()))?;
     Ok(ResponseResult::Unlock(UnlockResult { unlocked: true }))
 }
 
@@ -389,10 +418,8 @@ async fn run_job(state: &ApiState, kind: JobKind) -> Result<ResponseResult, ApiE
         .queue
         .enqueue(kind)
         .await
-        .map_err(|_| api_err("queue", "daemon shutting down", None))?;
-    let outcome = rx
-        .await
-        .map_err(|_| api_err("queue", "job dropped", None))?;
+        .map_err(|_| api_err("queue", "daemon shutting down"))?;
+    let outcome = rx.await.map_err(|_| api_err("queue", "job dropped"))?;
     map_outcome(outcome)
 }
 
@@ -403,6 +430,6 @@ fn map_outcome(outcome: JobOutcome) -> Result<ResponseResult, ApiErrorBody> {
         JobOutcome::BackupNow(r) => Ok(ResponseResult::BackupNow(r)),
         JobOutcome::ApplyPlan(r) => Ok(ResponseResult::ApplyPlan(r)),
         JobOutcome::ApplyDeferred(r) => Ok(ResponseResult::ApplyDeferred(r)),
-        JobOutcome::Err { code, message } => Err(api_err(&code, &message, None)),
+        JobOutcome::Err { code, message } => Err(api_err(&code, &message)),
     }
 }

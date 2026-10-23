@@ -38,6 +38,13 @@ impl TokenStore {
                 scopes: vec![Scope::Read, Scope::Plan, Scope::Write],
             },
         );
+        by_id.insert(
+            "approver".into(),
+            TokenRecord {
+                id: TokenId("approver".into()),
+                scopes: vec![Scope::Read, Scope::Approve],
+            },
+        );
         Self { by_id }
     }
 

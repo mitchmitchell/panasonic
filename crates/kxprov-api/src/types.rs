@@ -12,6 +12,14 @@ pub enum DaemonMode {
     Simulator,
 }
 
+/// Signed operational mode from mode.json (v2.6 F1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OperationalMode {
+    Testing,
+    Production,
+}
+
 /// Caller capability enforced in `kxprovd` from SO_PEERCRED + token store (v2.3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -19,6 +27,7 @@ pub enum Scope {
     Read,
     Plan,
     Write,
+    Approve,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -42,6 +51,7 @@ pub struct LockedAlertStatus {
 pub struct StatusResponse {
     pub profile: Profile,
     pub mode: DaemonMode,
+    pub operational_mode: OperationalMode,
     pub transport: String,
     pub gates: GateFlags,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -99,19 +109,29 @@ pub struct RequestAuth {
     pub token_id: TokenId,
 }
 
-/// Admin-only: daemon mints an approval after verifying re-auth proof (A4 supplies real proof).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MintApprovalParams {
+pub struct SubmitApprovalParams {
     pub plan_id: PlanId,
     pub diff_hash: DiffHash,
-    pub profile: Profile,
-    /// Placeholder in A3; replaced by argon2 re-auth verification in A4.
-    pub admin_reauth_proof: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MintApprovalResult {
+pub struct SubmitApprovalResult {
     pub approval: Approval,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SetModeParams {
+    pub mode: OperationalMode,
+    pub counter: u64,
+    /// Hex-encoded ed25519 signature over the canonical mode message.
+    pub signature: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SetModeResult {
+    pub mode: OperationalMode,
+    pub counter: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -164,7 +184,8 @@ pub enum RequestBody {
     Status,
     ReadFields { params: ReadFieldsParams },
     PlanChange { params: PlanChangeParams },
-    MintApproval { params: MintApprovalParams },
+    SubmitApproval { params: SubmitApprovalParams },
+    SetMode { params: SetModeParams },
     BackupNow,
     ListBackups,
     ApplyPlan { params: ApplyPlanParams },
@@ -186,7 +207,8 @@ pub enum ResponseResult {
     Status(StatusResponse),
     ReadFields(ReadFieldsResult),
     PlanChange(PlanChangeResult),
-    MintApproval(MintApprovalResult),
+    SubmitApproval(SubmitApprovalResult),
+    SetMode(SetModeResult),
     ListBackups(ListBackupsResult),
     BackupNow(BackupNowResult),
     Job(JobRef),
@@ -215,8 +237,6 @@ pub struct ApplyPlanResult {
 pub struct ApiErrorBody {
     pub code: String,
     pub message: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub approval_url: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -235,13 +255,11 @@ impl Response {
             self.result.ok_or(ApiErrorBody {
                 code: "internal".into(),
                 message: "missing result".into(),
-                approval_url: None,
             })
         } else {
             Err(self.error.unwrap_or(ApiErrorBody {
                 code: "unknown".into(),
                 message: "request failed".into(),
-                approval_url: None,
             }))
         }
     }

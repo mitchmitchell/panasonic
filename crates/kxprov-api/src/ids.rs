@@ -78,6 +78,7 @@ pub struct Approval {
     pub plan_id: PlanId,
     pub diff_hash: DiffHash,
     pub profile: Profile,
+    pub approver_token: TokenId,
     pub expires_at_ms: u64,
     #[serde(default)]
     pub consumed: bool,

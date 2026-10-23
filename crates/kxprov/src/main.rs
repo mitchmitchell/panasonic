@@ -6,6 +6,9 @@
 //! `kxprov: error: ...`, with no backtrace.
 
 use clap::{Parser, Subcommand, ValueEnum};
+use ed25519_dalek::{Signer, SigningKey};
+use kxprov_api::mode_sign_message;
+use kxprov_api::{OperationalMode, SetModeParams};
 use kxtd1232::error::NotAllowed;
 use kxtd1232::{build_plan, field_patch, Client, Error, FieldKind, Granularity};
 use kxtd1232_sim::{SimPbx, SimTransport, PLACEHOLDER_PASSWORD};
@@ -59,6 +62,40 @@ enum Command {
         #[arg(long)]
         reason: String,
     },
+    /// Operational mode (v2.6 F1, root socket only).
+    Mode {
+        #[command(subcommand)]
+        cmd: ModeCommand,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum ModeCommand {
+    /// Install a signed mode.json via the daemon.
+    Set {
+        #[arg(long, value_enum)]
+        mode: OperationalModeCli,
+        #[arg(long)]
+        counter: u64,
+        /// 32-byte ed25519 seed file (ed25519-sk material).
+        #[arg(long)]
+        signing_key: std::path::PathBuf,
+    },
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+enum OperationalModeCli {
+    Testing,
+    Production,
+}
+
+impl From<OperationalModeCli> for OperationalMode {
+    fn from(v: OperationalModeCli) -> Self {
+        match v {
+            OperationalModeCli::Testing => OperationalMode::Testing,
+            OperationalModeCli::Production => OperationalMode::Production,
+        }
+    }
 }
 
 /// CLI failure, split by exit code.
@@ -124,6 +161,9 @@ fn run(cli: &Cli) -> Result<(), CliError> {
     if matches!(cli.cmd, Command::Unlock { .. }) {
         return unlock_daemon(cli);
     }
+    if matches!(cli.cmd, Command::Mode { .. }) {
+        return mode_daemon(cli);
+    }
     check_ranges(&cli.cmd)?;
     let TransportKind::Sim = cli.transport;
     let mut c = Client::new(SimTransport::new(SimPbx::default()));
@@ -172,6 +212,7 @@ fn command(c: &mut Client<SimTransport>, cmd: &Command) -> Result<(), CliError> 
             }
         }
         Command::Unlock { .. } => unreachable!("handled in unlock_daemon"),
+        Command::Mode { .. } => unreachable!("handled in mode_daemon"),
         Command::Plan { kind, index, value } => {
             let patch = field_patch(*kind, *index, value)?;
             kxtd1232::tables::check_writable_table(kind.table()).map_err(Error::from)?;
@@ -187,6 +228,45 @@ fn command(c: &mut Client<SimTransport>, cmd: &Command) -> Result<(), CliError> 
         }
     }
     Ok(())
+}
+
+fn mode_daemon(cli: &Cli) -> Result<(), CliError> {
+    let Command::Mode { cmd } = &cli.cmd else {
+        return Err(CliError::Usage("mode".into()));
+    };
+    let ModeCommand::Set {
+        mode,
+        counter,
+        signing_key,
+    } = cmd;
+    let seed = std::fs::read(signing_key).map_err(|e| CliError::Usage(e.to_string()))?;
+    let seed: [u8; 32] = seed
+        .as_slice()
+        .try_into()
+        .map_err(|_| CliError::Usage("signing key must be 32 bytes".into()))?;
+    let key = SigningKey::from_bytes(&seed);
+    let op: OperationalMode = (*mode).into();
+    let msg = mode_sign_message(op, *counter);
+    let sig = key.sign(&msg);
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| CliError::Usage(e.to_string()))?;
+    rt.block_on(async {
+        let mut c = kxprov_api::ApiClient::connect(&cli.socket)
+            .await
+            .map_err(|e| CliError::Usage(e.to_string()))?;
+        c.call(kxprov_api::RequestBody::SetMode {
+            params: SetModeParams {
+                mode: op,
+                counter: *counter,
+                signature: hex::encode(sig.to_bytes()),
+            },
+        })
+        .await
+        .map_err(|e| CliError::Usage(e.to_string()))?;
+        Ok(())
+    })
 }
 
 fn unlock_daemon(cli: &Cli) -> Result<(), CliError> {

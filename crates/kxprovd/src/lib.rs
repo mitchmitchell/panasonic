@@ -4,6 +4,7 @@ pub mod alert;
 pub mod api;
 pub mod apply;
 pub mod approval;
+pub mod audit;
 pub mod backup;
 pub mod config;
 pub mod dbh;
@@ -12,7 +13,9 @@ pub mod goliath;
 pub mod journal;
 pub mod lock;
 pub mod locked;
+pub mod mode;
 pub mod peer;
+pub mod plan_live;
 pub mod plan_store;
 pub mod queue;
 pub mod time;
@@ -27,6 +30,7 @@ use config::{Config, TransportKind};
 use gates::GateState;
 use goliath::GoliathQueue;
 use journal::Journal;
+use kxprov_api::Profile;
 use locked::LockedStore;
 use plan_store::PlanStore;
 use std::sync::Arc;
@@ -77,6 +81,7 @@ impl Daemon {
 
         let q = Arc::clone(&queue);
         let api_state = Arc::new(ApiState {
+            config: config.clone(),
             profile: config.profile,
             transport_label,
             gates,
@@ -88,7 +93,7 @@ impl Daemon {
             approvals,
             locked,
             goliath,
-            approval_url_base: config.approval_url_base.clone(),
+            mode: mode::ModeStore::new(&config.data_dir),
         });
 
         let socket_path = config.socket_path.clone();
@@ -135,9 +140,18 @@ impl Daemon {
         data_dir: impl AsRef<std::path::Path>,
         peer_uid: u32,
     ) -> (Self, std::path::PathBuf) {
+        Self::sim_for_tests_profile(data_dir, peer_uid, Profile::Sim)
+    }
+
+    pub fn sim_for_tests_profile(
+        data_dir: impl AsRef<std::path::Path>,
+        peer_uid: u32,
+        profile: kxprov_api::Profile,
+    ) -> (Self, std::path::PathBuf) {
         let data_dir = data_dir.as_ref().to_path_buf();
         let socket = data_dir.join("kxprovd.sock");
         let mut cfg = Config::sim_test(data_dir, socket.clone(), peer_uid);
+        cfg.profile = profile;
         cfg.gates.live_writes_approved = true;
         let daemon = Self::start(cfg).expect("daemon starts");
         (daemon, socket)

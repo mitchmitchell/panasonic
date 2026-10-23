@@ -177,6 +177,38 @@ impl PlanSnapshot {
     }
 }
 
+/// Recompute DiffHash using live table bytes as write bases (v2.6 F1 apply gate).
+pub fn diff_hash_with_live_table(
+    profile: Profile,
+    rec: &PlanRecord,
+    table_image: &[u8],
+) -> Result<DiffHash, PlanError> {
+    let writes: Vec<CanonicalWrite<'_>> = rec
+        .writes
+        .iter()
+        .map(|w| {
+            let start = w.record as usize * rec.record_size + 2 * w.word as usize;
+            let end = start + w.new.len();
+            if end > table_image.len() {
+                return Err(PlanError::DiffMismatch);
+            }
+            Ok(CanonicalWrite {
+                table: w.table,
+                record: w.record,
+                word: w.word,
+                base: &table_image[start..end],
+                new: &w.new,
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(diff_hash(&CanonicalPlan {
+        profile,
+        table: rec.table,
+        record_size: rec.record_size,
+        writes,
+    }))
+}
+
 pub fn compute_diff_hash(profile: Profile, snap: &PlanSnapshot) -> DiffHash {
     let writes: Vec<CanonicalWrite<'_>> = snap
         .writes

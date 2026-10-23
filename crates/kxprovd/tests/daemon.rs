@@ -1,7 +1,7 @@
 #![allow(clippy::unwrap_used)]
 
 use kxprov_api::{
-    ApiClient, DiffHash, FieldKindWire, Profile, RequestAuth, RequestBody, ResponseResult, TokenId,
+    ApiClient, DiffHash, FieldKindWire, RequestAuth, RequestBody, ResponseResult, TokenId,
 };
 use kxprovd::locked::LockedStore;
 use kxprovd::Daemon;
@@ -137,20 +137,21 @@ async fn approval_single_use() {
         panic!("plan");
     };
 
-    let mut admin = ApiClient::connect(&sock).await.unwrap();
-    let ResponseResult::MintApproval(_) = admin
-        .call(RequestBody::MintApproval {
-            params: kxprov_api::MintApprovalParams {
-                plan_id: plan.plan_id.clone(),
-                diff_hash: plan.diff_hash.clone(),
-                profile: Profile::Sim,
-                admin_reauth_proof: "ok".into(),
+    let mut approver = ApiClient::connect(&sock).await.unwrap();
+    let ResponseResult::SubmitApproval(_) = approver
+        .call_auth(
+            RequestBody::SubmitApproval {
+                params: kxprov_api::SubmitApprovalParams {
+                    plan_id: plan.plan_id.clone(),
+                    diff_hash: plan.diff_hash.clone(),
+                },
             },
-        })
+            Some(gateway_auth("approver")),
+        )
         .await
         .unwrap()
     else {
-        panic!("mint");
+        panic!("submit");
     };
 
     let ResponseResult::BackupNow(_) = gw
@@ -217,16 +218,17 @@ async fn token_b_cannot_apply_token_a_plan() {
         panic!("plan");
     };
 
-    let mut admin = ApiClient::connect(&sock).await.unwrap();
-    let _ = admin
-        .call(RequestBody::MintApproval {
-            params: kxprov_api::MintApprovalParams {
-                plan_id: plan.plan_id.clone(),
-                diff_hash: plan.diff_hash.clone(),
-                profile: Profile::Sim,
-                admin_reauth_proof: "ok".into(),
+    let mut approver = ApiClient::connect(&sock).await.unwrap();
+    let _ = approver
+        .call_auth(
+            RequestBody::SubmitApproval {
+                params: kxprov_api::SubmitApprovalParams {
+                    plan_id: plan.plan_id.clone(),
+                    diff_hash: plan.diff_hash.clone(),
+                },
             },
-        })
+            Some(gateway_auth("approver")),
+        )
         .await
         .unwrap();
 

@@ -22,8 +22,6 @@ pub struct Config {
     pub serial_device: PathBuf,
     pub gateway_uid: u32,
     pub admin_uid: u32,
-    /// Web UI path prefix for approval links (A4).
-    pub approval_url_base: String,
     /// Optional TOTP for admin re-auth (A4 wires verification; off by default).
     pub totp_enabled: bool,
     pub totp_secret_path: Option<PathBuf>,
@@ -43,7 +41,6 @@ impl Config {
             serial_device: PathBuf::from("/dev/kxpbx"),
             gateway_uid: peer_uid,
             admin_uid: peer_uid,
-            approval_url_base: "/plans".into(),
             totp_enabled: false,
             totp_secret_path: None,
         }

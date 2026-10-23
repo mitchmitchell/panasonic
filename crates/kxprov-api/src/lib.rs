@@ -5,12 +5,14 @@
 
 mod client;
 mod ids;
+mod mode_sign;
 mod plan_hash;
 mod protocol;
 mod types;
 
 pub use client::{ApiClient, ApiError};
 pub use ids::{Approval, DiffHash, PlanId, Profile, TokenId};
+pub use mode_sign::mode_sign_message;
 pub use plan_hash::{diff_hash, CanonicalPlan, CanonicalWrite};
 pub use protocol::*;
 pub use types::*;

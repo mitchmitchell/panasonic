@@ -1,7 +1,7 @@
-//! Per-plan approvals (v2.3 §5b F1): minted only by the daemon, single-use, TTL 10 min.
+//! Per-plan approvals via submit_approval (v2.6 F1).
 
-use kxprov_api::APPROVAL_TTL_SECS;
-use kxprov_api::{Approval, DiffHash, PlanId, Profile};
+use kxprov_api::{Approval, DiffHash, PlanId, Profile, TokenId};
+use kxprov_api::{APPROVAL_SUBMIT_LIMIT_DAY, APPROVAL_SUBMIT_LIMIT_HOUR, APPROVAL_TTL_SECS};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
@@ -20,11 +20,23 @@ pub enum ApprovalError {
     Expired,
     #[error("profile mismatch")]
     ProfileMismatch,
+    #[error("same approver as requester")]
+    SameApprover,
+    #[error("rate limit")]
+    RateLimit,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct ApprovalStore {
     items: Vec<Approval>,
+    #[serde(default)]
+    submit_log: Vec<SubmitRecord>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SubmitRecord {
+    approver: TokenId,
+    at_ms: u64,
 }
 
 pub struct ApprovalBook {
@@ -51,22 +63,59 @@ impl ApprovalBook {
         Ok(())
     }
 
-    pub fn mint(
+    fn check_rate_limit(
+        store: &ApprovalStore,
+        approver: &TokenId,
+        now_ms: u64,
+    ) -> Result<(), ApprovalError> {
+        let hour_ago = now_ms.saturating_sub(3_600_000);
+        let day_ago = now_ms.saturating_sub(86_400_000);
+        let hour_count = store
+            .submit_log
+            .iter()
+            .filter(|r| r.approver == *approver && r.at_ms >= hour_ago)
+            .count();
+        let day_count = store
+            .submit_log
+            .iter()
+            .filter(|r| r.approver == *approver && r.at_ms >= day_ago)
+            .count();
+        if hour_count >= APPROVAL_SUBMIT_LIMIT_HOUR as usize {
+            return Err(ApprovalError::RateLimit);
+        }
+        if day_count >= APPROVAL_SUBMIT_LIMIT_DAY as usize {
+            return Err(ApprovalError::RateLimit);
+        }
+        Ok(())
+    }
+
+    pub fn submit(
         &self,
         plan_id: PlanId,
         diff_hash: DiffHash,
         profile: Profile,
+        requester: &TokenId,
+        approver: TokenId,
         now_ms: u64,
     ) -> Result<Approval, ApprovalError> {
+        if requester == &approver {
+            return Err(ApprovalError::SameApprover);
+        }
         let mut store = self.load()?;
+        Self::check_rate_limit(&store, &approver, now_ms)?;
         let approval = Approval {
             plan_id,
             diff_hash,
             profile,
+            approver_token: approver.clone(),
             expires_at_ms: now_ms + u64::from(APPROVAL_TTL_SECS) * 1000,
             consumed: false,
         };
         store.items.push(approval.clone());
+        store.submit_log.push(SubmitRecord {
+            approver,
+            at_ms: now_ms,
+        });
         self.save(&store)?;
         Ok(approval)
     }
