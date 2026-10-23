@@ -5,6 +5,7 @@ use std::fmt;
 
 /// A frame that cannot be built or parsed.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum FrameError {
     /// No bytes at all.
     Empty,
@@ -42,6 +43,7 @@ impl std::error::Error for FrameError {}
 
 /// A request the core refuses to encode.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum NotAllowed {
     /// The encoder is read-only and a write was requested.
     ReadOnlyEncoder,
@@ -96,6 +98,7 @@ impl std::error::Error for NotAllowed {}
 
 /// A field value that cannot be encoded or a record that cannot be decoded.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum FieldError {
     NotDigits,
     TooManyDigits { max: usize },
@@ -130,6 +133,7 @@ impl std::error::Error for FieldError {}
 
 /// Why the login state machine failed.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum LoginFailure {
     /// PBX answered `NG...`.
     Ng,
@@ -173,6 +177,7 @@ pub struct UnackedWrite {
 
 /// Why a write counts as unacked.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum UnackedReason {
     Timeout,
     BusyTimeout,
@@ -209,6 +214,7 @@ impl fmt::Display for UnackedReason {
 
 /// Top-level error of the protocol core.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Error {
     Frame(FrameError),
     NotAllowed(NotAllowed),
@@ -271,6 +277,7 @@ pub enum Error {
 
 /// Client operations, for [`Error::BadState`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Op {
     Request,
     Write,
@@ -279,6 +286,7 @@ pub enum Op {
 
 /// Why a write plan could not be built.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum PlanError {
     BaseSize {
         table: u8,
@@ -352,7 +360,22 @@ impl fmt::Display for Error {
     }
 }
 
-impl std::error::Error for Error {}
+impl std::error::Error for PlanError {}
+impl std::error::Error for LoginFailure {}
+
+impl std::error::Error for Error {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Frame(e) | Self::Garbled(e) => Some(e),
+            Self::NotAllowed(e) => Some(e),
+            Self::Field(e) => Some(e),
+            Self::Login(e) => Some(e),
+            Self::Plan(e) => Some(e),
+            Self::PreSend(e) => Some(e.as_ref()),
+            _ => None,
+        }
+    }
+}
 
 impl From<FrameError> for Error {
     fn from(e: FrameError) -> Self {

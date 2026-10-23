@@ -8,14 +8,23 @@
 use kxtd1232::fields::{encode_cid_name, encode_cid_number, encode_ext_name};
 use kxtd1232::frame::{checksum, Cmd, BUSY_FRAME};
 use kxtd1232::tables;
-use kxtd1232::{Transport, TransportError};
+use kxtd1232::{SignOn, Transport, TransportError};
 use std::collections::{HashMap, VecDeque};
 
 pub const PLACEHOLDER_PASSWORD: &str = "0000";
 pub const PLACEHOLDER_ROM_ID: &str = "-----PXXXXXXXXXX";
-/// Placeholder sign-on banner (not the unit's verbatim text); login keys only on the
-/// "Enter Password" line.
-pub const BANNER: &[u8] = b"<PBX SIGN-ON BANNER>\r\nEnter Password\r\n";
+/// Sign-on text the simulator plays: the placeholders from [`SignOn::default`].
+fn text_line(s: &str) -> Vec<u8> {
+    format!("{s}\r\n").into_bytes()
+}
+
+/// Banner then password prompt, as sent after CR LF and after BYE.
+pub fn banner() -> Vec<u8> {
+    let s = SignOn::default();
+    let mut v = text_line(&s.banner);
+    v.extend(text_line(&s.password_prompt));
+    v
+}
 
 /// Frame `[LEN][CMD][body][SUM]` as the PBX would send it. The simulator plays the PBX, so
 /// it frames its own replies; the protocol core exposes no raw-byte encoder. Tests use it
@@ -206,14 +215,14 @@ impl SimPbx {
         match self.mode {
             Mode::AwaitCrlf => {
                 self.mode = Mode::AwaitPassword;
-                BANNER.to_vec()
+                banner()
             }
             Mode::AwaitPassword if line == self.password.as_slice() => {
                 self.mode = Mode::AwaitEcs;
-                b"EIA Mode Start\r\n".to_vec()
+                text_line(&SignOn::default().mode_start)
             }
             // Wrong-password reply is a guess, like the RE simulator (gate G5).
-            Mode::AwaitPassword => b"Enter Password\r\n".to_vec(),
+            Mode::AwaitPassword => text_line(&SignOn::default().password_prompt),
             Mode::AwaitEcs if line == b"ECS OF" => {
                 self.mode = Mode::AwaitPrg;
                 b"ECS OF\r\nOK\r\n".to_vec()
@@ -226,7 +235,7 @@ impl SimPbx {
             Mode::AwaitBye if line == b"BYE" => {
                 self.mode = Mode::AwaitPassword;
                 let mut v = b"OK\r\n".to_vec();
-                v.extend_from_slice(BANNER);
+                v.extend(banner());
                 v
             }
             _ => b"NG\r\n".to_vec(),

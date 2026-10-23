@@ -1,7 +1,7 @@
 {"step": 0, "dir": "pc", "kind": "text", "data": "\\r\\n", "note": "once, shortly after the PBX's XON"}
-{"step": 1, "dir": "pbx", "kind": "text", "data": "<PBX SIGN-ON BANNER>\\r\\nEnter Password\\r\\n", "note": "banner placeholder; the PBX sends XOFF then XON before it"}
+{"step": 1, "dir": "pbx", "kind": "text", "data": "<SIGNON_BANNER>\\r\\nPassword:\\r\\n", "note": "banner placeholder; the PBX sends XOFF then XON before it"}
 {"step": 2, "dir": "pc", "kind": "text", "data": "<PASSWORD>\\r\\n", "note": "placeholder; the real value is the unit's real default and is not recorded here"}
-{"step": 3, "dir": "pbx", "kind": "text", "data": "EIA Mode Start\\r\\n", "note": ""}
+{"step": 3, "dir": "pbx", "kind": "text", "data": "<MODE_START>\\r\\n", "note": ""}
 {"step": 4, "dir": "pc", "kind": "text", "data": "ECS OF\\r\\n", "note": ""}
 {"step": 5, "dir": "pbx", "kind": "text", "data": "ECS OF\\r\\nOK\\r\\n", "note": "echo then OK"}
 {"step": 6, "dir": "pc", "kind": "text", "data": "PRG\\r\\n", "note": ""}

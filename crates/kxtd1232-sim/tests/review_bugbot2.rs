@@ -130,3 +130,26 @@ fn test_bye_pending_persists_and_retry_resends_bye() {
     );
     assert_eq!(c.state(), &SessionState::Closed);
 }
+
+#[test]
+fn test_second_drain_while_disconnected_keeps_resume() {
+    let mut c = client();
+    let (base, new) = pending(&mut c, 7);
+    c.transport_mut().drop_link_now();
+    assert!(c.verify_block(0x25, 7, 0, &new, &base).is_err());
+    assert_eq!(c.state(), &SessionState::Disconnected);
+    // A later drain on the dead link must not wipe the saved resume.
+    assert!(matches!(c.drain_until_quiet(), Err(Error::LinkDown(_))));
+    assert_eq!(c.state(), &SessionState::Disconnected);
+    relogin(&mut c);
+    assert!(matches!(c.state(), SessionState::AwaitingVerify(_)));
+    assert_eq!(c.end_binary(), Err(Error::EndBinaryHeld));
+}
+
+#[test]
+fn test_sim_plays_default_signon_placeholders() {
+    let c = client();
+    assert_eq!(c.state(), &SessionState::Binary);
+    let prompt = kxtd1232::SignOn::default().password_prompt;
+    assert!(kxtd1232_sim::banner().ends_with(format!("{prompt}\r\n").as_bytes()));
+}

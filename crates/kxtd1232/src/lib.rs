@@ -19,6 +19,7 @@ pub mod fields;
 pub mod frame;
 pub mod plan;
 pub mod session;
+pub mod signon;
 pub mod tables;
 
 pub use client::{Client, SessionState, Timing, Transport, TransportError, VerifyOutcome};
@@ -26,3 +27,4 @@ pub use error::Error;
 pub use fields::FieldKind;
 pub use frame::{Cmd, Encoder, Reply, ReplyKind};
 pub use plan::{build_plan, field_patch, ChunkWrite, Granularity, Patch, WritePlan};
+pub use signon::SignOn;

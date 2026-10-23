@@ -5,6 +5,7 @@
 use crate::error::{Error, FrameError, LoginFailure, Op, UnackedReason, UnackedWrite};
 use crate::frame::{self, Access, Cmd, Encoder, Reply, ReplyKind};
 use crate::session::{Login, LoginState};
+use crate::signon::SignOn;
 use crate::tables;
 
 /// Transport errors.
@@ -110,6 +111,7 @@ pub struct Client<T: Transport> {
     /// drain-until-quiet. `end_binary` drains first while it is set, and is held if the
     /// drain cannot finish, so a late ack is never matched to the end-binary request.
     needs_drain: bool,
+    signon: SignOn,
 }
 
 impl<T: Transport> Client<T> {
@@ -128,7 +130,14 @@ impl<T: Transport> Client<T> {
             resume: None,
             drained: Vec::new(),
             needs_drain: false,
+            signon: SignOn::default(),
         }
+    }
+
+    /// Use deployment sign-on text instead of the placeholders.
+    pub fn with_signon(mut self, signon: SignOn) -> Self {
+        self.signon = signon;
+        self
     }
 
     fn require_session(&self) -> Result<(), Error> {
@@ -197,7 +206,7 @@ impl<T: Transport> Client<T> {
     /// Text login to binary mode, within `login_timeout_ms` overall and at most
     /// [`crate::session::MAX_LINES`] lines.
     pub fn login(&mut self, password: &str) -> Result<(), Error> {
-        let mut sm = Login::new(password).map_err(Error::Login)?;
+        let mut sm = Login::with_signon(password, self.signon.clone()).map_err(Error::Login)?;
         let start = self.t.now_ms();
         let limit = self.timing.login_timeout_ms;
         while !sm.state().is_terminal() {
@@ -535,7 +544,11 @@ impl<T: Transport> Client<T> {
                 Err(Error::Timeout) => return Ok(()),
                 Err(e @ Error::LinkDown(_)) => {
                     // Save any pending verify/rollback as resume before Disconnected.
-                    if !matches!(self.state, SessionState::Text | SessionState::Closed) {
+                    // Already Disconnected: keep the resume saved then.
+                    if !matches!(
+                        self.state,
+                        SessionState::Text | SessionState::Closed | SessionState::Disconnected
+                    ) {
                         self.note_link_down(None);
                     }
                     return Err(e);
@@ -703,7 +716,10 @@ impl<T: Transport> Client<T> {
         loop {
             let s = String::from_utf8_lossy(&text).into_owned();
             let lines: Vec<&str> = s.split('\n').map(str::trim).collect();
-            if lines.iter().any(|l| *l == "OK" || *l == "Enter Password") {
+            if lines
+                .iter()
+                .any(|l| *l == "OK" || *l == self.signon.password_prompt)
+            {
                 self.state = SessionState::Closed;
                 return Ok(());
             }

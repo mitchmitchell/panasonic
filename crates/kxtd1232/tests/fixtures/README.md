@@ -6,7 +6,7 @@ There are no payload bytes and no ROM id. The sign-on banner and password are pl
 
 | file | source in the RE vault (`grokbots/reverse-engineering/kx-td1232/`) | changes |
 |---|---|---|
-| `exchanges.jsonl` | `fixtures/exchanges.jsonl` | The verbatim sign-on banner is replaced with `<PBX SIGN-ON BANNER>`. The XON/XOFF capture-timing notes (steps 0, 1, 7) are made generic. |
+| `exchanges.jsonl` | `fixtures/exchanges.jsonl` | The verbatim sign-on banner is replaced with `<SIGNON_BANNER>`, and the prompts with the `SignOn` placeholders (`Password:`, `<MODE_START>`). The XON/XOFF capture-timing notes (steps 0, 1, 7) are made generic. |
 | `full-upload-headers.jsonl` | `fixtures/full-upload-headers.jsonl` | none (byte-identical) |
 
 The spec they agree with is `table-spec-DRAFT.md` in the same vault folder. Never add real

@@ -4,6 +4,7 @@
 //! (CR LF about 5 ms after XON, never inside the XOFF window) belongs to the transport.
 
 use crate::error::LoginFailure;
+use crate::signon::SignOn;
 use std::fmt;
 
 pub const XOFF: u8 = 0x13;
@@ -37,6 +38,7 @@ pub struct Login {
     state: LoginState,
     buf: Vec<u8>,
     lines: usize,
+    signon: SignOn,
 }
 
 impl fmt::Debug for Login {
@@ -46,7 +48,13 @@ impl fmt::Debug for Login {
 }
 
 impl Login {
+    /// Login with the placeholder [`SignOn`] text.
     pub fn new(password: &str) -> Result<Self, LoginFailure> {
+        Self::with_signon(password, SignOn::default())
+    }
+
+    /// Login keyed on the given sign-on text (private deployment configuration).
+    pub fn with_signon(password: &str, signon: SignOn) -> Result<Self, LoginFailure> {
         if password.is_empty() || password.contains(['\r', '\n']) || !password.is_ascii() {
             return Err(LoginFailure::InvalidPassword);
         }
@@ -55,6 +63,7 @@ impl Login {
             state: LoginState::WaitXon,
             buf: Vec::new(),
             lines: 0,
+            signon,
         })
     }
 
@@ -122,23 +131,25 @@ impl Login {
             self.state = LoginState::Failed(LoginFailure::Ng);
             return Vec::new();
         }
-        if line.contains("Another Terminal Connected") {
+        if line.contains(self.signon.in_use.as_str()) {
             self.state = LoginState::Failed(LoginFailure::AnotherTerminal);
             return Vec::new();
         }
+        let prompt = line == self.signon.password_prompt;
+        let mode_start = line == self.signon.mode_start;
         match (&self.state, line) {
-            (LoginState::WaitPrompt, "Enter Password") => {
+            (LoginState::WaitPrompt, _) if prompt => {
                 self.state = LoginState::WaitEia;
                 let mut v = self.password.clone();
                 v.push(b'\r');
                 v
             }
             // Re-prompt: the real wrong-password reply is UNKNOWN (gate G5).
-            (LoginState::WaitEia, "Enter Password") => {
+            (LoginState::WaitEia, _) if prompt => {
                 self.state = LoginState::Failed(LoginFailure::PasswordRejected);
                 Vec::new()
             }
-            (LoginState::WaitEia, "EIA Mode Start") => {
+            (LoginState::WaitEia, _) if mode_start => {
                 self.state = LoginState::WaitEcsOk;
                 b"ECS OF\r\n".to_vec()
             }
