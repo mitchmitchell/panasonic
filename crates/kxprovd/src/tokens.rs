@@ -1,8 +1,9 @@
 //! Daemon token store: verify bearer secrets (hashed on disk only).
 
 use kxprov_api::{hash_bearer_secret, Scope, TokenEntry, TokenId, TokensFile};
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::time::SystemTime;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -31,11 +32,40 @@ pub struct VerifiedToken {
     pub scopes: Vec<Scope>,
 }
 
-#[derive(Clone)]
-pub struct TokenStore {
+struct TokenState {
     path: PathBuf,
     approver_token_id: TokenId,
-    by_hash: HashMap<String, TokenEntry>,
+    entries: Vec<TokenEntry>,
+    loaded_mtime: Option<SystemTime>,
+}
+
+pub struct TokenStore {
+    inner: Mutex<TokenState>,
+}
+
+impl Clone for TokenStore {
+    fn clone(&self) -> Self {
+        let state = self.inner.lock().expect("token store lock");
+        Self {
+            inner: Mutex::new(TokenState {
+                path: state.path.clone(),
+                approver_token_id: state.approver_token_id.clone(),
+                entries: state.entries.clone(),
+                loaded_mtime: state.loaded_mtime,
+            }),
+        }
+    }
+}
+
+fn ct_eq_str(a: &str, b: &str) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.bytes().zip(b.bytes()) {
+        diff |= x ^ y;
+    }
+    diff == 0
 }
 
 impl TokenStore {
@@ -50,35 +80,75 @@ impl TokenStore {
     }
 
     fn load_unchecked(path: PathBuf) -> Result<Self, TokenError> {
-        let raw = std::fs::read(&path)?;
+        let state = Self::read_state(&path)?;
+        Self::validate_file(&state.entries, &state.approver_token_id)?;
+        Ok(Self {
+            inner: Mutex::new(state),
+        })
+    }
+
+    fn read_state(path: &Path) -> Result<TokenState, TokenError> {
+        let meta = std::fs::metadata(path)?;
+        let loaded_mtime = meta.modified().ok();
+        let raw = std::fs::read(path)?;
         let file: TokensFile = serde_json::from_slice(&raw)?;
-        if file.tokens.is_empty() {
+        Ok(TokenState {
+            path: path.to_path_buf(),
+            approver_token_id: file.approver_token_id,
+            entries: file.tokens,
+            loaded_mtime,
+        })
+    }
+
+    fn validate_file(
+        entries: &[TokenEntry],
+        approver_token_id: &TokenId,
+    ) -> Result<(), TokenError> {
+        if entries.is_empty() {
             return Err(TokenError::Invalid("no tokens".into()));
         }
-        let approve_ids: Vec<_> = file
-            .tokens
+        let approve_ids: Vec<_> = entries
             .iter()
             .filter(|t| !t.revoked && t.scopes.iter().any(|s| *s == Scope::Approve))
             .map(|t| t.id.clone())
             .collect();
-        if approve_ids.len() != 1 || approve_ids[0] != file.approver_token_id {
+        if approve_ids.len() != 1 || approve_ids[0] != *approver_token_id {
             return Err(TokenError::Invalid(
                 "exactly one approver token must match approver_token_id".into(),
             ));
         }
-        let mut by_hash = HashMap::new();
         let mut ids = std::collections::HashSet::new();
-        for t in file.tokens {
+        for t in entries {
             if !ids.insert(t.id.as_str().to_string()) {
                 return Err(TokenError::Invalid("duplicate token id".into()));
             }
-            by_hash.insert(t.secret_hash.clone(), t);
         }
-        Ok(Self {
-            path,
-            approver_token_id: file.approver_token_id,
-            by_hash,
-        })
+        Ok(())
+    }
+
+    fn refresh_if_modified(state: &mut TokenState) -> Result<(), TokenError> {
+        if state.loaded_mtime.is_none() {
+            return Ok(());
+        }
+        let meta = std::fs::metadata(&state.path)?;
+        let mtime = meta.modified().ok();
+        if mtime == state.loaded_mtime {
+            return Ok(());
+        }
+        let fresh = Self::read_state(&state.path)?;
+        Self::validate_file(&fresh.entries, &fresh.approver_token_id)?;
+        *state = fresh;
+        Ok(())
+    }
+
+    fn find_entry<'a>(entries: &'a [TokenEntry], hash: &str) -> Option<&'a TokenEntry> {
+        let mut found: Option<&TokenEntry> = None;
+        for entry in entries {
+            if ct_eq_str(&entry.secret_hash, hash) {
+                found = Some(entry);
+            }
+        }
+        found
     }
 
     #[cfg(feature = "test-util")]
@@ -92,12 +162,16 @@ impl TokenStore {
         Ok(())
     }
 
-    pub fn path(&self) -> &Path {
-        &self.path
+    pub fn path(&self) -> PathBuf {
+        self.inner.lock().expect("token store lock").path.clone()
     }
 
-    pub fn approver_token_id(&self) -> &TokenId {
-        &self.approver_token_id
+    pub fn approver_token_id(&self) -> TokenId {
+        self.inner
+            .lock()
+            .expect("token store lock")
+            .approver_token_id
+            .clone()
     }
 
     pub fn verify_bearer(
@@ -106,15 +180,17 @@ impl TokenStore {
         now_ms: u64,
         need: Scope,
     ) -> Result<VerifiedToken, TokenError> {
+        let mut state = self.inner.lock().expect("token store lock");
+        Self::refresh_if_modified(&mut state)?;
         let hash = hash_bearer_secret(bearer);
-        let entry = self.by_hash.get(&hash).ok_or(TokenError::Unauthorized)?;
+        let entry = Self::find_entry(&state.entries, &hash).ok_or(TokenError::Unauthorized)?;
         if entry.revoked {
             return Err(TokenError::Revoked);
         }
         if now_ms >= entry.expires_at_ms {
             return Err(TokenError::Expired);
         }
-        if need == Scope::Approve && entry.id != self.approver_token_id {
+        if need == Scope::Approve && entry.id != state.approver_token_id {
             return Err(TokenError::ScopeDenied);
         }
         if !entry.scopes.iter().any(|s| *s == need) {
@@ -124,6 +200,19 @@ impl TokenStore {
             id: entry.id.clone(),
             scopes: entry.scopes.clone(),
         })
+    }
+
+    #[cfg(all(test, feature = "test-util"))]
+    pub fn from_entries_insecure(path: PathBuf, file: TokensFile) -> Self {
+        let state = TokenState {
+            path,
+            approver_token_id: file.approver_token_id,
+            entries: file.tokens,
+            loaded_mtime: None,
+        };
+        Self {
+            inner: Mutex::new(state),
+        }
     }
 
     #[cfg(unix)]
@@ -145,5 +234,40 @@ impl TokenStore {
     #[cfg(not(unix))]
     fn check_secure(_path: &Path) -> Result<(), TokenError> {
         Ok(())
+    }
+}
+
+#[cfg(all(test, feature = "test-util"))]
+mod tests {
+    use super::*;
+    use kxprov_api::hash_bearer_secret;
+
+    #[test]
+    fn approve_scope_requires_configured_cos_token_id() {
+        let file = TokensFile {
+            approver_token_id: TokenId("approver".into()),
+            tokens: vec![
+                TokenEntry {
+                    id: TokenId("approver".into()),
+                    secret_hash: hash_bearer_secret("good"),
+                    scopes: vec![Scope::Approve],
+                    expires_at_ms: u64::MAX / 2,
+                    revoked: false,
+                },
+                TokenEntry {
+                    id: TokenId("evil".into()),
+                    secret_hash: hash_bearer_secret("evil"),
+                    scopes: vec![Scope::Approve],
+                    expires_at_ms: u64::MAX / 2,
+                    revoked: false,
+                },
+            ],
+        };
+        let store = TokenStore::from_entries_insecure(PathBuf::from("/dev/null"), file);
+        assert!(matches!(
+            store.verify_bearer("evil", 0, Scope::Approve),
+            Err(TokenError::ScopeDenied)
+        ));
+        assert!(store.verify_bearer("good", 0, Scope::Approve).is_ok());
     }
 }

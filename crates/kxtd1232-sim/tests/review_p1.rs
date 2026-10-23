@@ -5,8 +5,8 @@
 use kxtd1232::error::{Op, PlanError};
 use kxtd1232::frame::Access;
 use kxtd1232::{
-    build_plan, Client, Error, Granularity, SendError, SessionState, Timing, Transport,
-    TransportError, VerifyOutcome,
+    build_plan, Client, Error, Granularity, SessionState, Timing, Transport, TransportError,
+    VerifyOutcome,
 };
 use kxtd1232_sim::{Fault, SimPbx, SimTransport, PLACEHOLDER_PASSWORD};
 
@@ -175,8 +175,8 @@ fn test_plan_errors_are_typed() {
 struct EmptyReads(u64);
 
 impl Transport for EmptyReads {
-    fn send(&mut self, data: &[u8]) -> Result<usize, SendError> {
-        Ok(data.len())
+    fn send(&mut self, _: &[u8]) -> Result<(), TransportError> {
+        Ok(())
     }
     fn recv(&mut self, _: u64) -> Result<Vec<u8>, TransportError> {
         self.0 += 1;

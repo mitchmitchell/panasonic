@@ -8,7 +8,7 @@
 use kxtd1232::fields::{encode_cid_name, encode_cid_number, encode_ext_name};
 use kxtd1232::frame::{checksum, Cmd, BUSY_FRAME};
 use kxtd1232::tables;
-use kxtd1232::{SendError, SignOn, Transport, TransportError};
+use kxtd1232::{SignOn, Transport, TransportError};
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -405,6 +405,9 @@ pub struct SimTransport {
     pub sent: Vec<u8>,
     /// When set, the link drops right after the next write frame reaches the simulator.
     pub drop_link_after_write: bool,
+    /// Next write send fails with `LinkDown` after this many bytes left the host (a
+    /// partial frame, or the whole frame when >= its length, which the PBX then stores).
+    pub fail_write_send_after: Option<usize>,
     link_down: bool,
 }
 
@@ -429,6 +432,7 @@ impl SimTransport {
             queue: q,
             sent: Vec::new(),
             drop_link_after_write: false,
+            fail_write_send_after: None,
             link_down: false,
         }
     }
@@ -449,6 +453,7 @@ impl SimTransport {
     pub fn reconnect(&mut self) {
         self.link_down = false;
         self.drop_link_after_write = false;
+        self.fail_write_send_after = None;
         self.queue.clear();
         let first = {
             let mut pbx = self.sim.lock().expect("sim pbx lock");
@@ -491,18 +496,29 @@ impl SimTransport {
 }
 
 impl Transport for SimTransport {
-    fn send(&mut self, data: &[u8]) -> Result<usize, SendError> {
+    fn send(&mut self, data: &[u8]) -> Result<(), TransportError> {
         if self.link_down {
-            return Err(SendError::LinkDown("sim: link dropped".into()));
+            return Err(TransportError::NothingWritten("sim: link dropped".into()));
+        }
+        if data.get(1) == Some(&Cmd::Write.byte()) {
+            if let Some(n) = self.fail_write_send_after.take() {
+                let n = n.min(data.len());
+                self.sent.extend_from_slice(&data[..n]);
+                if n == data.len() {
+                    self.sim.lock().expect("sim pbx lock").feed(data);
+                }
+                self.link_down = true;
+                return Err(TransportError::LinkDown(
+                    "sim: link dropped mid-send".into(),
+                ));
+            }
         }
         self.sent.extend_from_slice(data);
         if self.drop_link_after_write && data.get(1) == Some(&Cmd::Write.byte()) {
             self.sim.lock().expect("sim pbx lock").feed(data);
             self.link_down = true;
-            return Ok(data.len());
+            return Ok(());
         }
-        // Model the 9600-baud line: the PBX acts once the request has been received, and
-        // each reply lands once it has been transmitted.
         let t = kxtd1232::Timing::default();
         let rx_done = self.now + t.tx_ms(data.len());
         let emits = self.sim.lock().expect("sim pbx lock").feed(data);
@@ -510,7 +526,7 @@ impl Transport for SimTransport {
             let at = rx_done + delay + t.tx_ms(bytes.len());
             self.schedule(at, bytes);
         }
-        Ok(data.len())
+        Ok(())
     }
 
     fn recv(&mut self, timeout_ms: u64) -> Result<Vec<u8>, TransportError> {

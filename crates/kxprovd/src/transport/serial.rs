@@ -1,6 +1,6 @@
 //! Linux serial transport via `tokio-serial` (blocking read in the worker task).
 
-use kxtd1232::{SendError, Transport, TransportError};
+use kxtd1232::{Transport, TransportError};
 use std::io::{Read, Write};
 use std::path::Path;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -23,50 +23,52 @@ impl TokioSerialTransport {
             .map_err(|e| e.to_string())?;
         Ok(Self { port })
     }
+
+    fn send_all(&mut self, data: &[u8]) -> Result<(), TransportError> {
+        send_all_port(&mut self.port, data)
+    }
+}
+
+fn send_all_port<W: Write>(port: &mut W, data: &[u8]) -> Result<(), TransportError> {
+    if data.is_empty() {
+        return Ok(());
+    }
+    let mut written = 0;
+    while written < data.len() {
+        match port.write(&data[written..]) {
+            Ok(0) => {
+                return if written == 0 {
+                    Err(TransportError::NothingWritten(
+                        "serial: write returned 0".into(),
+                    ))
+                } else {
+                    Err(TransportError::LinkDown(format!(
+                        "serial: partial send {written}/{}",
+                        data.len()
+                    )))
+                };
+            }
+            Ok(n) => written += n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) if written == 0 => return Err(TransportError::NothingWritten(e.to_string())),
+            Err(e) => {
+                return Err(TransportError::LinkDown(format!(
+                    "serial: partial send {written}/{}: {e}",
+                    data.len()
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 impl Transport for TokioSerialTransport {
-    fn send(&mut self, data: &[u8]) -> Result<usize, SendError> {
-        if data.is_empty() {
-            return Ok(0);
-        }
-        let mut written = 0;
-        while written < data.len() {
-            match self.port.write(&data[written..]) {
-                Ok(0) => {
-                    return if written == 0 {
-                        Err(SendError::NothingWritten)
-                    } else {
-                        Err(SendError::Partial { written })
-                    };
-                }
-                Ok(n) => written += n,
-                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-                Err(e) if written == 0 => return Err(SendError::LinkDown(e.to_string())),
-                Err(_) => return Err(SendError::Partial { written }),
-            }
-        }
-        Ok(written)
+    fn send(&mut self, data: &[u8]) -> Result<(), TransportError> {
+        self.send_all(data)
     }
 
     fn recv(&mut self, timeout_ms: u64) -> Result<Vec<u8>, TransportError> {
-        let deadline = Instant::now() + Duration::from_millis(timeout_ms);
-        let mut buf = [0u8; 256];
-        loop {
-            if Instant::now() >= deadline {
-                return Err(TransportError::Timeout);
-            }
-            match self.port.read(&mut buf) {
-                Ok(0) => {
-                    std::thread::sleep(Duration::from_millis(5));
-                }
-                Ok(n) => return Ok(buf[..n].to_vec()),
-                Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
-                    return Err(TransportError::Timeout);
-                }
-                Err(e) => return Err(TransportError::LinkDown(e.to_string())),
-            }
-        }
+        recv_with_poll(&mut self.port, timeout_ms)
     }
 
     fn now_ms(&mut self) -> u64 {
@@ -74,5 +76,85 @@ impl Transport for TokioSerialTransport {
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0)
+    }
+}
+
+/// Shared recv loop: `WouldBlock` means no data yet (wait, do not drop the link).
+pub(crate) fn recv_with_poll<R: Read>(port: &mut R, timeout_ms: u64) -> Result<Vec<u8>, TransportError> {
+    let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+    let mut buf = [0u8; 256];
+    loop {
+        let now = Instant::now();
+        if now >= deadline {
+            return Err(TransportError::Timeout);
+        }
+        let remaining = deadline.saturating_duration_since(now);
+        match port.read(&mut buf) {
+            Ok(0) => {
+                std::thread::sleep(Duration::from_millis(5).min(remaining));
+            }
+            Ok(n) => return Ok(buf[..n].to_vec()),
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(5).min(remaining));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
+                return Err(TransportError::Timeout);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(TransportError::LinkDown(e.to_string())),
+        }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use std::io::{ErrorKind, Read, Write};
+    use std::sync::{Arc, Mutex};
+
+    struct MockPort {
+        read_plan: Arc<Mutex<Vec<std::io::Result<usize>>>>,
+    }
+
+    impl Read for MockPort {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let mut plan = self.read_plan.lock().unwrap();
+            let step = plan.remove(0);
+            match step {
+                Ok(0) => Err(ErrorKind::WouldBlock.into()),
+                Ok(n) => {
+                    buf[0] = b'X';
+                    Ok(n.min(1))
+                }
+                Err(e) => Err(e),
+            }
+        }
+    }
+
+    #[test]
+    fn would_block_then_byte_is_not_link_down() {
+        let read_plan = Arc::new(Mutex::new(vec![Err(ErrorKind::WouldBlock.into()), Ok(1)]));
+        let mut port = MockPort {
+            read_plan: Arc::clone(&read_plan),
+        };
+        let out = recv_with_poll(&mut port, 100).expect("recv succeeds after WouldBlock");
+        assert_eq!(out, b"X");
+    }
+
+    #[test]
+    fn send_zero_bytes_is_nothing_written() {
+        struct ZeroWrite;
+        impl Write for ZeroWrite {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Ok(0)
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut zw = ZeroWrite;
+        let err = send_all_port(&mut zw, &[0x01, 0x02]);
+        assert!(matches!(err, Err(TransportError::NothingWritten(_))));
     }
 }

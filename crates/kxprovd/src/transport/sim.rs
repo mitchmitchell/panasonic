@@ -1,4 +1,4 @@
-use kxtd1232::{SendError, Transport, TransportError};
+use kxtd1232::{Transport, TransportError};
 use kxtd1232_sim::SimTransport;
 use std::sync::Arc;
 
@@ -25,7 +25,7 @@ impl SimTransportBridge {
 }
 
 impl Transport for SimTransportBridge {
-    fn send(&mut self, data: &[u8]) -> Result<usize, SendError> {
+    fn send(&mut self, data: &[u8]) -> Result<(), TransportError> {
         self.inner.send(data)
     }
 

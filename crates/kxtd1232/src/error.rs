@@ -145,6 +145,8 @@ pub enum LoginFailure {
     LineTooLong { max: usize },
     /// Password empty or contains CR/LF.
     InvalidPassword,
+    /// A sign-on pattern from configuration is empty.
+    InvalidSignOn { field: &'static str },
     /// More text lines than the cap before reaching binary mode.
     TooManyLines { max: usize },
     /// Login did not reach binary mode within the overall time limit.
@@ -159,6 +161,7 @@ impl fmt::Display for LoginFailure {
             Self::PasswordRejected => write!(f, "password rejected"),
             Self::LineTooLong { max } => write!(f, "login line longer than {max} bytes"),
             Self::InvalidPassword => write!(f, "invalid password"),
+            Self::InvalidSignOn { field } => write!(f, "sign-on field {field} is empty"),
             Self::TooManyLines { max } => write!(f, "more than {max} login lines"),
             Self::TimedOut { ms } => write!(f, "login not finished within {ms} ms"),
         }

@@ -5,9 +5,7 @@
 
 use kxtd1232::error::{LoginFailure, UnackedReason};
 use kxtd1232::frame::{Access, Cmd, BUSY_FRAME};
-use kxtd1232::{
-    Client, Error, SendError, SessionState, Timing, Transport, TransportError, VerifyOutcome,
-};
+use kxtd1232::{Client, Error, SessionState, Timing, Transport, TransportError, VerifyOutcome};
 use kxtd1232_sim::{reply_frame, Fault, SimPbx, SimTransport, PLACEHOLDER_PASSWORD};
 
 const ACK: [u8; 4] = [0x03, 0x00, 0x00, 0x03];
@@ -246,8 +244,8 @@ struct Noise {
 }
 
 impl Transport for Noise {
-    fn send(&mut self, data: &[u8]) -> Result<usize, SendError> {
-        Ok(data.len())
+    fn send(&mut self, _: &[u8]) -> Result<(), TransportError> {
+        Ok(())
     }
     fn recv(&mut self, _: u64) -> Result<Vec<u8>, TransportError> {
         let first = self.now == 0;

@@ -107,6 +107,8 @@ pub enum ConfigError {
     Json(#[from] serde_json::Error),
     #[error("timing: {0}")]
     Timing(#[from] TimingConfigError),
+    #[error("gateway_uid must differ from admin_uid")]
+    UidsMustDiffer,
     #[error("missing config")]
     Missing,
 }
@@ -124,8 +126,12 @@ impl std::fmt::Debug for Config {
 }
 
 impl Config {
-    pub fn validate(&self) -> Result<(), TimingConfigError> {
-        self.timing.validate().map(|_| ())
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        self.timing.validate()?;
+        if self.gateway_uid == self.admin_uid {
+            return Err(ConfigError::UidsMustDiffer);
+        }
+        Ok(())
     }
 
     pub fn load_from_etc(path: impl AsRef<Path>) -> Result<Self, ConfigError> {
@@ -174,10 +180,10 @@ impl Config {
             socket_path,
             password: kxtd1232_sim::PLACEHOLDER_PASSWORD.to_string(),
             gates: GateConfig::default(),
-            peer_policy: PeerPolicy::new(peer_uid, peer_uid),
+            peer_policy: PeerPolicy::new(peer_uid.wrapping_add(1), peer_uid),
             goliath_target: data_dir.join("goliath"),
             serial_device: PathBuf::from("/dev/kxpbx"),
-            gateway_uid: peer_uid,
+            gateway_uid: peer_uid.wrapping_add(1),
             admin_uid: peer_uid,
             totp_enabled: false,
             totp_secret_path: None,
