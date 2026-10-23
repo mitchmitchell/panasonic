@@ -27,12 +27,25 @@ pub struct GateFlags {
     pub locked: bool,
 }
 
+/// LOCKED alert timing (v2.4: held until 08:00 America/Chicago).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LockedAlertStatus {
+    /// Alert suppressed until quiet hours end.
+    pub held: bool,
+    /// At or after 08:00 Central; notification may fire.
+    pub may_fire: bool,
+    /// Notification already emitted for this LOCKED episode.
+    pub sent: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StatusResponse {
     pub profile: Profile,
     pub mode: DaemonMode,
     pub transport: String,
     pub gates: GateFlags,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub locked_alert: Option<LockedAlertStatus>,
     pub queue_depth: u32,
     pub active_job: Option<String>,
 }
@@ -178,6 +191,7 @@ pub enum ResponseResult {
     BackupNow(BackupNowResult),
     Job(JobRef),
     ApplyDeferred(ApplyDeferredResult),
+    ApplyPlan(ApplyPlanResult),
     Unlock(UnlockResult),
 }
 
@@ -189,6 +203,12 @@ pub struct JobRef {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ApplyDeferredResult {
     pub message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApplyPlanResult {
+    pub plan_id: PlanId,
+    pub blocks_verified: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

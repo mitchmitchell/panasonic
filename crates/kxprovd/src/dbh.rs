@@ -1,9 +1,16 @@
-//! Synthetic TD1232 `.DBH` assembly from wire table images (clean-room, no real captures).
+//! Synthetic TD1232 `.DBH` assembly from wire table images (clean-room).
+//!
+//! v2.4: bytes **0x1E–0xFF** are never embedded in the repo. They are copied at runtime
+//! from the latest verified backup, or computed algorithmically on the first backup only.
 
 use kxtd1232::tables::{self, TableSpec, NEVER_WRITTEN, TABLES};
 use thiserror::Error;
 
 pub const DBH_SIZE: usize = 60_692;
+pub const HEADER_TAIL_START: usize = 0x1E;
+pub const HEADER_TAIL_LEN: usize = 0x100 - HEADER_TAIL_START;
+
+const LABEL: &[u8; 30] = b"SYNTHETIC KX-TD1232 BACKUP    ";
 
 #[derive(Debug, Error)]
 pub enum DbhError {
@@ -11,6 +18,8 @@ pub enum DbhError {
     Size(usize),
     #[error("layout: {0}")]
     Layout(String),
+    #[error("header tail must be {HEADER_TAIL_LEN} bytes")]
+    BadHeaderTail,
 }
 
 fn tag_of(table: u8) -> u8 {
@@ -55,7 +64,6 @@ fn append_table_body(out: &mut Vec<u8>, spec: &TableSpec, wire: &[u8]) {
     out.extend_from_slice(&disk);
 }
 
-/// Tables that appear in the directory (73 tags), ascending tag 1..=81 minus never-written.
 fn directory_tables() -> Vec<&'static TableSpec> {
     TABLES
         .iter()
@@ -74,35 +82,53 @@ fn trailing_tables() -> [&'static TableSpec; 3] {
     ]
 }
 
-fn build_header(dir_entries: &[(u8, u16)]) -> [u8; 256] {
-    let mut h = [0u8; 256];
-    h[..30].copy_from_slice(b"SYNTHETIC KX-TD1232 BACKUP    ");
-    h[0x20..0x26].copy_from_slice(b"3.11K\0");
-    let mut off = 0x26usize;
-    for (tag, len) in dir_entries {
-        if off + 3 > 0x100 {
+/// Build bytes 0x1E–0xFF from the table spec only (first backup, no prior `.DBH`).
+pub fn spec_header_tail() -> [u8; HEADER_TAIL_LEN] {
+    let mut tail = [0u8; HEADER_TAIL_LEN];
+    tail[0] = 0;
+    tail[1] = 0;
+    tail[2..8].copy_from_slice(b"3.11K\0");
+    let dir_specs = directory_tables();
+    let mut off = 8usize;
+    for spec in dir_specs {
+        if off + 3 > tail.len() {
             break;
         }
-        h[off] = *tag;
-        h[off + 1] = (len & 0xFF) as u8;
-        h[off + 2] = (len >> 8) as u8;
+        let tag = tag_of(spec.id);
+        let len = dir_length(spec);
+        tail[off] = tag;
+        tail[off + 1] = (len & 0xFF) as u8;
+        tail[off + 2] = (len >> 8) as u8;
         off += 3;
     }
-    h
+    tail
 }
 
-/// Build a full `.DBH` from wire-form table payloads keyed by table id.
-pub fn assemble(
+pub fn copy_header_tail_from_dbh(dbh: &[u8]) -> Result<[u8; HEADER_TAIL_LEN], DbhError> {
+    if dbh.len() != DBH_SIZE {
+        return Err(DbhError::Size(dbh.len()));
+    }
+    let mut tail = [0u8; HEADER_TAIL_LEN];
+    tail.copy_from_slice(&dbh[HEADER_TAIL_START..0x100]);
+    Ok(tail)
+}
+
+fn write_header_prefix(out: &mut [u8; 256], tail: &[u8; HEADER_TAIL_LEN]) {
+    out[..30].copy_from_slice(LABEL);
+    out[0x1E..0x100].copy_from_slice(tail);
+}
+
+/// Build a full `.DBH` from wire images and a runtime header tail (0x1E–0xFF).
+pub fn assemble_with_tail(
     wire_by_table: &std::collections::HashMap<u8, Vec<u8>>,
+    header_tail: &[u8; HEADER_TAIL_LEN],
 ) -> Result<Vec<u8>, DbhError> {
+    let mut header = [0u8; 256];
+    write_header_prefix(&mut header, header_tail);
+
     let dir_specs = directory_tables();
-    let dir_entries: Vec<(u8, u16)> = dir_specs
-        .iter()
-        .map(|s| (tag_of(s.id), dir_length(s)))
-        .collect();
     let mut out = Vec::with_capacity(DBH_SIZE);
-    out.extend_from_slice(&build_header(&dir_entries));
-    out.resize(0x100, 0);
+    out.extend_from_slice(&header);
 
     for spec in &dir_specs {
         let wire = wire_by_table
@@ -149,9 +175,10 @@ mod tests {
     use kxtd1232_sim::synthetic_db;
 
     #[test]
-    fn synthetic_dbh_size() {
+    fn synthetic_dbh_size_with_spec_tail() {
         let db = synthetic_db();
-        let bh = assemble(&db).expect("assemble");
+        let tail = spec_header_tail();
+        let bh = assemble_with_tail(&db, &tail).expect("assemble");
         parse_size(&bh).expect("60692");
     }
 }

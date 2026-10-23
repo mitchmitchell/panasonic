@@ -153,7 +153,15 @@ async fn approval_single_use() {
         panic!("mint");
     };
 
-    let ResponseResult::ApplyDeferred(_) = gw
+    let ResponseResult::BackupNow(_) = gw
+        .call_auth(RequestBody::BackupNow, Some(gateway_auth("writer")))
+        .await
+        .unwrap()
+    else {
+        panic!("backup");
+    };
+
+    let ResponseResult::ApplyPlan(applied) = gw
         .call_auth(
             RequestBody::ApplyPlan {
                 params: kxprov_api::ApplyPlanParams {
@@ -168,6 +176,7 @@ async fn approval_single_use() {
     else {
         panic!("apply");
     };
+    assert!(applied.blocks_verified >= 1);
 
     let err = gw
         .call_auth(

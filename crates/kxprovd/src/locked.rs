@@ -18,6 +18,9 @@ pub struct LockedState {
     pub since_ms: u64,
     pub reason: String,
     pub job_id: Option<String>,
+    /// LOCKED alert not yet emitted (v2.4 quiet hours).
+    #[serde(default)]
+    pub alert_sent: bool,
 }
 
 pub struct LockedStore {
@@ -49,6 +52,7 @@ impl LockedStore {
             since_ms: now_ms,
             reason: reason.to_string(),
             job_id: job_id.map(str::to_string),
+            alert_sent: false,
         };
         std::fs::write(&self.path, serde_json::to_vec_pretty(&st)?)?;
         Ok(())
@@ -59,6 +63,16 @@ impl LockedStore {
             &self.path,
             serde_json::to_vec_pretty(&LockedState::default())?,
         )?;
+        Ok(())
+    }
+
+    pub fn mark_alert_sent(&self) -> Result<(), LockedError> {
+        let mut st = self.load()?;
+        if !st.locked {
+            return Ok(());
+        }
+        st.alert_sent = true;
+        std::fs::write(&self.path, serde_json::to_vec_pretty(&st)?)?;
         Ok(())
     }
 }

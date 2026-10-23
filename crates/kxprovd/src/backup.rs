@@ -1,6 +1,7 @@
-use crate::dbh::{self, parse_size};
+use crate::dbh::{self, parse_size, HEADER_TAIL_LEN};
 use crate::goliath::GoliathQueue;
 use crate::time::now_ms;
+use kxprov_api::DEFAULT_BACKUP_KEEP;
 use kxprov_api::GoliathCopyStatus;
 use kxtd1232::tables::TABLES;
 use kxtd1232::{Client, Transport};
@@ -21,6 +22,8 @@ pub enum BackupError {
     Verify,
     #[error("json: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("no verified backup; header tail unavailable for writes")]
+    NoBackupForWrite,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -56,6 +59,25 @@ impl BackupStore {
         }
         out.sort_by_key(|b| std::cmp::Reverse(b.created_at_ms));
         Ok(out)
+    }
+
+    /// Header bytes 0x1E–0xFF for the next assembly: from latest backup, or spec on first backup.
+    pub fn header_tail_for_assembly(&self) -> Result<[u8; HEADER_TAIL_LEN], BackupError> {
+        let list = self.list()?;
+        if let Some(latest) = list.first() {
+            let data = std::fs::read(&latest.path)?;
+            return Ok(dbh::copy_header_tail_from_dbh(&data)?);
+        }
+        Ok(dbh::spec_header_tail())
+    }
+
+    /// Apply and other writes require at least one verified backup on disk.
+    pub fn require_backup_for_write(&self) -> Result<(), BackupError> {
+        if self.list()?.is_empty() {
+            Err(BackupError::NoBackupForWrite)
+        } else {
+            Ok(())
+        }
     }
 
     pub fn read_full_backup<T: Transport>(
@@ -97,7 +119,21 @@ impl BackupStore {
         let meta_path = self.dir.join(format!("{id}.meta"));
         std::fs::write(&meta_path, serde_json::to_vec_pretty(&meta)?)?;
         goliath.enqueue_copy(&meta);
+        self.prune_to_keep(DEFAULT_BACKUP_KEEP)?;
         Ok(meta)
+    }
+
+    fn prune_to_keep(&self, keep: usize) -> Result<(), BackupError> {
+        let mut list = self.list()?;
+        while list.len() > keep {
+            let Some(old) = list.pop() else {
+                break;
+            };
+            let _ = std::fs::remove_file(&old.path);
+            let meta_path = self.dir.join(format!("{}.meta", old.id));
+            let _ = std::fs::remove_file(meta_path);
+        }
+        Ok(())
     }
 
     pub fn dir(&self) -> &Path {
@@ -105,8 +141,12 @@ impl BackupStore {
     }
 }
 
-pub fn wire_to_dbh(wire: &std::collections::HashMap<u8, Vec<u8>>) -> Result<Vec<u8>, BackupError> {
-    Ok(dbh::assemble(wire)?)
+pub fn wire_to_dbh(
+    store: &BackupStore,
+    wire: &std::collections::HashMap<u8, Vec<u8>>,
+) -> Result<Vec<u8>, BackupError> {
+    let tail = store.header_tail_for_assembly()?;
+    Ok(dbh::assemble_with_tail(wire, &tail)?)
 }
 
 pub fn goliath_status(meta: &BackupMeta, goliath: &GoliathQueue) -> GoliathCopyStatus {

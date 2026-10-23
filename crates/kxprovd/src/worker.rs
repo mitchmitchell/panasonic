@@ -1,6 +1,8 @@
+use crate::apply::{lock_on_apply_failure, run_apply};
 use crate::backup::{wire_to_dbh, BackupStore};
 use crate::config::Config;
 use crate::journal::{Journal, JournalEntry};
+use crate::locked::LockedStore;
 use crate::plan_store::{PlanSnapshot, PlanStore};
 use crate::queue::{field_kind_wire, JobKind, JobOutcome, JobRequest, JobState};
 use crate::time::now_ms;
@@ -15,6 +17,7 @@ pub struct WorkerCtx {
     pub backups: BackupStore,
     pub journal: Journal,
     pub goliath: crate::goliath::GoliathQueue,
+    pub locked: LockedStore,
 }
 
 pub async fn run_worker(
@@ -24,7 +27,7 @@ pub async fn run_worker(
 ) {
     while let Some(job) = rx.recv().await {
         queue_jobs.set_state(&job.id, JobState::Running).await;
-        let outcome = execute_job(&ctx, job.kind).await;
+        let outcome = execute_job(&ctx, &job.id, job.kind).await;
         let failed = matches!(&outcome, JobOutcome::Err { .. });
         queue_jobs
             .set_state(
@@ -40,11 +43,16 @@ pub async fn run_worker(
     }
 }
 
-async fn execute_job(ctx: &WorkerCtx, kind: JobKind) -> JobOutcome {
+async fn execute_job(ctx: &WorkerCtx, job_id: &str, kind: JobKind) -> JobOutcome {
     match kind {
         JobKind::ReadFields { params } => run_read(ctx, params).await,
         JobKind::PlanChange { params, token_id } => run_plan(ctx, params, token_id).await,
         JobKind::BackupNow => run_backup(ctx).await,
+        JobKind::ApplyPlan {
+            plan_id,
+            diff_hash,
+            token_id,
+        } => run_apply_job(ctx, job_id, plan_id, diff_hash, token_id).await,
     }
 }
 
@@ -184,7 +192,7 @@ async fn run_backup(ctx: &WorkerCtx) -> JobOutcome {
             };
         }
     };
-    let dbh = match wire_to_dbh(&wire) {
+    let dbh = match wire_to_dbh(&ctx.backups, &wire) {
         Ok(d) => d,
         Err(e) => {
             return JobOutcome::Err {
@@ -217,6 +225,56 @@ async fn run_backup(ctx: &WorkerCtx) -> JobOutcome {
     JobOutcome::BackupNow(kxprov_api::BackupNowResult {
         backup: backup_info(&meta, &ctx.goliath),
     })
+}
+
+async fn run_apply_job(
+    ctx: &WorkerCtx,
+    job_id: &str,
+    plan_id: kxprov_api::PlanId,
+    diff_hash: kxprov_api::DiffHash,
+    token_id: kxprov_api::TokenId,
+) -> JobOutcome {
+    let backup_id = match ctx.backups.list() {
+        Ok(list) => list.first().map(|b| b.id.clone()).unwrap_or_default(),
+        Err(e) => {
+            return JobOutcome::Err {
+                code: "backup".into(),
+                message: e.to_string(),
+            };
+        }
+    };
+    let _ = ctx.journal.append(&JournalEntry::ApplyStart {
+        job_id: job_id.to_string(),
+        plan_id: plan_id.as_str().to_string(),
+        diff_hash: diff_hash.0.clone(),
+        backup_id,
+    });
+    match run_apply(
+        &ctx.config,
+        &ctx.plans,
+        &ctx.backups,
+        &plan_id,
+        &diff_hash,
+        &token_id,
+    ) {
+        Ok(blocks) => {
+            let _ = ctx.journal.truncate();
+            JobOutcome::ApplyPlan(kxprov_api::ApplyPlanResult {
+                plan_id,
+                blocks_verified: blocks as u32,
+            })
+        }
+        Err(e) => {
+            lock_on_apply_failure(&ctx.locked, &e.to_string(), job_id);
+            let _ = ctx.journal.append(&JournalEntry::ApplyAbort {
+                job_id: job_id.to_string(),
+            });
+            JobOutcome::Err {
+                code: "apply".into(),
+                message: e.to_string(),
+            }
+        }
+    }
 }
 
 pub fn backup_info(

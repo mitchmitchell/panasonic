@@ -20,3 +20,6 @@ pub const BUSY_DURATION_DEFAULT_MS: u64 = 7_000;
 
 /// Busy bound with margin for the protocol client (§9b default until H5).
 pub const BUSY_LIMIT_DEFAULT_MS: u64 = 12_000;
+
+/// Verified `.DBH` backups retained on disk (v2.4 default).
+pub const DEFAULT_BACKUP_KEEP: usize = 20;

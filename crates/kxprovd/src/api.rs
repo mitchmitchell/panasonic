@@ -207,6 +207,27 @@ fn require_access(
 
 async fn status_snapshot(state: &ApiState, locked: bool) -> kxprov_api::StatusResponse {
     let gates = state.gates.read().await;
+    let locked_alert = if locked {
+        let st = state.locked.load().ok().unwrap_or_default();
+        let now = chrono::Utc::now();
+        let may_fire = crate::alert::locked_alert_may_fire_utc(now);
+        if may_fire && !st.alert_sent {
+            let _ = state.locked.mark_alert_sent();
+            tracing::warn!(
+                reason = %st.reason,
+                job_id = ?st.job_id,
+                "LOCKED alert (quiet hours ended)"
+            );
+        }
+        let st = state.locked.load().ok().unwrap_or(st);
+        Some(kxprov_api::LockedAlertStatus {
+            held: !may_fire,
+            may_fire,
+            sent: st.alert_sent,
+        })
+    } else {
+        None
+    };
     kxprov_api::StatusResponse {
         profile: state.profile,
         mode: kxprov_api::DaemonMode::Simulator,
@@ -215,6 +236,7 @@ async fn status_snapshot(state: &ApiState, locked: bool) -> kxprov_api::StatusRe
             live_writes_approved: gates.config.live_writes_approved,
             locked,
         },
+        locked_alert,
         queue_depth: state.queue.depth().await,
         active_job: state.queue.active().await,
     }
@@ -326,6 +348,18 @@ async fn apply_plan(
         .consume(&params.plan_id, &params.diff_hash, state.profile, now)
         .map_err(|e| api_err("approval", &e.to_string(), None))?;
 
+    if state.profile == Profile::Sim {
+        return run_job(
+            state,
+            JobKind::ApplyPlan {
+                plan_id: params.plan_id.clone(),
+                diff_hash: params.diff_hash.clone(),
+                token_id: token,
+            },
+        )
+        .await;
+    }
+
     Ok(ResponseResult::ApplyDeferred(
         kxprov_api::ApplyDeferredResult {
             message: "apply execution is milestone A5; approval consumed".into(),
@@ -367,6 +401,7 @@ fn map_outcome(outcome: JobOutcome) -> Result<ResponseResult, ApiErrorBody> {
         JobOutcome::ReadFields(r) => Ok(ResponseResult::ReadFields(r)),
         JobOutcome::PlanChange(r) => Ok(ResponseResult::PlanChange(r)),
         JobOutcome::BackupNow(r) => Ok(ResponseResult::BackupNow(r)),
+        JobOutcome::ApplyPlan(r) => Ok(ResponseResult::ApplyPlan(r)),
         JobOutcome::ApplyDeferred(r) => Ok(ResponseResult::ApplyDeferred(r)),
         JobOutcome::Err { code, message } => Err(api_err(&code, &message, None)),
     }

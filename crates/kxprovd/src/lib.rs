@@ -1,6 +1,8 @@
 //! `kxprovd`: single serial owner, one-worker queue, backups, journal, gates (A3/v2.3).
 
+pub mod alert;
 pub mod api;
+pub mod apply;
 pub mod approval;
 pub mod backup;
 pub mod config;
@@ -70,6 +72,7 @@ impl Daemon {
             backups: BackupStore::new(config.data_dir.join("backups"))?,
             journal: Journal::new(&config.data_dir),
             goliath: goliath.clone(),
+            locked: LockedStore::new(&config.data_dir),
         });
 
         let q = Arc::clone(&queue);

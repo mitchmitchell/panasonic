@@ -1,4 +1,4 @@
-use kxprov_api::{FieldKindWire, PlanChangeParams, ReadFieldsParams, TokenId};
+use kxprov_api::{DiffHash, FieldKindWire, PlanChangeParams, PlanId, ReadFieldsParams, TokenId};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::{mpsc, oneshot, Mutex};
@@ -27,6 +27,11 @@ pub enum JobKind {
         token_id: TokenId,
     },
     BackupNow,
+    ApplyPlan {
+        plan_id: PlanId,
+        diff_hash: DiffHash,
+        token_id: TokenId,
+    },
 }
 
 pub struct JobRequest {
@@ -40,6 +45,7 @@ pub enum JobOutcome {
     ReadFields(kxprov_api::ReadFieldsResult),
     PlanChange(kxprov_api::PlanChangeResult),
     BackupNow(kxprov_api::BackupNowResult),
+    ApplyPlan(kxprov_api::ApplyPlanResult),
     ApplyDeferred(kxprov_api::ApplyDeferredResult),
     Err { code: String, message: String },
 }
