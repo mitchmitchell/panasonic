@@ -38,6 +38,8 @@ kxprov-web = { workspace = true }
 rustls.workspace = true
 rustls-pemfile.workspace = true
 serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
 sha2.workspace = true
 subtle.workspace = true
 time.workspace = true
@@ -50,6 +52,7 @@ tracing-subscriber.workspace = true
 toml = "0.8"
 
 [dev-dependencies]
+kxprovd = { path = "../kxprovd", features = ["test-util"] }
 argon2 = { workspace = true, features = ["password-hash"] }
 hyper.workspace = true
 rand = "0.8"
@@ -61,5 +64,6 @@ reqwest = { version = "0.12", default-features = false, features = [
 ] }
 serde_json.workspace = true
 tempfile = "3"
+libc = "0.2"
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 uuid.workspace = true

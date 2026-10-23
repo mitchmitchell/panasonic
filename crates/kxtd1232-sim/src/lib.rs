@@ -8,11 +8,14 @@
 use kxtd1232::fields::{encode_cid_name, encode_cid_number, encode_ext_name};
 use kxtd1232::frame::{checksum, Cmd, BUSY_FRAME};
 use kxtd1232::tables;
-use kxtd1232::{SignOn, Transport, TransportError};
+use kxtd1232::{LinkDownError, SignOn, Transport, TransportError};
 use std::collections::{HashMap, VecDeque};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 pub const PLACEHOLDER_PASSWORD: &str = "0000";
 pub const PLACEHOLDER_ROM_ID: &str = "-----PXXXXXXXXXX";
+/// `.DBH` bytes 0x1E–0xFF (226); filled at sim init as runtime upload metadata, not embedded in kxprovd.
+pub const DBH_HEADER_TAIL_LEN: usize = 0x100 - 0x1E;
 /// Sign-on text the simulator plays: the placeholders from [`SignOn::default`].
 fn text_line(s: &str) -> Vec<u8> {
     format!("{s}\r\n").into_bytes()
@@ -118,6 +121,8 @@ pub type WriteRecord = (u8, u16, u16, Vec<u8>);
 
 pub struct SimPbx {
     pub db: HashMap<u8, Vec<u8>>,
+    /// Vendor header tail bytes (0x1E–0xFF) as if captured from a full upload session.
+    dbh_header_tail: [u8; DBH_HEADER_TAIL_LEN],
     password: Vec<u8>,
     rom_id: [u8; 16],
     mode: Mode,
@@ -142,6 +147,12 @@ impl Default for SimPbx {
 /// Bytes the simulator emits, each after a delay relative to the triggering input.
 pub type Emits = Vec<(u64, Vec<u8>)>;
 
+fn fresh_dbh_header_tail() -> [u8; DBH_HEADER_TAIL_LEN] {
+    let mut tail = [0u8; DBH_HEADER_TAIL_LEN];
+    getrandom::fill(&mut tail).expect("getrandom");
+    tail
+}
+
 impl SimPbx {
     pub fn new(db: HashMap<u8, Vec<u8>>, password: &str) -> Self {
         let mut rom_id = [b' '; 16];
@@ -150,6 +161,7 @@ impl SimPbx {
         }
         Self {
             db,
+            dbh_header_tail: fresh_dbh_header_tail(),
             password: password.as_bytes().to_vec(),
             rom_id,
             mode: Mode::Idle,
@@ -166,6 +178,11 @@ impl SimPbx {
         self.faults.push_back(fault);
     }
 
+    /// Header bytes 0x1E–0xFF for `.DBH` assembly (runtime upload image in the sim).
+    pub fn dbh_header_tail(&self) -> &[u8; DBH_HEADER_TAIL_LEN] {
+        &self.dbh_header_tail
+    }
+
     pub fn pending_faults(&self) -> usize {
         self.faults.len()
     }
@@ -178,6 +195,12 @@ impl SimPbx {
 
     pub fn dtr_down(&mut self) {
         self.mode = Mode::Idle;
+    }
+
+    /// Clear line/session state before a new client attaches (shared PBX, new transport).
+    pub fn reset_for_new_session(&mut self) {
+        self.mode = Mode::Idle;
+        self.buf.clear();
     }
 
     pub fn feed(&mut self, data: &[u8]) -> Emits {
@@ -375,20 +398,32 @@ impl SimPbx {
 
 /// Virtual-time loopback transport binding a client to an in-process [`SimPbx`].
 pub struct SimTransport {
-    pub sim: SimPbx,
+    sim: Arc<Mutex<SimPbx>>,
     now: u64,
     queue: VecDeque<(u64, Vec<u8>)>,
     /// Every byte the client sent.
     pub sent: Vec<u8>,
     /// When set, the link drops right after the next write frame reaches the simulator.
     pub drop_link_after_write: bool,
+    /// Next write send fails with `LinkDown` after this many bytes left the host (a
+    /// partial frame, or the whole frame when >= its length, which the PBX then stores).
+    pub fail_write_send_after: Option<usize>,
     link_down: bool,
 }
 
 impl SimTransport {
     /// Opening the port raises DTR; the simulator answers XOFF/XON.
-    pub fn new(mut sim: SimPbx) -> Self {
-        let first = sim.dtr_up();
+    pub fn new(sim: SimPbx) -> Self {
+        Self::with_shared(Arc::new(Mutex::new(sim)))
+    }
+
+    /// Attach a fresh virtual-time session to an existing PBX (shared DB).
+    pub fn with_shared(sim: Arc<Mutex<SimPbx>>) -> Self {
+        let first = {
+            let mut pbx = sim.lock().expect("sim pbx lock");
+            pbx.reset_for_new_session();
+            pbx.dtr_up()
+        };
         let mut q = VecDeque::new();
         q.push_back((0, first));
         Self {
@@ -397,17 +432,34 @@ impl SimTransport {
             queue: q,
             sent: Vec::new(),
             drop_link_after_write: false,
+            fail_write_send_after: None,
             link_down: false,
         }
+    }
+
+    pub fn shared_pbx(&self) -> Arc<Mutex<SimPbx>> {
+        Arc::clone(&self.sim)
+    }
+
+    pub fn sim(&self) -> MutexGuard<'_, SimPbx> {
+        self.sim.lock().expect("sim pbx lock")
+    }
+
+    pub fn sim_mut(&mut self) -> MutexGuard<'_, SimPbx> {
+        self.sim.lock().expect("sim pbx lock")
     }
 
     /// Bring a dropped link back: DTR cycles and the PBX greets again, ready for login.
     pub fn reconnect(&mut self) {
         self.link_down = false;
         self.drop_link_after_write = false;
+        self.fail_write_send_after = None;
         self.queue.clear();
-        self.sim.dtr_down();
-        let first = self.sim.dtr_up();
+        let first = {
+            let mut pbx = self.sim.lock().expect("sim pbx lock");
+            pbx.dtr_down();
+            pbx.dtr_up()
+        };
         let now = self.now;
         self.schedule(now, first);
     }
@@ -446,19 +498,38 @@ impl SimTransport {
 impl Transport for SimTransport {
     fn send(&mut self, data: &[u8]) -> Result<(), TransportError> {
         if self.link_down {
-            return Err(TransportError::LinkDown("sim: link dropped".into()));
+            return Err(TransportError::NothingWritten("sim: link dropped".into()));
+        }
+        if data.get(1) == Some(&Cmd::Write.byte()) {
+            if let Some(n) = self.fail_write_send_after.take() {
+                let n = n.min(data.len());
+                self.sent.extend_from_slice(&data[..n]);
+                if n == data.len() {
+                    self.sim.lock().expect("sim pbx lock").feed(data);
+                }
+                self.link_down = true;
+                return if n == 0 {
+                    Err(TransportError::NothingWritten(
+                        "sim: link dropped mid-send".into(),
+                    ))
+                } else {
+                    Err(TransportError::LinkDown(LinkDownError {
+                        detail: "sim: link dropped mid-send".into(),
+                        bytes_sent: n,
+                    }))
+                };
+            }
         }
         self.sent.extend_from_slice(data);
         if self.drop_link_after_write && data.get(1) == Some(&Cmd::Write.byte()) {
-            self.sim.feed(data);
+            self.sim.lock().expect("sim pbx lock").feed(data);
             self.link_down = true;
             return Ok(());
         }
-        // Model the 9600-baud line: the PBX acts once the request has been received, and
-        // each reply lands once it has been transmitted.
         let t = kxtd1232::Timing::default();
         let rx_done = self.now + t.tx_ms(data.len());
-        for (delay, bytes) in self.sim.feed(data) {
+        let emits = self.sim.lock().expect("sim pbx lock").feed(data);
+        for (delay, bytes) in emits {
             let at = rx_done + delay + t.tx_ms(bytes.len());
             self.schedule(at, bytes);
         }
@@ -467,7 +538,10 @@ impl Transport for SimTransport {
 
     fn recv(&mut self, timeout_ms: u64) -> Result<Vec<u8>, TransportError> {
         if self.link_down {
-            return Err(TransportError::LinkDown("sim: link dropped".into()));
+            return Err(TransportError::LinkDown(LinkDownError {
+                detail: "sim: link dropped".into(),
+                bytes_sent: 0,
+            }));
         }
         match self.queue.front() {
             Some(&(at, _)) if at <= self.now + timeout_ms => {

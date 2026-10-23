@@ -7,6 +7,8 @@ pub struct McpTokenIdentity {
     pub token_id: TokenId,
     pub agent_name: String,
     pub scopes: ScopeSet,
+    /// Presented MCP bearer (gateway forwards this to the daemon).
+    pub bearer: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -6,7 +6,6 @@ use axum::body::Body;
 use axum::http::{header, Method, Request, StatusCode};
 use axum::middleware::from_fn;
 use axum::Router;
-use axum_csrf::{CsrfConfig, CsrfLayer};
 use http_body_util::BodyExt;
 use kxprov_web::require_web_session;
 use kxprov_web::LoginRateLimiter;
@@ -34,7 +33,6 @@ fn secured_app() -> Router {
         .with_expiry(Expiry::OnInactivity(CookieDuration::seconds(900)));
     kxprov_web::router(state)
         .layer(from_fn(require_web_session))
-        .layer(CsrfLayer::new(CsrfConfig::default()))
         .layer(session)
 }
 
@@ -93,13 +91,26 @@ async fn login_rejects_bad_password() {
 
 #[tokio::test]
 async fn login_uses_exponential_backoff_not_hard_lockout() {
-    let limiter = LoginRateLimiter::new(Duration::from_millis(40), Duration::from_secs(300));
-    assert!(limiter.allow("acct:admin").await);
+    let limiter = LoginRateLimiter::new(
+        Duration::from_millis(40),
+        Duration::from_secs(30),
+        Duration::from_secs(300),
+    );
+    assert_eq!(
+        limiter.delay_before_attempt("acct:admin", "ip:9").await,
+        Duration::ZERO
+    );
     limiter.record_failure("acct:admin", "ip:9").await;
-    assert!(!limiter.allow("acct:admin").await);
+    assert!(limiter.delay_before_attempt("acct:admin", "ip:9").await > Duration::ZERO);
     tokio::time::sleep(Duration::from_millis(50)).await;
-    assert!(limiter.allow("acct:admin").await);
-    assert!(limiter.allow("ip:10").await);
+    assert_eq!(
+        limiter.delay_before_attempt("acct:admin", "ip:9").await,
+        Duration::ZERO
+    );
+    assert_eq!(
+        limiter.delay_before_attempt("acct:admin", "ip:10").await,
+        Duration::ZERO
+    );
 }
 
 #[tokio::test]

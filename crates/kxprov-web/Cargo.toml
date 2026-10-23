@@ -19,8 +19,10 @@ chrono-tz = "0.10"
 tower-sessions.workspace = true
 serde_json.workspace = true
 serde.workspace = true
+subtle.workspace = true
 time.workspace = true
-tokio = { workspace = true, features = ["sync"] }
+tokio = { workspace = true, features = ["sync", "time"] }
+uuid.workspace = true
 
 [dev-dependencies]
 axum = { workspace = true }

@@ -7,7 +7,9 @@ use tokio::sync::Mutex;
 #[derive(Clone)]
 pub struct LoginRateLimiter {
     initial_backoff: Duration,
-    max_backoff: Duration,
+    /// Cap for the account key (`acct:*`); never hard-lock login.
+    max_account_backoff: Duration,
+    max_ip_backoff: Duration,
     by_key: Arc<Mutex<HashMap<String, Entry>>>,
 }
 
@@ -18,46 +20,69 @@ struct Entry {
 }
 
 impl LoginRateLimiter {
-    pub fn new(initial_backoff: Duration, max_backoff: Duration) -> Self {
+    pub fn new(
+        initial_backoff: Duration,
+        max_account_backoff: Duration,
+        max_ip_backoff: Duration,
+    ) -> Self {
         Self {
             initial_backoff,
-            max_backoff,
+            max_account_backoff,
+            max_ip_backoff,
             by_key: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
-    pub async fn allow(&self, key: &str) -> bool {
+    /// Delay before handling a login attempt (never rejects outright).
+    pub async fn delay_before_attempt(&self, account_key: &str, ip_key: &str) -> Duration {
         let map = self.by_key.lock().await;
         let now = Instant::now();
-        match map.get(key) {
-            Some(entry) => now >= entry.next_allowed,
-            None => true,
-        }
+        let acct = wait_for_key(map.get(account_key), now, self.max_account_backoff);
+        let ip = wait_for_key(map.get(ip_key), now, self.max_ip_backoff);
+        acct.max(ip)
     }
 
     pub async fn record_failure(&self, account_key: &str, ip_key: &str) {
-        for key in [account_key, ip_key] {
-            let mut map = self.by_key.lock().await;
-            let now = Instant::now();
-            let entry = map.entry(key.to_string()).or_insert(Entry {
-                failures: 0,
-                next_allowed: now,
-            });
-            entry.failures = entry.failures.saturating_add(1);
-            let shift = entry.failures.saturating_sub(1).min(16);
-            let mut backoff = self.initial_backoff.saturating_mul(1u32 << shift);
-            if backoff > self.max_backoff {
-                backoff = self.max_backoff;
-            }
-            entry.next_allowed = now + backoff;
-        }
+        self.bump(account_key, self.max_account_backoff).await;
+        self.bump(ip_key, self.max_ip_backoff).await;
     }
 
-    pub async fn reset(&self, account_key: &str, ip_key: &str) {
+    /// Successful login clears IP backoff and resets the account delay.
+    pub async fn on_success(&self, account_key: &str, ip_key: &str) {
         let mut map = self.by_key.lock().await;
         map.remove(account_key);
         map.remove(ip_key);
     }
+
+    async fn bump(&self, key: &str, cap: Duration) {
+        let mut map = self.by_key.lock().await;
+        let now = Instant::now();
+        let entry = map.entry(key.to_string()).or_insert(Entry {
+            failures: 0,
+            next_allowed: now,
+        });
+        entry.failures = entry.failures.saturating_add(1);
+        let shift = entry.failures.saturating_sub(1).min(16);
+        let mut backoff = self.initial_backoff.saturating_mul(1u32 << shift);
+        if backoff > cap {
+            backoff = cap;
+        }
+        entry.next_allowed = now + backoff;
+    }
+}
+
+fn wait_for_key(entry: Option<&Entry>, now: Instant, cap: Duration) -> Duration {
+    let Some(entry) = entry else {
+        return Duration::ZERO;
+    };
+    if now >= entry.next_allowed {
+        return Duration::ZERO;
+    }
+    let mut wait = entry.next_allowed - now;
+    if wait > cap {
+        wait = cap;
+    }
+    wait
 }
 
 #[cfg(test)]
@@ -65,21 +90,49 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn backoff_blocks_until_window_elapses() {
-        let limiter = LoginRateLimiter::new(Duration::from_millis(50), Duration::from_secs(60));
-        assert!(limiter.allow("acct:admin").await);
-        limiter.record_failure("acct:admin", "ip:1").await;
-        assert!(!limiter.allow("acct:admin").await);
-        tokio::time::sleep(Duration::from_millis(60)).await;
-        assert!(limiter.allow("acct:admin").await);
+    async fn account_backoff_caps_and_never_hard_locks() {
+        let limiter = LoginRateLimiter::new(
+            Duration::from_millis(50),
+            Duration::from_millis(200),
+            Duration::from_secs(60),
+        );
+        for _ in 0..20 {
+            limiter.record_failure("acct:admin", "ip:1").await;
+        }
+        let wait = limiter.delay_before_attempt("acct:admin", "ip:2").await;
+        assert!(wait <= Duration::from_millis(200));
+        assert!(wait > Duration::ZERO);
     }
 
     #[tokio::test]
-    async fn account_and_ip_keys_are_independent_for_allow() {
-        let limiter = LoginRateLimiter::new(Duration::from_secs(300), Duration::from_secs(300));
+    async fn success_clears_ip_backoff() {
+        let limiter = LoginRateLimiter::new(
+            Duration::from_millis(100),
+            Duration::from_secs(30),
+            Duration::from_secs(30),
+        );
         limiter.record_failure("acct:admin", "ip:9").await;
-        limiter.record_failure("acct:admin", "ip:9").await;
-        assert!(!limiter.allow("acct:admin").await);
-        assert!(limiter.allow("ip:10").await);
+        assert!(limiter.delay_before_attempt("acct:admin", "ip:9").await > Duration::ZERO);
+        limiter.on_success("acct:admin", "ip:9").await;
+        assert_eq!(
+            limiter.delay_before_attempt("acct:admin", "ip:9").await,
+            Duration::ZERO
+        );
+    }
+
+    #[tokio::test]
+    async fn stranger_failures_cannot_delay_mitch_beyond_account_cap() {
+        let limiter = LoginRateLimiter::new(
+            Duration::from_secs(10),
+            Duration::from_secs(30),
+            Duration::from_secs(300),
+        );
+        for _ in 0..50 {
+            limiter.record_failure("acct:admin", "ip:stranger").await;
+        }
+        let wait = limiter
+            .delay_before_attempt("acct:admin", "ip:mitch-home")
+            .await;
+        assert!(wait <= Duration::from_secs(30));
     }
 }

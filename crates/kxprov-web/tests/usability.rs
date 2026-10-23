@@ -5,7 +5,6 @@ use std::sync::Arc;
 use axum::body::Body;
 use axum::http::{header, Method, Request, StatusCode};
 use axum::middleware::from_fn;
-use axum_csrf::{CsrfConfig, CsrfLayer};
 use http_body_util::BodyExt;
 use kxprov_api::OperationalMode;
 use kxprov_api::Profile;
@@ -38,7 +37,6 @@ fn app_with_mode(mode: OperationalMode) -> axum::Router {
         .with_expiry(Expiry::OnInactivity(CookieDuration::seconds(900)));
     kxprov_web::router(state)
         .layer(from_fn(require_web_session))
-        .layer(CsrfLayer::new(CsrfConfig::default()))
         .layer(session)
 }
 
@@ -91,6 +89,7 @@ async fn login_cookie(app: &axum::Router) -> (String, String) {
         )
         .await
         .unwrap();
+    let session_cookie = merge_cookie_headers(&session_cookie, dash.headers());
     let dash_html = body_string(dash).await;
     let dash_csrf = dash_html
         .split("name=\"_csrf\" value=\"")
@@ -190,7 +189,6 @@ async fn production_plan_shows_diff_prefix_and_expiry() {
         .with_expiry(Expiry::OnInactivity(CookieDuration::seconds(900)));
     let app = kxprov_web::router(state)
         .layer(from_fn(require_web_session))
-        .layer(CsrfLayer::new(CsrfConfig::default()))
         .layer(session);
     let (cookie, csrf) = login_cookie(&app).await;
     let resp = app

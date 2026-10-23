@@ -12,6 +12,7 @@ fn tester() -> CallerIdentity {
         token_id: TokenId("tester-token-id".into()),
         agent_name: "Tester".into(),
         scopes: ScopeSet::empty().with(Scope::Read).with(Scope::Plan),
+        bearer: String::new(),
     })
 }
 
@@ -23,6 +24,7 @@ fn comms() -> CallerIdentity {
             .with(Scope::Read)
             .with(Scope::Plan)
             .with(Scope::Write),
+        bearer: String::new(),
     })
 }
 
@@ -31,6 +33,7 @@ fn approver() -> CallerIdentity {
         token_id: TokenId("approver-token-id".into()),
         agent_name: "Approver".into(),
         scopes: ScopeSet::empty().with(Scope::Read).with(Scope::Approve),
+        bearer: String::new(),
     })
 }
 
@@ -198,6 +201,7 @@ async fn approver_cannot_approve_own_plan() {
             .with(Scope::Read)
             .with(Scope::Plan)
             .with(Scope::Write),
+        bearer: String::new(),
     });
     let plan = daemon
         .plan_change(
@@ -220,6 +224,7 @@ async fn approver_cannot_approve_own_plan() {
         token_id: TokenId("solo-token".into()),
         agent_name: "SoloApprover".into(),
         scopes: ScopeSet::empty().with(Scope::Read).with(Scope::Approve),
+        bearer: String::new(),
     });
     assert!(matches!(
         daemon

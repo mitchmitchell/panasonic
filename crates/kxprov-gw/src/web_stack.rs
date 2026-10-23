@@ -5,7 +5,6 @@ use axum::extract::Request;
 use axum::http::header;
 use axum::middleware::{from_fn, from_fn_with_state};
 use axum::Router;
-use axum_csrf::{CsrfConfig, CsrfLayer};
 use kxprov_web::{reject_authenticated_login, require_web_session, WebState};
 use tower_http::set_header::SetResponseHeaderLayer;
 use tower_sessions::cookie::time::Duration as CookieDuration;
@@ -20,7 +19,6 @@ use crate::ratelimit::{rate_limit_middleware, RateLimitState, RateLimiter};
 pub fn production_web_router(
     web_state: WebState,
     host_origin: HostOriginConfig,
-    csrf_config: CsrfConfig,
     session_ttl_secs: u64,
     rate_limiter: RateLimiter,
 ) -> Router {
@@ -46,7 +44,6 @@ pub fn production_web_router(
     kxprov_web::router(web_state)
         .layer(from_fn(require_web_session))
         .layer(from_fn(reject_authenticated_login))
-        .layer(CsrfLayer::new(csrf_config))
         .layer(session_layer)
         .layer(from_fn_with_state(
             web_rate.clone(),

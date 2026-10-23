@@ -5,7 +5,6 @@ use std::time::Duration;
 
 use axum::body::Body;
 use axum::http::{header, Method, Request, StatusCode};
-use axum_csrf::CsrfConfig;
 use kxprov_gw::{production_web_router, HostOriginConfig, RateLimiter};
 use kxprov_mcp::KxMcpServer;
 use kxprov_mock::{MCP_APPROVAL_TOOLS, MCP_TOOLS, WEB_ROUTES};
@@ -16,7 +15,8 @@ fn production_like_app() -> axum::Router {
     let mut state = test_web_state();
     state.login_limiter = Arc::new(LoginRateLimiter::new(
         Duration::from_secs(1),
-        Duration::from_secs(60),
+        Duration::from_secs(30),
+        Duration::from_secs(300),
     ));
     state.admin = Arc::new(TestVerifier);
     production_web_router(
@@ -25,7 +25,6 @@ fn production_like_app() -> axum::Router {
             allowed_hosts: vec!["127.0.0.1".into(), "localhost".into()],
             allowed_origins: vec!["http://127.0.0.1".into(), "http://localhost".into()],
         },
-        CsrfConfig::default(),
         900,
         RateLimiter::new(120),
     )

@@ -44,6 +44,8 @@ pub struct GatewayConfig {
     pub mcp_tailnet_bind: String,
     pub mcp_public_bind: String,
     pub mcp_tokens_path: PathBuf,
+    pub daemon_tokens_path: PathBuf,
+    pub gateway_bearer_path: PathBuf,
     pub admin_password_path: PathBuf,
     pub daemon_socket_path: PathBuf,
     pub tls_cert_path: PathBuf,
@@ -64,6 +66,8 @@ impl Default for GatewayConfig {
             mcp_tailnet_bind: "127.0.0.1:8081".into(),
             mcp_public_bind: "127.0.0.1:8444".into(),
             mcp_tokens_path: "/etc/kx-provision/secrets/mcp-tokens.toml".into(),
+            daemon_tokens_path: "/var/lib/kxprov/tokens.json".into(),
+            gateway_bearer_path: "/etc/kx-provision/secrets/gateway-daemon.bearer".into(),
             admin_password_path: "/etc/kx-provision/secrets/admin-password.hash".into(),
             daemon_socket_path: "/run/kx-provision/kxprovd.sock".into(),
             tls_cert_path: "/etc/kx-provision/tls/lan.crt".into(),
@@ -159,6 +163,12 @@ impl GatewayConfig {
         if let Ok(path) = std::env::var("KXPROV_MCP_TOKENS") {
             config.mcp_tokens_path = path.into();
         }
+        if let Ok(path) = std::env::var("KXPROV_DAEMON_TOKENS") {
+            config.daemon_tokens_path = path.into();
+        }
+        if let Ok(path) = std::env::var("KXPROV_GATEWAY_BEARER") {
+            config.gateway_bearer_path = path.into();
+        }
         if let Ok(path) = std::env::var("KXPROV_DAEMON_SOCKET") {
             config.daemon_socket_path = path.into();
         }
@@ -198,6 +208,12 @@ impl GatewayConfig {
         }
         if let Some(v) = file.mcp_tokens_path {
             self.mcp_tokens_path = v.into();
+        }
+        if let Some(v) = file.daemon_tokens_path {
+            self.daemon_tokens_path = v.into();
+        }
+        if let Some(v) = file.gateway_bearer_path {
+            self.gateway_bearer_path = v.into();
         }
         if let Some(v) = file.mcp_tailnet_bind {
             self.mcp_tailnet_bind = v;
@@ -248,6 +264,8 @@ struct FileConfig {
     mcp_tailnet_bind: Option<String>,
     mcp_public_bind: Option<String>,
     mcp_tokens_path: Option<String>,
+    daemon_tokens_path: Option<String>,
+    gateway_bearer_path: Option<String>,
     tls_cert_path: Option<String>,
     tls_key_path: Option<String>,
     admin_password_path: Option<String>,

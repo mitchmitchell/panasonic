@@ -249,6 +249,7 @@ impl ServerHandler for KxMcpServer {
                 token_id: TokenId("unknown".into()),
                 agent_name: "unknown".into(),
                 scopes: ScopeSet::empty(),
+                bearer: String::new(),
             })
         });
         let scopes = caller.scopes();

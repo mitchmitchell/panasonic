@@ -26,7 +26,7 @@ fn client() -> Client<SimTransport> {
 }
 
 fn stored(c: &Client<SimTransport>) -> bool {
-    c.transport().sim.db[&0x25][32..48] == [0x11; 16]
+    c.transport().sim().db[&0x25][32..48] == [0x11; 16]
 }
 
 #[test]
@@ -41,7 +41,7 @@ fn test_dropped_write_with_stale_ack_before_cutoff_is_unacked() {
     let cut = Timing::default().reply_cutoff_ms(WRITE_LEN);
     for off in [0, 1, 5, 10, 20, 49, cut - 1] {
         let mut c = client();
-        c.transport_mut().sim.inject(Fault::NoAckDropped);
+        c.transport_mut().sim_mut().inject(Fault::NoAckDropped);
         c.transport_mut()
             .inject_inbound_after(PRESEND + off, ACK.to_vec());
         let e = c.write(0x25, 2, 0, &[0x11; 16]).unwrap_err();
@@ -59,7 +59,7 @@ fn test_ack_at_cutoff_is_taken_as_the_reply() {
     // Other side of the boundary: a frame at the cutoff could be genuine.
     let cut = Timing::default().reply_cutoff_ms(WRITE_LEN);
     let mut c = client();
-    c.transport_mut().sim.inject(Fault::NoAckApplied);
+    c.transport_mut().sim_mut().inject(Fault::NoAckApplied);
     c.transport_mut()
         .inject_inbound_after(PRESEND + cut, ACK.to_vec());
     assert_eq!(c.write(0x25, 2, 0, &[0x11; 16]), Ok(()));

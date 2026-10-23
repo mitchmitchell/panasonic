@@ -17,13 +17,18 @@ use tokio::sync::Mutex;
 
 pub struct DaemonClient {
     client: Mutex<ApiClient>,
+    gateway_bearer: String,
 }
 
 impl DaemonClient {
-    pub async fn connect(path: impl AsRef<Path>) -> Result<Arc<Self>, ApiError> {
+    pub async fn connect(
+        path: impl AsRef<Path>,
+        gateway_bearer: String,
+    ) -> Result<Arc<Self>, ApiError> {
         let client = ApiClient::connect(path).await?;
         Ok(Arc::new(Self {
             client: Mutex::new(client),
+            gateway_bearer,
         }))
     }
 
@@ -32,12 +37,29 @@ impl DaemonClient {
         caller: &CallerIdentity,
         body: RequestBody,
     ) -> Result<ResponseResult, BackendError> {
-        let auth = caller
-            .token_id()
-            .cloned()
-            .map(|token_id| RequestAuth { token_id });
+        let (auth, audit) = daemon_auth(caller, &self.gateway_bearer);
         let mut guard = self.client.lock().await;
-        guard.call_auth(body, auth).await.map_err(map_api_error)
+        guard
+            .call_auth_audit(body, Some(auth), audit)
+            .await
+            .map_err(map_api_error)
+    }
+}
+
+fn daemon_auth(caller: &CallerIdentity, gateway_bearer: &str) -> (RequestAuth, Option<String>) {
+    match caller {
+        CallerIdentity::Web(w) => (
+            RequestAuth {
+                bearer: gateway_bearer.to_string(),
+            },
+            Some(format!("web-session:{}", w.session_key)),
+        ),
+        CallerIdentity::Mcp(t) => (
+            RequestAuth {
+                bearer: t.bearer.clone(),
+            },
+            Some(format!("mcp:{}:{}", t.token_id.0, t.agent_name)),
+        ),
     }
 }
 

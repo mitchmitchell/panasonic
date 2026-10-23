@@ -11,4 +11,5 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
-kxtd1232 = { path = "../kxtd1232" }
+kxtd1232 = { path = "../kxtd1232", features = ["test-transport-access"] }
+getrandom = "0.3"

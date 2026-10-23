@@ -8,23 +8,52 @@ use crate::session::{Login, LoginState};
 use crate::signon::SignOn;
 use crate::tables;
 
+/// Link loss while sending: how many bytes reached the line before the failure.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinkDownError {
+    pub detail: String,
+    /// `0` only when the transport can prove nothing was transmitted.
+    pub bytes_sent: usize,
+}
+
+impl LinkDownError {
+    pub fn nothing_written(detail: impl Into<String>) -> Self {
+        Self {
+            detail: detail.into(),
+            bytes_sent: 0,
+        }
+    }
+}
+
 /// Transport errors.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TransportError {
     /// Nothing arrived within the timeout.
     Timeout,
-    /// The link is gone.
-    LinkDown(String),
+    /// From `send`: some or all of the data may have reached the line (see
+    /// [`LinkDownError::bytes_sent`]). Surfaces to callers as [`Error::LinkDown`].
+    LinkDown(LinkDownError),
+    /// From `send` only: provably zero bytes were written. The client maps this to
+    /// [`Error::PreSend`] wrapping [`Error::LinkDown`], not to a top-level `LinkDown`.
+    NothingWritten(String),
 }
 
 /// Byte transport plus clock. Implemented by the simulator and (A3) the daemon's port.
 pub trait Transport {
+    /// Write all of `data`. On failure, return [`TransportError::NothingWritten`] only
+    /// when no byte left the host; any partial or uncertain write is
+    /// [`TransportError::LinkDown`].
     fn send(&mut self, data: &[u8]) -> Result<(), TransportError>;
     /// Return whatever bytes arrive within `timeout_ms` (at least one byte), or `Timeout`.
     fn recv(&mut self, timeout_ms: u64) -> Result<Vec<u8>, TransportError>;
     /// Monotonic time in milliseconds.
     fn now_ms(&mut self) -> u64;
 }
+
+/// Minimum post-reply turnaround margin (Tester #2: 0 ms with high baud shrinks cutoff).
+pub const MIN_REPLY_GUARD_MS: u64 = 20;
+/// Upper bound for configured line rate (daemon rejects above this at startup).
+pub const MAX_LINK_BAUD: u32 = 115_200;
 
 /// Timing parameters (defaults until hardware test H5 measures them; design §9b).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,12 +74,38 @@ pub struct Timing {
     pub login_timeout_ms: u64,
     /// Line rate for the post-send cutoff (10 bits per byte).
     pub link_baud: u32,
-    /// Margin added to the post-send cutoff for the PBX's turnaround.
+    /// Assumed minimum PBX turnaround, added to the post-send cutoff. This is a lower
+    /// bound, not slack: no genuine reply can start before the request has been sent and
+    /// the PBX has turned round, so a larger value drops more early (stale) frames, and a
+    /// value above the real turnaround would drop a genuine ack (the write then counts as
+    /// unacked and is verified by read-back, never resent). 20 ms is a placeholder until
+    /// hardware test H5 measures it; the prototype had no margin here.
     pub reply_guard_ms: u64,
 }
 
 /// Shortest reply frame (an ack), for the post-send cutoff.
 const MIN_REPLY_LEN: usize = 4;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TimingConfigError {
+    LinkBaudOutOfRange,
+    ReplyGuardTooLow,
+}
+
+impl std::fmt::Display for TimingConfigError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::LinkBaudOutOfRange => {
+                write!(f, "link_baud must be between 1 and {MAX_LINK_BAUD}")
+            }
+            Self::ReplyGuardTooLow => {
+                write!(f, "reply_guard_ms must be at least {MIN_REPLY_GUARD_MS} ms")
+            }
+        }
+    }
+}
+
+impl std::error::Error for TimingConfigError {}
 
 impl Timing {
     /// Milliseconds to transmit `n` bytes at `link_baud`, 10 bits per byte, rounded up.
@@ -65,6 +120,17 @@ impl Timing {
     pub fn reply_cutoff_ms(&self, request_len: usize) -> u64 {
         self.tx_ms(request_len) + self.tx_ms(MIN_REPLY_LEN) + self.reply_guard_ms
     }
+
+    /// Reject daemon config that would shrink the reply cutoff below a sane floor.
+    pub fn validate(self) -> Result<Self, TimingConfigError> {
+        if self.link_baud == 0 || self.link_baud > MAX_LINK_BAUD {
+            return Err(TimingConfigError::LinkBaudOutOfRange);
+        }
+        if self.reply_guard_ms < MIN_REPLY_GUARD_MS {
+            return Err(TimingConfigError::ReplyGuardTooLow);
+        }
+        Ok(self)
+    }
 }
 
 impl Default for Timing {
@@ -77,7 +143,7 @@ impl Default for Timing {
             presend_quiet_ms: 100,
             login_timeout_ms: 30_000,
             link_baud: 9600,
-            reply_guard_ms: 20,
+            reply_guard_ms: MIN_REPLY_GUARD_MS,
         }
     }
 }
@@ -198,9 +264,8 @@ impl<T: Transport> Client<T> {
         &self.t
     }
 
-    /// Mutable transport access. Public only because `kxprovd` is the sole owner of the
-    /// serial port and the client (A3), and the simulator tests inject faults through it.
-    /// Bytes sent this way bypass every guard in this type; nothing else may hold it.
+    /// Mutable transport access for integration tests (fault injection).
+    #[cfg(feature = "test-transport-access")]
     pub fn transport_mut(&mut self) -> &mut T {
         &mut self.t
     }
@@ -216,14 +281,27 @@ impl<T: Transport> Client<T> {
             Ok(b) if b.is_empty() => Err(Error::LinkDown("transport returned no bytes".into())),
             Ok(b) => Ok(b),
             Err(TransportError::Timeout) => Err(Error::Timeout),
-            Err(TransportError::LinkDown(s)) => Err(Error::LinkDown(s)),
+            Err(TransportError::LinkDown(e)) => Err(Error::LinkDown(e.detail)),
+            Err(TransportError::NothingWritten(s)) => Err(Error::LinkDown(s)),
         }
     }
 
+    /// Text-mode send (login, BYE): any link failure is just a lost link.
     fn send(&mut self, data: &[u8]) -> Result<(), Error> {
         self.t.send(data).map_err(|e| match e {
             TransportError::Timeout => Error::Timeout,
-            TransportError::LinkDown(s) => Error::LinkDown(s),
+            TransportError::LinkDown(e) => Error::LinkDown(e.detail),
+            TransportError::NothingWritten(s) => Error::LinkDown(s),
+        })
+    }
+
+    /// Frame send: a provable zero-byte failure is [`Error::PreSend`] (nothing sent);
+    /// anything else that fails is [`Error::LinkDown`] (the frame may have arrived).
+    fn send_frame(&mut self, data: &[u8]) -> Result<(), Error> {
+        self.t.send(data).map_err(|e| match e {
+            TransportError::Timeout => Error::Timeout,
+            TransportError::LinkDown(e) => Error::LinkDown(e.detail),
+            TransportError::NothingWritten(s) => Error::PreSend(Box::new(Error::LinkDown(s))),
         })
     }
 
@@ -297,9 +375,14 @@ impl<T: Transport> Client<T> {
             return Err(e);
         }
         let sent_at = self.t.now_ms();
-        if let Err(e @ Error::LinkDown(_)) = self.send(raw) {
-            self.note_link_down(None);
-            return Err(e);
+        match self.send_frame(raw) {
+            // LinkDown: write() records the frame as possibly applied. PreSend: provably
+            // nothing left the host, so there is nothing to verify.
+            Err(e @ (Error::LinkDown(_) | Error::PreSend(_))) => {
+                self.note_link_down(None);
+                return Err(e);
+            }
+            _ => {}
         }
         let r = match self
             .drop_before_cutoff(sent_at + self.timing.reply_cutoff_ms(raw.len()))
@@ -796,5 +879,48 @@ impl<T: Transport> Client<T> {
 impl From<LoginFailure> for Error {
     fn from(f: LoginFailure) -> Self {
         Self::Login(f)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::VecDeque;
+
+    /// Scripted transport: `recv` pops queued chunks, then times out.
+    struct Script {
+        now: u64,
+        inbound: VecDeque<Vec<u8>>,
+    }
+
+    impl Transport for Script {
+        fn send(&mut self, _: &[u8]) -> Result<(), TransportError> {
+            Ok(())
+        }
+        fn recv(&mut self, timeout_ms: u64) -> Result<Vec<u8>, TransportError> {
+            self.inbound.pop_front().ok_or_else(|| {
+                self.now += timeout_ms;
+                TransportError::Timeout
+            })
+        }
+        fn now_ms(&mut self) -> u64 {
+            self.now
+        }
+    }
+
+    /// Architect 5629005479: bytes already buffered when a drain starts are logged as
+    /// drained and never left in the buffer to be parsed as the next reply.
+    #[test]
+    fn drain_until_quiet_flushes_buffered_rx() {
+        let mut c = Client::new(Script {
+            now: 0,
+            inbound: VecDeque::new(),
+        });
+        c.state = SessionState::Binary;
+        let stale = vec![0x03, 0x00, 0x00, 0x03];
+        c.rx = stale.clone();
+        assert_eq!(c.drain_until_quiet(), Ok(()));
+        assert!(c.rx.is_empty(), "buffered bytes survived the drain");
+        assert_eq!(c.drained().first().map(|d| d.bytes.clone()), Some(stale));
     }
 }

@@ -9,7 +9,6 @@ use axum::extract::ConnectInfo;
 use axum::http::{header, Method, Request, StatusCode};
 use axum::middleware::from_fn;
 use axum::Router;
-use axum_csrf::{CsrfConfig, CsrfLayer};
 use http_body_util::BodyExt;
 use kxprov_gw::{production_web_router, HostOriginConfig, RateLimiter};
 use kxprov_mock::WEB_ROUTES;
@@ -30,7 +29,8 @@ fn production_app() -> Router {
     let mut state = test_web_state();
     state.login_limiter = Arc::new(LoginRateLimiter::new(
         Duration::from_secs(1),
-        Duration::from_secs(900),
+        Duration::from_secs(30),
+        Duration::from_secs(300),
     ));
     state.admin = Arc::new(TestVerifier);
     production_web_router(
@@ -39,7 +39,6 @@ fn production_app() -> Router {
             allowed_hosts: vec!["127.0.0.1".into(), "localhost".into()],
             allowed_origins: vec!["http://127.0.0.1".into(), "http://localhost".into()],
         },
-        CsrfConfig::default(),
         900,
         RateLimiter::new(120),
     )
@@ -55,7 +54,6 @@ fn dev_app() -> Router {
         .with_expiry(Expiry::OnInactivity(CookieDuration::seconds(900)));
     kxprov_web::router(state)
         .layer(from_fn(require_web_session))
-        .layer(CsrfLayer::new(CsrfConfig::default()))
         .layer(session)
 }
 
@@ -130,6 +128,7 @@ async fn login_session(app: &Router) -> (String, String) {
         )
         .await
         .unwrap();
+    let session_cookie = merge_cookie_headers(&session_cookie, dash.headers());
     let html = body_string(dash).await;
     let dash_csrf = html
         .split("name=\"_csrf\" value=\"")

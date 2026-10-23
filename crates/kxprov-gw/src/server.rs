@@ -9,7 +9,6 @@ use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::any;
 use axum::Router;
-use axum_csrf::CsrfConfig;
 use axum_server::tls_rustls::RustlsConfig;
 use kxprov_api::TokenId;
 use kxprov_mcp::{KxMcpServer, MCP_CALLER};
@@ -59,15 +58,14 @@ pub async fn serve(
     let admin = Arc::new(AdminPassword::from_file(&config.admin_password_path)?);
     let token_store = Arc::new(McpTokenStore::from_file(&config.mcp_tokens_path)?);
 
-    let csrf_config = CsrfConfig::default();
     let web_state = WebState {
         backend: backend.clone(),
         admin: Arc::new(AdminVerifier(admin)),
         login_limiter: Arc::new(LoginRateLimiter::new(
             Duration::from_secs(1),
-            Duration::from_secs(900),
+            Duration::from_secs(30),
+            Duration::from_secs(300),
         )),
-        csrf_config: csrf_config.clone(),
     };
 
     let host_origin = HostOriginConfig {
@@ -79,7 +77,6 @@ pub async fn serve(
     let web_app = production_web_router(
         web_state,
         host_origin.clone(),
-        csrf_config,
         config.session_ttl_secs,
         rate_limiter.clone(),
     );
@@ -233,6 +230,7 @@ async fn handle_mcp(
         token_id: TokenId(record.token_id.clone()),
         agent_name: record.agent_name.clone(),
         scopes: record.scopes.clone(),
+        bearer: bearer.to_string(),
     });
     if !limiter.check(&identity.rate_limit_key()).await {
         return StatusCode::TOO_MANY_REQUESTS.into_response();

@@ -9,12 +9,11 @@ mod templates;
 use std::sync::Arc;
 
 use askama::Template;
-use axum::extract::{ConnectInfo, Form, FromRef, Path, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::extract::{ConnectInfo, Form, Path, State};
+use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use axum::Router;
-use axum_csrf::{CsrfConfig, CsrfToken};
 use kxprov_api::{OperationalMode, Profile};
 use kxprov_mock::{
     BackendError, CallerIdentity, DaemonBackend, PlanChangeRequest, PlanSummary, ReadFieldsRequest,
@@ -38,13 +37,6 @@ pub struct WebState {
     pub backend: Arc<dyn DaemonBackend>,
     pub admin: Arc<dyn PasswordVerifier>,
     pub login_limiter: Arc<crate::login_limit::LoginRateLimiter>,
-    pub csrf_config: CsrfConfig,
-}
-
-impl FromRef<WebState> for CsrfConfig {
-    fn from_ref(state: &WebState) -> CsrfConfig {
-        state.csrf_config.clone()
-    }
 }
 
 pub fn sign_in_page_title() -> &'static str {
@@ -66,8 +58,12 @@ pub fn router(state: WebState) -> Router {
         .with_state(state)
 }
 
-async fn approval_via_mcp_only(csrf_token: CsrfToken, Form(form): Form<LogoutForm>) -> Response {
-    if let Some(resp) = csrf::verify_form_csrf(&csrf_token, &form._csrf) {
+async fn approval_via_mcp_only(
+    session: Session,
+    headers: HeaderMap,
+    Form(form): Form<LogoutForm>,
+) -> Response {
+    if let Some(resp) = csrf::verify_form_csrf(&session, &headers, &form._csrf).await {
         return resp;
     }
     (
@@ -223,15 +219,20 @@ fn caller_from_session(session: &Session) -> CallerIdentity {
 
 /// Client IP for login rate limiting. Trust `X-Forwarded-For` only when the TCP peer is loopback
 /// (e.g. tailscale serve forwarding from `127.0.0.1` on the gateway host).
+///
+/// Tailscale Serve **appends** the client address to any existing `X-Forwarded-For` chain, so the
+/// rightmost hop is the original client (see `docs/design/tailscale-x-forwarded-for.md`).
 pub fn client_ip(headers: &HeaderMap, peer: Option<SocketAddr>) -> String {
     if let Some(peer) = peer {
         if peer.ip().is_loopback() {
             if let Some(v) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
-                if let Some(first) = v.split(',').next() {
-                    let trimmed = first.trim();
-                    if !trimmed.is_empty() {
-                        return trimmed.to_string();
-                    }
+                let hops: Vec<&str> = v
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                if let Some(client) = hops.last() {
+                    return (*client).to_string();
                 }
             }
         }
@@ -240,12 +241,11 @@ pub fn client_ip(headers: &HeaderMap, peer: Option<SocketAddr>) -> String {
     "unknown".into()
 }
 
-async fn login_form(csrf_token: CsrfToken) -> impl IntoResponse {
-    let token = csrf_token
-        .authenticity_token()
-        .unwrap_or_else(|_| String::new());
+async fn login_form(session: Session) -> impl IntoResponse {
+    let token = csrf::token_for_session(&session).await;
+    let cookie = csrf::csrf_set_cookie_value(&token);
     (
-        csrf_token,
+        [(header::SET_COOKIE, cookie)],
         Html(
             templates::LoginTemplate {
                 page_title: sign_in_page_title().into(),
@@ -262,13 +262,13 @@ async fn login_form(csrf_token: CsrfToken) -> impl IntoResponse {
 #[derive(Deserialize)]
 struct LoginForm {
     password: String,
-    #[serde(rename = "_csrf")]
+    #[serde(default, rename = "_csrf")]
     _csrf: String,
 }
 
 #[derive(Deserialize)]
 struct LogoutForm {
-    #[serde(rename = "_csrf")]
+    #[serde(default, rename = "_csrf")]
     _csrf: String,
 }
 
@@ -276,44 +276,35 @@ async fn login_submit(
     State(state): State<WebState>,
     session: Session,
     headers: HeaderMap,
-    csrf_token: CsrfToken,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     Form(form): Form<LoginForm>,
 ) -> Response {
-    if let Some(resp) = csrf::verify_form_csrf(&csrf_token, &form._csrf) {
+    if let Some(resp) = csrf::verify_form_csrf(&session, &headers, &form._csrf).await {
         return resp;
     }
     let ip = client_ip(&headers, Some(peer));
     let acct_key = "acct:admin".to_string();
     let ip_key = format!("ip:{ip}");
-    if !state.login_limiter.allow(&acct_key).await || !state.login_limiter.allow(&ip_key).await {
-        return login_error_html("", "Too many attempts. Try again later.").into_response();
+    let delay = state
+        .login_limiter
+        .delay_before_attempt(&acct_key, &ip_key)
+        .await;
+    if !delay.is_zero() {
+        tokio::time::sleep(delay).await;
     }
     if !state.admin.verify(&form.password) {
         state.login_limiter.record_failure(&acct_key, &ip_key).await;
         return Redirect::to("/login?error=1").into_response();
     }
-    state.login_limiter.reset(&acct_key, &ip_key).await;
+    state.login_limiter.on_success(&acct_key, &ip_key).await;
     let _ = session.cycle_id().await;
+    let _ = csrf::rotate_for_session(&session).await;
     let _ = session.insert(crate::session::SESSION_AUTH_KEY, true).await;
     Redirect::to("/").into_response()
 }
 
-fn login_error_html(csrf: &str, message: &str) -> Html<String> {
-    Html(
-        templates::LoginTemplate {
-            page_title: sign_in_page_title().into(),
-            show_error: true,
-            error: message.into(),
-            csrf_token: csrf.to_string(),
-        }
-        .render()
-        .unwrap_or_default(),
-    )
-}
-
-async fn logout(session: Session, csrf_token: CsrfToken, Form(form): Form<LogoutForm>) -> Response {
-    if let Some(resp) = csrf::verify_form_csrf(&csrf_token, &form._csrf) {
+async fn logout(session: Session, headers: HeaderMap, Form(form): Form<LogoutForm>) -> Response {
+    if let Some(resp) = csrf::verify_form_csrf(&session, &headers, &form._csrf).await {
         return resp;
     }
     let _ = session.delete().await;
@@ -324,7 +315,7 @@ async fn logout(session: Session, csrf_token: CsrfToken, Form(form): Form<Logout
 pub struct TableRecordForm {
     table: String,
     record: String,
-    #[serde(rename = "_csrf")]
+    #[serde(default, rename = "_csrf")]
     pub _csrf: String,
 }
 
@@ -334,7 +325,7 @@ pub struct PlanForm {
     record: String,
     field: String,
     new_value: String,
-    #[serde(rename = "_csrf")]
+    #[serde(default, rename = "_csrf")]
     pub _csrf: String,
 }
 
@@ -347,15 +338,13 @@ fn parse_table_record(form: &TableRecordForm) -> Result<(u8, u16), String> {
 async fn read_record(
     State(state): State<WebState>,
     session: Session,
-    csrf_token: CsrfToken,
+    headers: HeaderMap,
     Form(form): Form<TableRecordForm>,
 ) -> Response {
-    if let Some(resp) = csrf::verify_form_csrf(&csrf_token, &form._csrf) {
+    if let Some(resp) = csrf::verify_form_csrf(&session, &headers, &form._csrf).await {
         return resp;
     }
-    let token = csrf_token
-        .authenticity_token()
-        .unwrap_or_else(|_| String::new());
+    let token = csrf::token_for_session(&session).await;
     let caller = caller_from_session(&session);
     let mut tpl = empty_dashboard(&token);
     tpl.table_value = form.table.clone();
@@ -398,18 +387,16 @@ async fn read_record(
     Html(tpl.render().unwrap_or_default()).into_response()
 }
 
-async fn dashboard(
-    State(state): State<WebState>,
-    session: Session,
-    csrf_token: CsrfToken,
-) -> impl IntoResponse {
-    let token = csrf_token
-        .authenticity_token()
-        .unwrap_or_else(|_| String::new());
+async fn dashboard(State(state): State<WebState>, session: Session) -> impl IntoResponse {
+    let token = csrf::token_for_session(&session).await;
+    let cookie = csrf::csrf_set_cookie_value(&token);
     let caller = caller_from_session(&session);
     let mut tpl = empty_dashboard(&token);
     fill_dashboard_from_status(&mut tpl, &state, &caller).await;
-    Html(tpl.render().unwrap_or_default())
+    (
+        [(header::SET_COOKIE, cookie)],
+        Html(tpl.render().unwrap_or_default()),
+    )
 }
 
 fn parse_plan_form(form: &PlanForm) -> Result<PlanChangeRequest, String> {
@@ -432,15 +419,13 @@ fn parse_plan_form(form: &PlanForm) -> Result<PlanChangeRequest, String> {
 async fn plan_change(
     State(state): State<WebState>,
     session: Session,
-    csrf_token: CsrfToken,
+    headers: HeaderMap,
     Form(form): Form<PlanForm>,
 ) -> Response {
-    if let Some(resp) = csrf::verify_form_csrf(&csrf_token, &form._csrf) {
+    if let Some(resp) = csrf::verify_form_csrf(&session, &headers, &form._csrf).await {
         return resp;
     }
-    let token = csrf_token
-        .authenticity_token()
-        .unwrap_or_else(|_| String::new());
+    let token = csrf::token_for_session(&session).await;
     let caller = caller_from_session(&session);
     let mut tpl = empty_dashboard(&token);
     tpl.table_value = form.table.clone();
@@ -490,6 +475,12 @@ mod client_ip_tests {
         let mut headers = HeaderMap::new();
         headers.insert("x-forwarded-for", "203.0.113.5".parse().unwrap());
         let peer = "127.0.0.1:8080".parse().unwrap();
+        assert_eq!(client_ip(&headers, Some(peer)), "203.0.113.5");
+
+        headers.insert(
+            "x-forwarded-for",
+            "198.51.100.1, 203.0.113.5".parse().unwrap(),
+        );
         assert_eq!(client_ip(&headers, Some(peer)), "203.0.113.5");
 
         let peer = "10.0.0.2:443".parse().unwrap();

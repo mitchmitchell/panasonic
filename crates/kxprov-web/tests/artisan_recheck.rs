@@ -5,7 +5,6 @@ use std::sync::Arc;
 use axum::body::Body;
 use axum::http::{header, Method, Request, StatusCode};
 use axum::middleware::from_fn;
-use axum_csrf::{CsrfConfig, CsrfLayer};
 use http_body_util::BodyExt;
 use kxprov_api::OperationalMode;
 use kxprov_api::Profile;
@@ -26,13 +25,11 @@ async fn body_string(resp: axum::response::Response) -> String {
 }
 
 fn app_with_mode(mode: OperationalMode) -> axum::Router {
-    let csrf_config = CsrfConfig::default();
     let mut state = test_web_state();
     state.backend = Arc::new(MockDaemon::with_mode_and_password(
         mode,
         "test-admin-password",
     ));
-    state.csrf_config = csrf_config.clone();
     let session = SessionManagerLayer::new(MemoryStore::default())
         .with_name("__Host-kxprov.sid")
         .with_secure(true)
@@ -42,7 +39,6 @@ fn app_with_mode(mode: OperationalMode) -> axum::Router {
     kxprov_web::router(state)
         .layer(from_fn(require_web_session))
         .layer(from_fn(reject_authenticated_login))
-        .layer(CsrfLayer::new(csrf_config))
         .layer(session)
 }
 
@@ -95,6 +91,7 @@ async fn login_cookie(app: &axum::Router) -> (String, String) {
         )
         .await
         .unwrap();
+    let session_cookie = merge_cookie_headers(&session_cookie, dash.headers());
     let dash_html = body_string(dash).await;
     let dash_csrf = dash_html
         .split("name=\"_csrf\" value=\"")
@@ -107,7 +104,10 @@ async fn login_cookie(app: &axum::Router) -> (String, String) {
 
 #[tokio::test]
 async fn login_page_has_h1_without_inline_styles() {
-    let app = kxprov_web::router(test_web_state()).layer(CsrfLayer::new(CsrfConfig::default()));
+    let session = SessionManagerLayer::new(MemoryStore::default())
+        .with_secure(true)
+        .with_expiry(Expiry::OnInactivity(CookieDuration::seconds(900)));
+    let app = kxprov_web::router(test_web_state()).layer(session);
     let html = body_string(
         app.oneshot(
             Request::builder()
@@ -202,10 +202,8 @@ async fn plan_summary_lists_table_record_and_values() {
 
 #[tokio::test]
 async fn production_plan_shows_chicago_expiry_and_countdown() {
-    let csrf_config = CsrfConfig::default();
     let mut state = test_web_state();
     state.backend = Arc::new(MockDaemon::with_profile(Profile::Prod));
-    state.csrf_config = csrf_config.clone();
     let session = SessionManagerLayer::new(MemoryStore::default())
         .with_name("__Host-kxprov.sid")
         .with_secure(true)
@@ -215,7 +213,6 @@ async fn production_plan_shows_chicago_expiry_and_countdown() {
     let app = kxprov_web::router(state)
         .layer(from_fn(require_web_session))
         .layer(from_fn(reject_authenticated_login))
-        .layer(CsrfLayer::new(csrf_config))
         .layer(session);
     let (cookie, csrf) = login_cookie(&app).await;
     let resp = app
