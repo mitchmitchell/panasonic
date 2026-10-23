@@ -31,13 +31,13 @@ pub async fn run_worker(
     tokens: TokenStore,
 ) {
     while let Some(job) = rx.recv().await {
-        if let Some(ref tid) = job.token_id {
-            if !TokenStore::is_synthetic_job_principal(tid) {
+        if let Some(ref principal) = job.principal {
+            if let Some(tid) = principal.token_id() {
                 let stale = job.token_epoch < queue_jobs.token_epoch(tid);
                 let revoked = stale || tokens.is_revoked(tid).unwrap_or(true);
                 if revoked {
                     queue_jobs.set_state(&job.id, JobState::Failed).await;
-                    queue_jobs.release_token(job.token_id.as_ref()).await;
+                    queue_jobs.release_token(job.principal.as_ref()).await;
                     let _ = job.reply.send(JobOutcome::Err {
                         code: "token_revoked".into(),
                         message: "bearer token was revoked".into(),
@@ -59,7 +59,7 @@ pub async fn run_worker(
                 },
             )
             .await;
-        queue_jobs.release_token(job.token_id.as_ref()).await;
+        queue_jobs.release_token(job.principal.as_ref()).await;
         let _ = job.reply.send(outcome);
     }
 }

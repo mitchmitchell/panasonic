@@ -2,6 +2,7 @@ use crate::approval::ApprovalBook;
 use crate::backup::BackupStore;
 use crate::config::Config;
 use crate::gates::{prod_write_gate, GateState, ProdWriteGate};
+use crate::job_principal::JobPrincipal;
 use crate::locked::LockedStore;
 use crate::mode::{write_approval_required, ModeStore};
 #[cfg(feature = "sim-fault-triggers")]
@@ -136,10 +137,18 @@ async fn dispatch(
                 Ok(t) => t,
                 Err(e) => return err_response(id, e),
             };
+            let token = match require_bearer_token(token) {
+                Ok(t) => t,
+                Err(e) => return err_response(id, e),
+            };
             run_plan(state, params.clone(), token).await
         }
         RequestBody::SubmitApproval { params } => {
             let approver = match require_access(state, cred, role, &env.auth, Scope::Approve) {
+                Ok(t) => t,
+                Err(e) => return err_response(id, e),
+            };
+            let approver = match require_bearer_token(approver) {
                 Ok(t) => t,
                 Err(e) => return err_response(id, e),
             };
@@ -171,6 +180,10 @@ async fn dispatch(
         }
         RequestBody::ApplyPlan { params } => {
             let token = match require_access(state, cred, role, &env.auth, Scope::Write) {
+                Ok(t) => t,
+                Err(e) => return err_response(id, e),
+            };
+            let token = match require_bearer_token(token) {
                 Ok(t) => t,
                 Err(e) => return err_response(id, e),
             };
@@ -327,29 +340,36 @@ fn require_access(
     role: PeerRole,
     auth: &Option<RequestAuth>,
     need: Scope,
-) -> Result<TokenId, ApiErrorBody> {
+) -> Result<JobPrincipal, ApiErrorBody> {
     match role {
         PeerRole::Gateway => {
             let auth = auth
                 .as_ref()
                 .ok_or_else(|| api_err("token_required", "bearer required"))?;
-            verify_bearer(state, auth, need)
+            verify_bearer(state, auth, need).map(JobPrincipal::Token)
         }
         PeerRole::Admin => {
             if need == Scope::Read && auth.is_none() {
-                return Ok(TokenId("root".into()));
+                return Ok(JobPrincipal::SyntheticRoot);
             }
             let auth = auth
                 .as_ref()
                 .ok_or_else(|| api_err("token_required", "bearer required"))?;
-            verify_bearer(state, auth, need)
+            verify_bearer(state, auth, need).map(JobPrincipal::Token)
         }
         PeerRole::ReadOnly => {
             if need != Scope::Read {
                 return Err(api_err("forbidden", "read-only peer"));
             }
-            Ok(TokenId(format!("local:{}", cred.uid)))
+            Ok(JobPrincipal::SyntheticLocal { uid: cred.uid })
         }
+    }
+}
+
+fn require_bearer_token(principal: JobPrincipal) -> Result<TokenId, ApiErrorBody> {
+    match principal {
+        JobPrincipal::Token(id) => Ok(id),
+        _ => Err(api_err("token_required", "bearer required")),
     }
 }
 
@@ -362,7 +382,9 @@ fn require_backup_access(
     if role == PeerRole::Admin && auth.is_none() {
         return Ok(());
     }
-    require_access(state, cred, role, auth, Scope::Write).map(|_| ())
+    require_access(state, cred, role, auth, Scope::Write)
+        .and_then(require_bearer_token)
+        .map(|_| ())
 }
 
 async fn status_snapshot(state: &ApiState, locked: bool) -> kxprov_api::StatusResponse {
@@ -433,7 +455,7 @@ async fn run_plan(
                 params,
                 token_id: token.clone(),
             },
-            Some(token),
+            Some(JobPrincipal::Token(token)),
             now,
         )
         .await
@@ -595,7 +617,7 @@ async fn apply_plan(
                 diff_hash: params.diff_hash.clone(),
                 token_id: token.clone(),
             },
-            Some(token),
+            Some(JobPrincipal::Token(token)),
             now,
         )
         .await
@@ -630,11 +652,11 @@ fn queue_err(e: QueueError) -> ApiErrorBody {
 async fn run_job(
     state: &ApiState,
     kind: JobKind,
-    token: Option<TokenId>,
+    principal: Option<JobPrincipal>,
 ) -> Result<ResponseResult, ApiErrorBody> {
     let (_job_id, rx) = state
         .queue
-        .enqueue(kind, token, now_ms())
+        .enqueue(kind, principal, now_ms())
         .await
         .map_err(queue_err)?;
     let outcome = rx.await.map_err(|_| api_err("queue", "job dropped"))?;

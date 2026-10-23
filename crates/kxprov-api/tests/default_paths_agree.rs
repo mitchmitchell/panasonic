@@ -59,5 +59,8 @@ fn daemon_and_sim_mark_resolve_identical_sim_passed_path() {
 #[test]
 fn daemon_mode_counter_matches_shared_constant() {
     let base = Path::new(DATA_DIR);
-    assert_eq!(mode_counter_path(base), PathBuf::from(MODE_COUNTER));
+    assert_eq!(
+        mode_counter_path(base, kxprov_api::Profile::Sim),
+        PathBuf::from(MODE_COUNTER)
+    );
 }

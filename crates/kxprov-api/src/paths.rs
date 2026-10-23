@@ -1,7 +1,7 @@
 //! Production filesystem layout (daemon, gateway, CLI, sim-mark).
 //!
 //! Layout (v2.12): repository root [`DATA_DIR`]; per-profile trees under
-//! `{DATA_DIR}/<profile>/`; [`MODE_COUNTER`] and [`SIM_PASSED_JSON`] at the root only.
+//! `{DATA_DIR}/<profile>/` (each with its own `mode.counter`); [`SIM_PASSED_JSON`] at the root.
 
 use std::path::{Path, PathBuf};
 
@@ -16,8 +16,8 @@ pub const DATA_DIR: &str = "/var/lib/kx-provision";
 /// Daemon bearer token store (root-owned, mode 0600).
 pub const TOKENS_JSON: &str = "/var/lib/kx-provision/tokens.json";
 
-/// Monotonic mode-set counter (global, not per-profile).
-pub const MODE_COUNTER: &str = "/var/lib/kx-provision/mode.counter";
+/// Production Sim profile mode counter (each profile has its own file).
+pub const MODE_COUNTER: &str = "/var/lib/kx-provision/sim/mode.counter";
 
 /// Simulator pass marker for the current build (global, root-owned in production).
 pub const SIM_PASSED_JSON: &str = "/var/lib/kx-provision/sim-passed.json";
@@ -67,13 +67,9 @@ pub fn sim_passed_path(base: &Path) -> PathBuf {
     }
 }
 
-/// Path to [`MODE_COUNTER`] (or `{base}/mode.counter` in isolated test trees).
-pub fn mode_counter_path(base: &Path) -> PathBuf {
-    if production_layout(base) {
-        PathBuf::from(MODE_COUNTER)
-    } else {
-        base.join("mode.counter")
-    }
+/// Per-profile `mode.counter` under the configured data root.
+pub fn mode_counter_path(base: &Path, profile: Profile) -> PathBuf {
+    resolve_profile_data_dir(base, profile).join("mode.counter")
 }
 
 #[cfg(test)]

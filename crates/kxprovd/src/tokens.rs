@@ -4,10 +4,10 @@ use kxprov_api::{
     hash_bearer_secret, validate_tokens_file, Scope, TokenEntry, TokenId, TokenValidationError,
     TokensFile,
 };
+use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, Weak};
-use std::time::SystemTime;
 use thiserror::Error;
 
 use crate::queue::JobQueue;
@@ -42,7 +42,8 @@ struct TokenState {
     path: PathBuf,
     approver_token_id: TokenId,
     entries: Vec<TokenEntry>,
-    loaded_mtime: Option<SystemTime>,
+    /// SHA-256 of raw tokens.json bytes; reload when disk content differs.
+    loaded_digest: Option<[u8; 32]>,
     /// When true, a reload from disk re-checks root ownership and mode 0600.
     enforce_secure_reload: bool,
 }
@@ -55,6 +56,7 @@ pub struct TokenStore {
 struct TokenRefreshDelta {
     newly_revoked: Vec<TokenId>,
     reactivated: Vec<TokenId>,
+    rotated: Vec<TokenId>,
 }
 
 impl Clone for TokenStore {
@@ -65,7 +67,7 @@ impl Clone for TokenStore {
                 path: state.path.clone(),
                 approver_token_id: state.approver_token_id.clone(),
                 entries: state.entries.clone(),
-                loaded_mtime: state.loaded_mtime,
+                loaded_digest: state.loaded_digest,
                 enforce_secure_reload: state.enforce_secure_reload,
             }),
             job_queue: Mutex::new(self.job_queue.lock().expect("token store lock").clone()),
@@ -120,7 +122,7 @@ impl TokenStore {
         *self.job_queue.lock().expect("token store lock") = Some(queue);
     }
 
-    fn notify_token_revocation_changes(&self, newly_revoked: &[TokenId], reactivated: &[TokenId]) {
+    fn notify_token_revocation_changes(&self, delta: &TokenRefreshDelta) {
         let q = self
             .job_queue
             .lock()
@@ -130,30 +132,41 @@ impl TokenStore {
         let Some(q) = q else {
             return;
         };
-        for id in newly_revoked {
+        for id in &delta.newly_revoked {
             q.bump_token_epoch(id);
         }
-        for id in reactivated {
+        for id in &delta.reactivated {
+            q.bump_token_epoch(id);
+        }
+        for id in &delta.rotated {
             q.bump_token_epoch(id);
         }
     }
 
-    /// Unix-socket principals that are not rows in `tokens.json` (admin read, read-only peer).
-    pub fn is_synthetic_job_principal(token_id: &TokenId) -> bool {
-        let s = token_id.as_str();
-        s == "root" || s == "local" || s.starts_with("local:")
+    fn digest_bytes(raw: &[u8]) -> [u8; 32] {
+        Sha256::digest(raw).into()
     }
 
     fn read_state(path: &Path) -> Result<TokenState, TokenError> {
-        let meta = std::fs::metadata(path)?;
-        let loaded_mtime = meta.modified().ok();
         let raw = std::fs::read(path)?;
+        let loaded_digest = Self::digest_bytes(&raw);
         let file: TokensFile = serde_json::from_slice(&raw)?;
         Ok(TokenState {
             path: path.to_path_buf(),
             approver_token_id: file.approver_token_id,
             entries: file.tokens,
-            loaded_mtime,
+            loaded_digest: Some(loaded_digest),
+            enforce_secure_reload: true,
+        })
+    }
+
+    fn read_state_from_raw(path: &Path, raw: &[u8]) -> Result<TokenState, TokenError> {
+        let file: TokensFile = serde_json::from_slice(raw)?;
+        Ok(TokenState {
+            path: path.to_path_buf(),
+            approver_token_id: file.approver_token_id,
+            entries: file.tokens,
+            loaded_digest: Some(Self::digest_bytes(raw)),
             enforce_secure_reload: true,
         })
     }
@@ -183,6 +196,9 @@ impl TokenStore {
             TokenValidationError::ApproverMustNotHoldPlanOrWrite => {
                 TokenError::Invalid("approver token must not include Plan or Write scope".into())
             }
+            TokenValidationError::ReservedTokenId => {
+                TokenError::Invalid("token id is reserved for synthetic Unix principals".into())
+            }
         })?;
         let mut ids = std::collections::HashSet::new();
         let mut hashes = std::collections::HashSet::new();
@@ -198,18 +214,20 @@ impl TokenStore {
     }
 
     fn refresh_if_modified(state: &mut TokenState) -> Result<TokenRefreshDelta, TokenError> {
-        if state.loaded_mtime.is_none() {
+        if state.loaded_digest.is_none() {
             return Ok(TokenRefreshDelta {
                 newly_revoked: Vec::new(),
                 reactivated: Vec::new(),
+                rotated: Vec::new(),
             });
         }
-        let meta = std::fs::metadata(&state.path)?;
-        let mtime = meta.modified().ok();
-        if mtime == state.loaded_mtime {
+        let raw = std::fs::read(&state.path)?;
+        let digest = Self::digest_bytes(&raw);
+        if Some(digest) == state.loaded_digest {
             return Ok(TokenRefreshDelta {
                 newly_revoked: Vec::new(),
                 reactivated: Vec::new(),
+                rotated: Vec::new(),
             });
         }
         let enforce_secure = state.enforce_secure_reload;
@@ -227,7 +245,12 @@ impl TokenStore {
             .filter(|t| t.revoked)
             .map(|t| t.id.as_str().to_string())
             .collect();
-        let fresh = Self::read_state(&state.path)?;
+        let prev_hashes: std::collections::HashMap<String, String> = state
+            .entries
+            .iter()
+            .map(|t| (t.id.as_str().to_string(), t.secret_hash.clone()))
+            .collect();
+        let fresh = Self::read_state_from_raw(&state.path, &raw)?;
         Self::validate_file(&fresh.entries, &fresh.approver_token_id)?;
         let fresh_ids: HashSet<String> = fresh
             .entries
@@ -249,11 +272,22 @@ impl TokenStore {
             .filter(|t| !t.revoked && prev_revoked.contains(t.id.as_str()))
             .map(|t| t.id.clone())
             .collect();
+        let rotated = fresh
+            .entries
+            .iter()
+            .filter(|t| {
+                prev_hashes
+                    .get(t.id.as_str())
+                    .is_some_and(|h| h != &t.secret_hash)
+            })
+            .map(|t| t.id.clone())
+            .collect();
         *state = fresh;
         state.enforce_secure_reload = enforce_secure;
         Ok(TokenRefreshDelta {
             newly_revoked,
             reactivated,
+            rotated,
         })
     }
 
@@ -298,7 +332,7 @@ impl TokenStore {
         let mut state = self.inner.lock().expect("token store lock");
         let delta = Self::refresh_if_modified(&mut state)?;
         drop(state);
-        self.notify_token_revocation_changes(&delta.newly_revoked, &delta.reactivated);
+        self.notify_token_revocation_changes(&delta);
         let state = self.inner.lock().expect("token store lock");
         let hash = hash_bearer_secret(bearer);
         let entry = Self::find_entry(&state.entries, &hash).ok_or(TokenError::Unauthorized)?;
@@ -323,7 +357,7 @@ impl TokenStore {
         let mut state = self.inner.lock().expect("token store lock");
         let delta = Self::refresh_if_modified(&mut state)?;
         drop(state);
-        self.notify_token_revocation_changes(&delta.newly_revoked, &delta.reactivated);
+        self.notify_token_revocation_changes(&delta);
         let state = self.inner.lock().expect("token store lock");
         let hash = hash_bearer_secret(bearer);
         let entry = Self::find_entry(&state.entries, &hash).ok_or(TokenError::Unauthorized)?;
@@ -351,7 +385,7 @@ impl TokenStore {
             path,
             approver_token_id: file.approver_token_id,
             entries: file.tokens,
-            loaded_mtime: None,
+            loaded_digest: None,
             enforce_secure_reload: false,
         };
         Self {
@@ -361,13 +395,10 @@ impl TokenStore {
     }
 
     pub fn is_revoked(&self, token_id: &TokenId) -> Result<bool, TokenError> {
-        if Self::is_synthetic_job_principal(token_id) {
-            return Ok(false);
-        }
         let mut state = self.inner.lock().expect("token store lock");
         let delta = Self::refresh_if_modified(&mut state)?;
         drop(state);
-        self.notify_token_revocation_changes(&delta.newly_revoked, &delta.reactivated);
+        self.notify_token_revocation_changes(&delta);
         let state = self.inner.lock().expect("token store lock");
         Ok(state
             .entries
@@ -431,5 +462,38 @@ mod tests {
             Err(TokenError::ScopeDenied)
         ));
         assert!(store.verify_bearer("good", 0, Scope::Approve).is_ok());
+    }
+
+    fn write_tokens_revoking_writer(path: &Path, revoke: bool) {
+        let mut file = crate::test_util::default_tokens_file();
+        for t in &mut file.tokens {
+            if t.id.as_str() == "writer" {
+                t.revoked = revoke;
+            }
+        }
+        TokenStore::write_test_file(path, &file).expect("write tokens");
+    }
+
+    #[test]
+    fn reload_revoke_never_missed_after_load_stress() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("tokens.json");
+        write_tokens_revoking_writer(&path, false);
+        let store = TokenStore::load_insecure(path.clone()).expect("load");
+        const ROUNDS: usize = 200;
+        for i in 0..ROUNDS {
+            store
+                .verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan)
+                .expect("warm load");
+            write_tokens_revoking_writer(&path, true);
+            let err = store
+                .verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan)
+                .expect_err("revoke must be visible immediately");
+            assert!(
+                matches!(err, TokenError::Revoked),
+                "missed revoke on iteration {i}: {err:?}"
+            );
+            write_tokens_revoking_writer(&path, false);
+        }
     }
 }

@@ -169,3 +169,66 @@ fn default_production_paths() {
         std::path::PathBuf::from(profile_data_dir(Profile::Sim))
     );
 }
+
+#[test]
+fn data_dir_honors_configured_override() {
+    use kxprovd::config::Config;
+    let p = tempfile::tempdir().unwrap();
+    let custom = p.path().join("custom-data");
+    let pass = p.path().join("password");
+    std::fs::write(&pass, "0000").unwrap();
+    let cfg_path = p.path().join("kxprovd.json");
+    std::fs::write(
+        &cfg_path,
+        format!(
+            r#"{{"password_path":"{}","data_dir":"{}"}}"#,
+            pass.display(),
+            custom.display()
+        ),
+    )
+    .unwrap();
+    let cfg = Config::load_from_etc(&cfg_path).unwrap();
+    assert_eq!(cfg.data_dir, custom);
+    assert_eq!(
+        cfg.profile_data_dir(),
+        resolve_profile_data_dir(&custom, Profile::Sim)
+    );
+}
+
+#[test]
+fn mode_counter_is_per_profile_data_directory() {
+    use kxprovd::mode::ProfileFileBody;
+    let root = tempfile::tempdir().unwrap();
+    let sim_dir = root.path().join("sim");
+    let prod_dir = root.path().join("prod");
+    std::fs::create_dir_all(&sim_dir).unwrap();
+    std::fs::create_dir_all(&prod_dir).unwrap();
+    std::fs::write(sim_dir.join("mode.counter"), "1\n").unwrap();
+    std::fs::write(prod_dir.join("mode.counter"), "9\n").unwrap();
+    std::fs::write(
+        sim_dir.join("profile.json"),
+        serde_json::to_vec_pretty(&ProfileFileBody {
+            profile: Profile::Sim,
+            counter: 1,
+        })
+        .unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        prod_dir.join("profile.json"),
+        serde_json::to_vec_pretty(&ProfileFileBody {
+            profile: Profile::Prod,
+            counter: 9,
+        })
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        ModeStore::new(&sim_dir, Profile::Sim).load_profile(),
+        Profile::Sim
+    );
+    assert_eq!(
+        ModeStore::new(&prod_dir, Profile::Prod).load_profile(),
+        Profile::Prod
+    );
+}

@@ -23,7 +23,7 @@ pub use plan_hash::{diff_hash, CanonicalPlan, CanonicalWrite};
 pub use protocol::*;
 pub use surface::*;
 pub use tokens::{
-    hash_bearer_secret, validate_tokens_file, TokenEntry, TokenValidationError, TokensFile,
-    TOKEN_JOBS_PER_MINUTE, TOKEN_QUEUE_DEPTH_MAX,
+    hash_bearer_secret, token_id_is_reserved, validate_tokens_file, TokenEntry,
+    TokenValidationError, TokensFile, TOKEN_JOBS_PER_MINUTE, TOKEN_QUEUE_DEPTH_MAX,
 };
 pub use types::*;

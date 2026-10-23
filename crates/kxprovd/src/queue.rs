@@ -1,3 +1,4 @@
+use crate::job_principal::JobPrincipal;
 use crate::rate_limit::{RateLimitError, TokenRateState};
 use kxprov_api::{DiffHash, FieldKindWire, PlanChangeParams, PlanId, ReadFieldsParams, TokenId};
 use std::collections::HashMap;
@@ -41,7 +42,7 @@ pub enum JobKind {
 pub struct JobRequest {
     pub id: String,
     pub kind: JobKind,
-    pub token_id: Option<TokenId>,
+    pub principal: Option<JobPrincipal>,
     /// Snapshot of per-token job epoch at enqueue; stale jobs fail after revoke/rotate.
     pub token_epoch: u64,
     pub reply: oneshot::Sender<JobOutcome>,
@@ -97,18 +98,26 @@ impl JobQueue {
     pub async fn enqueue(
         &self,
         kind: JobKind,
-        token_id: Option<TokenId>,
+        principal: Option<JobPrincipal>,
         now_ms: u64,
     ) -> Result<(String, oneshot::Receiver<JobOutcome>), QueueError> {
         let id = next_job_id();
         let (reply_tx, reply_rx) = oneshot::channel();
-        let token_epoch = token_id.as_ref().map(|t| self.token_epoch(t)).unwrap_or(0);
-        if let Some(ref tid) = token_id {
-            let mut rates = self.token_rates.lock().await;
-            let st = rates.entry(tid.as_str().to_string()).or_default();
-            st.try_reserve(now_ms).map_err(|e| match e {
-                RateLimitError::QueueDepth | RateLimitError::JobsPerMinute => QueueError::RateLimit,
-            })?;
+        let token_epoch = principal
+            .as_ref()
+            .and_then(|p| p.token_id())
+            .map(|t| self.token_epoch(t))
+            .unwrap_or(0);
+        if let Some(ref p) = principal {
+            if let Some(key) = p.rate_limit_key() {
+                let mut rates = self.token_rates.lock().await;
+                let st = rates.entry(key).or_default();
+                st.try_reserve(now_ms).map_err(|e| match e {
+                    RateLimitError::QueueDepth | RateLimitError::JobsPerMinute => {
+                        QueueError::RateLimit
+                    }
+                })?;
+            }
         }
         self.jobs.lock().await.insert(id.clone(), JobState::Queued);
         if self
@@ -116,17 +125,19 @@ impl JobQueue {
             .send(JobRequest {
                 id: id.clone(),
                 kind,
-                token_id: token_id.clone(),
+                principal: principal.clone(),
                 token_epoch,
                 reply: reply_tx,
             })
             .await
             .is_err()
         {
-            if let Some(ref tid) = token_id {
-                let mut rates = self.token_rates.lock().await;
-                if let Some(st) = rates.get_mut(tid.as_str()) {
-                    st.rollback_reserve();
+            if let Some(ref p) = principal {
+                if let Some(key) = p.rate_limit_key() {
+                    let mut rates = self.token_rates.lock().await;
+                    if let Some(st) = rates.get_mut(&key) {
+                        st.rollback_reserve();
+                    }
                 }
             }
             self.jobs.lock().await.remove(&id);
@@ -135,11 +146,13 @@ impl JobQueue {
         Ok((id, reply_rx))
     }
 
-    pub async fn release_token(&self, token_id: Option<&TokenId>) {
-        if let Some(tid) = token_id {
-            let mut rates = self.token_rates.lock().await;
-            if let Some(st) = rates.get_mut(tid.as_str()) {
-                st.complete();
+    pub async fn release_token(&self, principal: Option<&JobPrincipal>) {
+        if let Some(p) = principal {
+            if let Some(key) = p.rate_limit_key() {
+                let mut rates = self.token_rates.lock().await;
+                if let Some(st) = rates.get_mut(&key) {
+                    st.complete();
+                }
             }
         }
     }
@@ -191,5 +204,41 @@ pub fn field_kind_wire(w: FieldKindWire) -> kxtd1232::FieldKind {
         FieldKindWire::CidName => kxtd1232::FieldKind::CidName,
         FieldKindWire::CidNumber => kxtd1232::FieldKind::CidNumber,
         FieldKindWire::ExtName => kxtd1232::FieldKind::ExtName,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::job_principal::JobPrincipal;
+    use crate::rate_limit::QUEUE_DEPTH_MAX;
+    use kxprov_api::ReadFieldsParams;
+
+    #[tokio::test]
+    async fn local_uids_use_separate_rate_buckets() {
+        let (tx, _rx) = mpsc::channel(64);
+        let q = JobQueue::new(tx);
+        let now = 3_000_000u64;
+        let p100 = JobPrincipal::SyntheticLocal { uid: 100 };
+        let p200 = JobPrincipal::SyntheticLocal { uid: 200 };
+        let kind = || JobKind::ReadFields {
+            params: ReadFieldsParams {
+                kind: FieldKindWire::CidName,
+                first: 0,
+                count: 1,
+            },
+        };
+        for _ in 0..QUEUE_DEPTH_MAX {
+            q.enqueue(kind(), Some(p100.clone()), now)
+                .await
+                .expect("uid 100 under cap");
+        }
+        assert!(matches!(
+            q.enqueue(kind(), Some(p100.clone()), now).await,
+            Err(QueueError::RateLimit)
+        ));
+        q.enqueue(kind(), Some(p200.clone()), now)
+            .await
+            .expect("uid 200 has its own bucket");
     }
 }

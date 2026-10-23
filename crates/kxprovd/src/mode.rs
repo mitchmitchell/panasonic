@@ -2,7 +2,7 @@
 
 use crate::audit::{alert_mode_failure, AuditEntry, AuditKind, AuditLog};
 use crate::time::now_ms;
-use kxprov_api::{mode_counter_path, resolve_profile_data_dir, OperationalMode, Profile};
+use kxprov_api::{resolve_profile_data_dir, OperationalMode, Profile};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
@@ -26,7 +26,7 @@ pub enum ModeError {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModeFileBody {
     pub mode: OperationalMode,
-    /// Monotonic revision; must match `mode.counter` and `profile.json` (v2.12 rollback guard).
+    /// Monotonic revision; must match per-profile `mode.counter` and `profile.json` (v2.12 rollback guard).
     #[serde(default)]
     pub counter: u64,
 }
@@ -46,18 +46,21 @@ pub struct EffectiveMode {
 pub struct ModeStore {
     mode_path: PathBuf,
     profile_path: PathBuf,
+    /// Per profile data directory (`…/sim|test|prod/mode.counter`), not shared across profiles (v2.12).
     counter_path: PathBuf,
     audit: AuditLog,
     boot_profile: Profile,
 }
 
 impl ModeStore {
+    /// `state_base` is the daemon data root; profile-scoped files live under
+    /// [`resolve_profile_data_dir`] (including per-profile `mode.counter`).
     pub fn new(state_base: &Path, boot_profile: Profile) -> Self {
         let profile_root = resolve_profile_data_dir(state_base, boot_profile);
         Self {
             mode_path: profile_root.join("mode.json"),
             profile_path: profile_root.join("profile.json"),
-            counter_path: mode_counter_path(state_base),
+            counter_path: profile_root.join("mode.counter"),
             audit: AuditLog::new(&profile_root),
             boot_profile,
         }
@@ -84,7 +87,20 @@ impl ModeStore {
                     self.fail_closed_profile_rollback(body.counter, last);
                     Profile::Prod
                 }
-                Ok(body) => body.profile,
+                Ok(body) => {
+                    if self.boot_profile == Profile::Prod && body.profile != Profile::Prod {
+                        self.fail_closed(
+                            AuditKind::ModeCorrupt,
+                            format!(
+                                "profile.json {:?} disagrees with prod data directory",
+                                body.profile
+                            ),
+                        );
+                        Profile::Prod
+                    } else {
+                        body.profile
+                    }
+                }
                 Err(e) => {
                     self.fail_closed(AuditKind::ModeCorrupt, format!("profile.json: {e}"));
                     Profile::Prod
@@ -115,8 +131,29 @@ impl ModeStore {
         );
     }
 
+    fn file_counter(path: &Path) -> Option<u64> {
+        let raw = std::fs::read_to_string(path).ok()?;
+        let body = serde_json::from_str::<ModeFileBody>(&raw).ok()?;
+        Some(body.counter)
+    }
+
+    fn profile_file_counter(path: &Path) -> Option<u64> {
+        let raw = std::fs::read_to_string(path).ok()?;
+        let body = serde_json::from_str::<ProfileFileBody>(&raw).ok()?;
+        Some(body.counter)
+    }
+
+    fn missing_counter_with_stored_epoch(&self) -> bool {
+        let mode_c = Self::file_counter(&self.mode_path).unwrap_or(0);
+        let prof_c = Self::profile_file_counter(&self.profile_path).unwrap_or(0);
+        mode_c > 0 || prof_c > 0
+    }
+
     fn last_counter(&self) -> Result<u64, ModeError> {
         if !self.counter_path.exists() {
+            if self.missing_counter_with_stored_epoch() {
+                return Err(ModeError::CounterCorrupt);
+            }
             return Ok(0);
         }
         let s = std::fs::read_to_string(&self.counter_path)?;
