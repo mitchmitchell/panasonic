@@ -35,6 +35,13 @@ fn has_large_byte_array_literal(source: &str) -> bool {
     false
 }
 
+const FORBIDDEN_TAIL_BUILDERS: &[&str] = &[
+    "spec_header_tail",
+    "fn spec_header_tail",
+    "dir_length(",
+    "3.11K",
+];
+
 #[test]
 fn kxprovd_sources_have_no_embedded_header_tail_block() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
@@ -52,5 +59,12 @@ fn kxprovd_sources_have_no_embedded_header_tail_block() {
             "legacy assemble() must not exist in {}",
             path.display()
         );
+        for needle in FORBIDDEN_TAIL_BUILDERS {
+            assert!(
+                !text.contains(needle),
+                "forbidden header-tail builder {needle:?} in {}",
+                path.display()
+            );
+        }
     }
 }

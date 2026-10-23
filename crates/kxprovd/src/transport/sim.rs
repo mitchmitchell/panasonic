@@ -15,6 +15,14 @@ impl SimTransportBridge {
             start: Instant::now(),
         }
     }
+
+    /// Vendor `.DBH` header tail (0x1E–0xFF) from the in-process sim upload image.
+    pub fn dbh_upload_header_tail(&self) -> [u8; crate::dbh::HEADER_TAIL_LEN] {
+        let src = self.inner.sim.dbh_header_tail();
+        let mut out = [0u8; crate::dbh::HEADER_TAIL_LEN];
+        out.copy_from_slice(src);
+        out
+    }
 }
 
 impl Default for SimTransportBridge {

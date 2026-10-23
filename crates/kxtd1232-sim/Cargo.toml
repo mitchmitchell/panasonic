@@ -12,3 +12,4 @@ workspace = true
 
 [dependencies]
 kxtd1232 = { path = "../kxtd1232" }
+getrandom = "0.3"

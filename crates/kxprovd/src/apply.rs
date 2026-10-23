@@ -56,8 +56,7 @@ pub fn run_apply(
         })
         .collect();
     let pwd = config.password.clone();
-    let transport =
-        open(config.transport, &config.serial_device).map_err(ApplyError::Transport)?;
+    let transport = open(config.transport, &config.serial_device).map_err(ApplyError::Transport)?;
     let mut client = Client::with(transport, Access::ReadWrite, Timing::default());
     client.login(&pwd)?;
     for w in &writes {

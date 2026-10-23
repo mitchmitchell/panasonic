@@ -1,8 +1,9 @@
 use crate::dbh::{self, parse_size, HEADER_TAIL_LEN};
 use crate::goliath::GoliathQueue;
 use crate::time::now_ms;
-use kxprov_api::DEFAULT_BACKUP_KEEP;
+use crate::transport::AnyTransport;
 use kxprov_api::GoliathCopyStatus;
+use kxprov_api::DEFAULT_BACKUP_KEEP;
 use kxtd1232::tables::TABLES;
 use kxtd1232::{Client, Transport};
 use serde::{Deserialize, Serialize};
@@ -61,14 +62,28 @@ impl BackupStore {
         Ok(out)
     }
 
-    /// Header bytes 0x1E–0xFF for the next assembly: from latest backup, or spec on first backup.
-    pub fn header_tail_for_assembly(&self) -> Result<[u8; HEADER_TAIL_LEN], BackupError> {
+    /// Header bytes 0x1E–0xFF from the latest verified backup (pre-write image).
+    pub fn header_tail_from_backup(&self) -> Result<[u8; HEADER_TAIL_LEN], BackupError> {
         let list = self.list()?;
-        if let Some(latest) = list.first() {
-            let data = std::fs::read(&latest.path)?;
-            return Ok(dbh::copy_header_tail_from_dbh(&data)?);
+        let Some(latest) = list.first() else {
+            return Err(BackupError::NoBackupForWrite);
+        };
+        let data = std::fs::read(&latest.path)?;
+        Ok(dbh::copy_header_tail_from_dbh(&data)?)
+    }
+
+    /// Pre-write tail: latest backup on disk, or runtime upload from PBX/sim when none yet.
+    pub fn pre_write_header_tail(
+        &self,
+        transport: &AnyTransport,
+    ) -> Result<[u8; HEADER_TAIL_LEN], BackupError> {
+        if let Ok(tail) = self.header_tail_from_backup() {
+            return Ok(tail);
         }
-        Ok(dbh::spec_header_tail())
+        match transport {
+            AnyTransport::Sim(sim) => Ok(sim.dbh_upload_header_tail()),
+            AnyTransport::Serial(_) => Err(BackupError::NoBackupForWrite),
+        }
     }
 
     /// Apply and other writes require at least one verified backup on disk.
@@ -142,11 +157,10 @@ impl BackupStore {
 }
 
 pub fn wire_to_dbh(
-    store: &BackupStore,
     wire: &std::collections::HashMap<u8, Vec<u8>>,
+    header_tail: &[u8; HEADER_TAIL_LEN],
 ) -> Result<Vec<u8>, BackupError> {
-    let tail = store.header_tail_for_assembly()?;
-    Ok(dbh::assemble_with_tail(wire, &tail)?)
+    Ok(dbh::assemble_with_tail(wire, header_tail)?)
 }
 
 pub fn goliath_status(meta: &BackupMeta, goliath: &GoliathQueue) -> GoliathCopyStatus {

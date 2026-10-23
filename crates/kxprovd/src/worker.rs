@@ -182,6 +182,15 @@ async fn run_backup(ctx: &WorkerCtx) -> JobOutcome {
             };
         }
     };
+    let header_tail = match ctx.backups.pre_write_header_tail(&transport) {
+        Ok(t) => t,
+        Err(e) => {
+            return JobOutcome::Err {
+                code: "backup".into(),
+                message: e.to_string(),
+            };
+        }
+    };
     let mut client = Client::new(transport);
     let wire = match BackupStore::read_full_backup(&mut client, &pwd) {
         Ok(w) => w,
@@ -192,7 +201,7 @@ async fn run_backup(ctx: &WorkerCtx) -> JobOutcome {
             };
         }
     };
-    let dbh = match wire_to_dbh(&ctx.backups, &wire) {
+    let dbh = match wire_to_dbh(&wire, &header_tail) {
         Ok(d) => d,
         Err(e) => {
             return JobOutcome::Err {

@@ -14,6 +14,8 @@ use std::collections::{HashMap, VecDeque};
 pub const PLACEHOLDER_PASSWORD: &str = "0000";
 pub const PLACEHOLDER_ROM_ID: &str = "-----PXXXXXXXXXX";
 pub const BANNER: &[u8] = b"SIM PBX PLACEHOLDER BANNER\r\nEnter Password\r\n";
+/// `.DBH` bytes 0x1E–0xFF (226); filled at sim init as runtime upload metadata, not embedded in kxprovd.
+pub const DBH_HEADER_TAIL_LEN: usize = 0x100 - 0x1E;
 /// Default busy cadence (sim parameter; matches `kxprov_api::BUSY_CADENCE_DEFAULT_MS`).
 pub const BUSY_CADENCE_MS: u64 = 128;
 
@@ -85,6 +87,8 @@ pub type WriteRecord = (u8, u16, u16, Vec<u8>);
 
 pub struct SimPbx {
     pub db: HashMap<u8, Vec<u8>>,
+    /// Vendor header tail bytes (0x1E–0xFF) as if captured from a full upload session.
+    dbh_header_tail: [u8; DBH_HEADER_TAIL_LEN],
     password: Vec<u8>,
     rom_id: [u8; 16],
     mode: Mode,
@@ -107,6 +111,12 @@ impl Default for SimPbx {
 /// Bytes the simulator emits, each after a delay relative to the triggering input.
 pub type Emits = Vec<(u64, Vec<u8>)>;
 
+fn fresh_dbh_header_tail() -> [u8; DBH_HEADER_TAIL_LEN] {
+    let mut tail = [0u8; DBH_HEADER_TAIL_LEN];
+    getrandom::fill(&mut tail).expect("getrandom");
+    tail
+}
+
 impl SimPbx {
     pub fn new(db: HashMap<u8, Vec<u8>>, password: &str) -> Self {
         let mut rom_id = [b' '; 16];
@@ -115,6 +125,7 @@ impl SimPbx {
         }
         Self {
             db,
+            dbh_header_tail: fresh_dbh_header_tail(),
             password: password.as_bytes().to_vec(),
             rom_id,
             mode: Mode::Idle,
@@ -128,6 +139,11 @@ impl SimPbx {
 
     pub fn inject(&mut self, fault: Fault) {
         self.faults.push_back(fault);
+    }
+
+    /// Header bytes 0x1E–0xFF for `.DBH` assembly (runtime upload image in the sim).
+    pub fn dbh_header_tail(&self) -> &[u8; DBH_HEADER_TAIL_LEN] {
+        &self.dbh_header_tail
     }
 
     pub fn pending_faults(&self) -> usize {

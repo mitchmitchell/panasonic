@@ -1,7 +1,7 @@
 //! Synthetic TD1232 `.DBH` assembly from wire table images (clean-room).
 //!
 //! v2.4: bytes **0x1E–0xFF** are never embedded in the repo. They are copied at runtime
-//! from the latest verified backup, or computed algorithmically on the first backup only.
+//! from the latest verified backup, or from the PBX/sim upload before the first backup.
 
 use kxtd1232::tables::{self, TableSpec, NEVER_WRITTEN, TABLES};
 use thiserror::Error;
@@ -24,18 +24,6 @@ pub enum DbhError {
 
 fn tag_of(table: u8) -> u8 {
     table
-}
-
-fn dir_length(spec: &TableSpec) -> u16 {
-    let wire = spec.wire_bytes() as u16;
-    if spec.id == tables::CID_NUMBERS
-        || spec.id == tables::CID_NAMES
-        || spec.id >= tables::HALF_TABLE_THRESHOLD
-    {
-        wire * 2
-    } else {
-        wire
-    }
 }
 
 fn wire_to_disk(wire: &[u8]) -> Vec<u8> {
@@ -80,28 +68,6 @@ fn trailing_tables() -> [&'static TableSpec; 3] {
         tables::spec(0xA7).expect("0xA7"),
         tables::spec(0xC3).expect("0xC3"),
     ]
-}
-
-/// Build bytes 0x1E–0xFF from the table spec only (first backup, no prior `.DBH`).
-pub fn spec_header_tail() -> [u8; HEADER_TAIL_LEN] {
-    let mut tail = [0u8; HEADER_TAIL_LEN];
-    tail[0] = 0;
-    tail[1] = 0;
-    tail[2..8].copy_from_slice(b"3.11K\0");
-    let dir_specs = directory_tables();
-    let mut off = 8usize;
-    for spec in dir_specs {
-        if off + 3 > tail.len() {
-            break;
-        }
-        let tag = tag_of(spec.id);
-        let len = dir_length(spec);
-        tail[off] = tag;
-        tail[off + 1] = (len & 0xFF) as u8;
-        tail[off + 2] = (len >> 8) as u8;
-        off += 3;
-    }
-    tail
 }
 
 pub fn copy_header_tail_from_dbh(dbh: &[u8]) -> Result<[u8; HEADER_TAIL_LEN], DbhError> {
@@ -175,10 +141,13 @@ mod tests {
     use kxtd1232_sim::synthetic_db;
 
     #[test]
-    fn synthetic_dbh_size_with_spec_tail() {
+    fn synthetic_dbh_size_with_sim_upload_tail() {
         let db = synthetic_db();
-        let tail = spec_header_tail();
-        let bh = assemble_with_tail(&db, &tail).expect("assemble");
+        let sim = kxtd1232_sim::SimPbx::default();
+        let tail = sim.dbh_header_tail();
+        let mut fixed = [0u8; HEADER_TAIL_LEN];
+        fixed.copy_from_slice(tail);
+        let bh = assemble_with_tail(&db, &fixed).expect("assemble");
         parse_size(&bh).expect("60692");
     }
 }
