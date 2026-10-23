@@ -1,6 +1,6 @@
 //! Malformed LEN / junk busy lockup, checksum NAK + junk recovery (protocol facts).
 
-#![allow(clippy::unwrap_used)]
+#![allow(clippy::unwrap_used, clippy::useless_vec)]
 
 use kxtd1232::frame::{Access, Encoder, BUSY_FRAME};
 use kxtd1232::{Client, Timing, Transport};

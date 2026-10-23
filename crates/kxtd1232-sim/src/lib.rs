@@ -410,6 +410,8 @@ impl SimPbx {
                 {
                     self.post_write_busy = Some(busy_frames);
                 }
+                #[cfg(not(feature = "faults"))]
+                let _ = busy_frames;
                 return out;
             }
             Some(Fault::ReadRefused) => {
@@ -421,6 +423,8 @@ impl SimPbx {
                 {
                     self.link_drop_partial = Some(partial_len);
                 }
+                #[cfg(not(feature = "faults"))]
+                let _ = partial_len;
                 return vec![(lat, r)];
             }
             Some(Fault::SilentWrite) | Some(Fault::BusyAfterReply) => {}
@@ -686,16 +690,26 @@ impl Transport for SimTransport {
         let rx_done = self.now + t.tx_ms(data.len());
         let mut pbx = self.sim.lock().expect("sim pbx lock");
         let emits = pbx.feed(data);
-        for (delay, mut bytes) in emits {
-            #[cfg(feature = "faults")]
-            if let Some(n) = pbx.link_drop_partial.take() {
-                let orig = bytes.len();
-                let n = n.min(orig);
-                bytes.truncate(n);
-                if n < orig {
-                    self.link_drop_pending = true;
+        for (delay, bytes) in emits {
+            let bytes = {
+                #[cfg(feature = "faults")]
+                {
+                    let mut bytes = bytes;
+                    if let Some(n) = pbx.link_drop_partial.take() {
+                        let orig = bytes.len();
+                        let n = n.min(orig);
+                        bytes.truncate(n);
+                        if n < orig {
+                            self.link_drop_pending = true;
+                        }
+                    }
+                    bytes
                 }
-            }
+                #[cfg(not(feature = "faults"))]
+                {
+                    bytes
+                }
+            };
             let at = rx_done + delay + t.tx_ms(bytes.len());
             drop(pbx);
             self.schedule(at, bytes);
