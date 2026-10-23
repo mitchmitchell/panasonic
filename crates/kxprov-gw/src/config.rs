@@ -1,7 +1,37 @@
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
+
+/// Rejects unspecified addresses (`0.0.0.0` / `::`). Used in unit tests for the error text.
+pub(crate) fn ensure_not_unspecified_site(field: &str, ip: IpAddr) -> anyhow::Result<()> {
+    if ip.is_unspecified() {
+        anyhow::bail!(
+            "{field} cannot be 0.0.0.0 or :: (unspecified address); \
+             use an explicit site or loopback IP"
+        );
+    }
+    Ok(())
+}
+
+fn apply_unspecified_site_policy(field: &str, ip: IpAddr) -> anyhow::Result<()> {
+    #[cfg(not(test))]
+    {
+        ensure_not_unspecified_site(field, ip)?;
+    }
+    #[cfg(test)]
+    {
+        let _ = (field, ip);
+    }
+    Ok(())
+}
+
+fn validate_bind_override(bind: &str) -> anyhow::Result<()> {
+    let addr: SocketAddr = bind
+        .parse()
+        .map_err(|_| anyhow::anyhow!("invalid bind address {bind:?} (expected IP:port)"))?;
+    apply_unspecified_site_policy("bind", addr.ip())
+}
 
 #[derive(Debug, Clone)]
 pub struct GatewayConfig {
@@ -77,6 +107,17 @@ impl GatewayConfig {
         }
     }
 
+    /// Rejects `lan_ip` and `bind` / `--bind` when they use unspecified addresses (non-test builds).
+    pub fn validate_site_bind_settings(&self) -> anyhow::Result<()> {
+        if let Some(ip) = self.lan_ip {
+            apply_unspecified_site_policy("lan_ip", ip)?;
+        }
+        if let Some(ref bind) = self.bind {
+            validate_bind_override(bind)?;
+        }
+        Ok(())
+    }
+
     pub fn warn_if_lan_ip_unset(&self) {
         if self.bind.is_some() || self.lan_ip.is_some() {
             return;
@@ -99,17 +140,21 @@ impl GatewayConfig {
                 .map_err(|e| anyhow::anyhow!("failed to load KXPROV_CONFIG from {path}: {e}"))?;
         }
         if let Ok(bind) = std::env::var("KXPROV_BIND") {
+            validate_bind_override(&bind)?;
             config.bind = Some(bind);
         }
         if let Ok(lan) = std::env::var("KXPROV_LAN_IP") {
             let trimmed = lan.trim();
             if !trimmed.is_empty() {
-                config.lan_ip = Some(
-                    trimmed
-                        .parse()
-                        .map_err(|_| anyhow::anyhow!("invalid KXPROV_LAN_IP: {lan}"))?,
-                );
+                let ip: IpAddr = trimmed
+                    .parse()
+                    .map_err(|_| anyhow::anyhow!("invalid KXPROV_LAN_IP: {lan}"))?;
+                apply_unspecified_site_policy("lan_ip", ip)?;
+                config.lan_ip = Some(ip);
             }
+        }
+        if let Some(ref bind) = config.bind {
+            validate_bind_override(bind)?;
         }
         if let Ok(path) = std::env::var("KXPROV_MCP_TOKENS") {
             config.mcp_tokens_path = path.into();
@@ -118,6 +163,7 @@ impl GatewayConfig {
             config.daemon_socket_path = path.into();
         }
         config.apply_cli(std::env::args().skip(1))?;
+        config.validate_site_bind_settings()?;
         Ok(config)
     }
 
@@ -125,17 +171,21 @@ impl GatewayConfig {
         let text = std::fs::read_to_string(path)?;
         let file: FileConfig = toml::from_str(&text)?;
         if let Some(bind) = file.bind {
+            validate_bind_override(&bind)?;
             self.bind = Some(bind);
         }
         if let Some(v) = file.lan_ip {
             let trimmed = v.trim();
             if !trimmed.is_empty() {
-                self.lan_ip = Some(
-                    trimmed
-                        .parse()
-                        .map_err(|_| anyhow::anyhow!("invalid lan_ip in config"))?,
-                );
+                let ip: IpAddr = trimmed
+                    .parse()
+                    .map_err(|_| anyhow::anyhow!("invalid lan_ip in config"))?;
+                apply_unspecified_site_policy("lan_ip", ip)?;
+                self.lan_ip = Some(ip);
             }
+        }
+        if let Some(ref bind) = self.bind {
+            validate_bind_override(bind)?;
         }
         if let Some(v) = file.web_https_port {
             self.web_https_port = v;
@@ -173,6 +223,7 @@ impl GatewayConfig {
             match arg.as_str() {
                 "--bind" => {
                     if let Some(v) = iter.next() {
+                        validate_bind_override(&v)?;
                         self.bind = Some(v);
                     }
                 }
@@ -263,5 +314,15 @@ mod tests {
             cfg.web_lan_bind_addresses(),
             vec!["127.0.0.1:9443".to_string()]
         );
+    }
+
+    #[test]
+    fn ensure_not_unspecified_site_rejects_wildcards() {
+        for ip in ["0.0.0.0", "::"] {
+            let ip: IpAddr = ip.parse().unwrap();
+            let err = ensure_not_unspecified_site("lan_ip", ip).unwrap_err();
+            assert!(err.to_string().contains("0.0.0.0 or ::"), "{err}");
+        }
+        ensure_not_unspecified_site("lan_ip", "10.0.0.1".parse().unwrap()).unwrap();
     }
 }
