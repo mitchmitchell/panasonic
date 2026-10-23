@@ -8,6 +8,7 @@ mod mock;
 mod mode;
 mod plan;
 mod profile;
+mod route_table;
 mod scope;
 mod token_id;
 mod types;
@@ -23,6 +24,10 @@ pub use mock::MockDaemon;
 pub use mode::Mode;
 pub use plan::{canonical_plan_bytes, DiffHash, ImmutablePlan, PlanId};
 pub use profile::Profile;
+pub use route_table::{
+    http_route_mutates_mode_or_profile, mcp_tool_mutates_mode_or_profile, HttpRoute,
+    FORBIDDEN_MODE_PROFILE_PATHS, MCP_TOOLS, WEB_ROUTES,
+};
 pub use scope::{scopes_for_role, Scope, ScopeSet};
 pub use token_id::TokenId;
 pub use types::{

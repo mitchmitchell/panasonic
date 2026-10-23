@@ -38,6 +38,15 @@ impl KxMcpServer {
         }
     }
 
+    /// Tool names registered on this server (for route-table contract tests).
+    pub fn registered_tool_names(&self) -> Vec<String> {
+        self.tool_router
+            .list_all()
+            .into_iter()
+            .map(|t| t.name.to_string())
+            .collect()
+    }
+
     fn caller() -> Result<CallerIdentity, ErrorData> {
         MCP_CALLER.try_with(|c| c.clone()).map_err(|_| ErrorData {
             code: ErrorCode::INVALID_REQUEST,
