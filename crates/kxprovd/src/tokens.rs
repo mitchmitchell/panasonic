@@ -107,6 +107,8 @@ pub struct TokenStore {
     transient_flight: Arc<TransientReloadFlight>,
     /// At most one `token-reload-probe` thread doing disk I/O per store.
     disk_probe_live: Arc<AtomicUsize>,
+    /// After a bounded probe times out, deny reload briefly without spawning.
+    probe_fast_fail_until: Arc<Mutex<Option<Instant>>>,
     #[cfg(feature = "test-util")]
     reload_probe_hang: Arc<AtomicBool>,
 }
@@ -124,6 +126,7 @@ impl Clone for TokenStore {
             job_queue: Arc::clone(&self.job_queue),
             transient_flight: Arc::clone(&self.transient_flight),
             disk_probe_live: Arc::clone(&self.disk_probe_live),
+            probe_fast_fail_until: Arc::clone(&self.probe_fast_fail_until),
             #[cfg(feature = "test-util")]
             reload_probe_hang: Arc::clone(&self.reload_probe_hang),
         }
@@ -177,11 +180,15 @@ impl Drop for TransientProbeLeaderGuard<'_> {
 
 struct DiskProbeLiveGuard {
     live: Arc<AtomicUsize>,
+    fast_fail_until: Arc<Mutex<Option<Instant>>>,
 }
 
 impl Drop for DiskProbeLiveGuard {
     fn drop(&mut self) {
         self.live.fetch_sub(1, Ordering::AcqRel);
+        if self.live.load(Ordering::Acquire) == 0 {
+            *self.fast_fail_until.lock().expect("probe fast-fail lock") = None;
+        }
     }
 }
 
@@ -231,8 +238,37 @@ impl TokenStore {
             job_queue: Arc::new(Mutex::new(None)),
             transient_flight: Arc::new(TransientReloadFlight::new()),
             disk_probe_live: Arc::new(AtomicUsize::new(0)),
+            probe_fast_fail_until: Arc::new(Mutex::new(None)),
             #[cfg(feature = "test-util")]
             reload_probe_hang: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    const PROBE_FAST_FAIL_SLACK: Duration = Duration::from_millis(100);
+
+    fn disk_reload_blocked_now(&self, during_outage: bool) -> bool {
+        if during_outage && self.disk_probe_live.load(Ordering::Acquire) > 0 {
+            return true;
+        }
+        self.probe_fast_fail_until
+            .lock()
+            .expect("probe fast-fail lock")
+            .is_some_and(|until| Instant::now() < until)
+    }
+
+    fn reload_plan_in_outage(plan: &ReloadPlan) -> bool {
+        plan.transient_done || plan.outage_start.is_some()
+    }
+
+    fn latch_probe_fast_fail(&self) {
+        let until = Instant::now() + Self::PROBE_FAST_FAIL_SLACK;
+        let mut guard = self
+            .probe_fast_fail_until
+            .lock()
+            .expect("probe fast-fail lock");
+        match *guard {
+            Some(prev) if prev > until => {}
+            _ => *guard = Some(until),
         }
     }
 
@@ -244,6 +280,7 @@ impl TokenStore {
         {
             Some(DiskProbeLiveGuard {
                 live: Arc::clone(&self.disk_probe_live),
+                fast_fail_until: Arc::clone(&self.probe_fast_fail_until),
             })
         } else {
             None
@@ -360,15 +397,20 @@ impl TokenStore {
     }
 
     fn run_disk_probe_off_thread(&self, plan: ReloadPlan) -> Result<DiskProbe, TokenError> {
-        let wait_deadline = Instant::now() + Self::RELOAD_GRACE + Duration::from_millis(300);
+        let instant_deny = Self::reload_plan_in_outage(&plan);
+        let wait_until = if instant_deny {
+            Instant::now()
+        } else {
+            Instant::now() + Duration::from_millis(50)
+        };
         let live_guard = loop {
             if let Some(guard) = self.try_begin_disk_probe() {
                 break guard;
             }
-            if Instant::now() >= wait_deadline {
+            if instant_deny || Instant::now() >= wait_until {
                 return Err(TokenError::StoreUnavailable);
             }
-            std::thread::sleep(Duration::from_millis(10));
+            std::thread::sleep(Duration::from_millis(1));
         };
         let deadline = Instant::now() + Self::RELOAD_GRACE;
         let (tx, rx) = std::sync::mpsc::sync_channel(1);
@@ -385,11 +427,15 @@ impl TokenStore {
             .saturating_duration_since(Instant::now())
             .saturating_add(Duration::from_millis(300));
         if timeout.is_zero() {
+            self.latch_probe_fast_fail();
             return Ok(Self::timed_out_disk_probe());
         }
         match rx.recv_timeout(timeout) {
             Ok(probe) => Ok(probe),
-            Err(_) => Ok(Self::timed_out_disk_probe()),
+            Err(_) => {
+                self.latch_probe_fast_fail();
+                Ok(Self::timed_out_disk_probe())
+            }
         }
     }
 
@@ -404,6 +450,11 @@ impl TokenStore {
             match &*guard {
                 TransientFlightState::Done(probe) => return Ok(probe.clone()),
                 TransientFlightState::Running => {
+                    if Self::reload_plan_in_outage(&plan)
+                        && self.disk_probe_live.load(Ordering::Acquire) > 0
+                    {
+                        return Err(TokenError::StoreUnavailable);
+                    }
                     let remaining = wait_until.saturating_duration_since(Instant::now());
                     if remaining.is_zero() {
                         let probe = Self::timed_out_disk_probe();
@@ -432,7 +483,8 @@ impl TokenStore {
                         Ok(p) => p,
                         Err(TokenError::StoreUnavailable) => {
                             let mut guard = flight.inner.lock().expect("transient flight lock");
-                            *guard = TransientFlightState::Idle;
+                            let probe = Self::timed_out_disk_probe();
+                            *guard = TransientFlightState::Done(probe);
                             flight.cv.notify_all();
                             return Err(TokenError::StoreUnavailable);
                         }
@@ -636,6 +688,11 @@ impl TokenStore {
                 probe_hang: Arc::clone(&self.reload_probe_hang),
             }
         };
+
+        let during_outage = Self::reload_plan_in_outage(&plan);
+        if self.disk_reload_blocked_now(during_outage) {
+            return Err(TokenError::StoreUnavailable);
+        }
 
         let probe = if plan.transient_done {
             self.run_disk_probe_off_thread(plan)?
