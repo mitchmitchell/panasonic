@@ -6,7 +6,6 @@ pub mod ratelimit;
 pub mod server;
 pub mod web_stack;
 
-pub use config::DEFAULT_LAN_IP;
 pub use host_origin::HostOriginConfig;
 pub use ratelimit::RateLimiter;
 pub use server::{serve, GatewayHandles, GatewayShutdown};

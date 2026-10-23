@@ -56,7 +56,7 @@ fn sample_config(dir: &TempDir) -> GatewayConfig {
     write_tokens(&tokens_path);
     GatewayConfig {
         bind: Some("127.0.0.1:0".into()),
-        lan_ip: "127.0.0.1".parse().unwrap(),
+        lan_ip: None,
         web_https_port: 8443,
         web_tailnet_bind: "127.0.0.1:0".into(),
         mcp_tailnet_bind: "127.0.0.1:8081".into(),

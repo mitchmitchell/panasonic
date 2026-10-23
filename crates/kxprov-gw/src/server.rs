@@ -53,6 +53,7 @@ pub async fn serve(
     backend: Option<Arc<dyn DaemonBackend>>,
 ) -> anyhow::Result<GatewayHandles> {
     ensure_rustls_provider();
+    config.warn_if_lan_ip_unset();
     let backend = backend.unwrap_or_else(|| Arc::new(MockDaemon::new()) as Arc<dyn DaemonBackend>);
     let admin = Arc::new(AdminPassword::from_file(&config.admin_password_path)?);
     let token_store = Arc::new(McpTokenStore::from_file(&config.mcp_tokens_path)?);
