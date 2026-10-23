@@ -34,7 +34,6 @@ pub struct LoginRateLimiter {
     by_key: Arc<Mutex<HashMap<String, Entry>>>,
     account_verify: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
     account_waiters: Arc<Mutex<HashMap<String, u32>>>,
-    last_success_ip: Arc<Mutex<HashMap<String, String>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -56,7 +55,6 @@ impl LoginRateLimiter {
             by_key: Arc::new(Mutex::new(HashMap::new())),
             account_verify: Arc::new(Mutex::new(HashMap::new())),
             account_waiters: Arc::new(Mutex::new(HashMap::new())),
-            last_success_ip: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -152,15 +150,11 @@ impl LoginRateLimiter {
 
     async fn is_privileged_login_ip(
         &self,
-        account_key: &str,
+        _account_key: &str,
         ip_key: &str,
         session_prior_ip_key: Option<&str>,
     ) -> bool {
-        if session_prior_ip_key == Some(ip_key) {
-            return true;
-        }
-        let map = self.last_success_ip.lock().await;
-        map.get(account_key).is_some_and(|last| last == ip_key)
+        session_prior_ip_key == Some(ip_key)
     }
 
     async fn account_verify_lock(&self, account_key: &str) -> Arc<Mutex<()>> {
@@ -219,9 +213,6 @@ impl LoginRateLimiter {
         let mut map = self.by_key.lock().await;
         map.remove(account_key);
         map.remove(ip_key);
-        drop(map);
-        let mut last = self.last_success_ip.lock().await;
-        last.insert(account_key.to_string(), ip_key.to_string());
     }
 
     async fn bump(&self, key: &str, cap: Duration) {
@@ -397,7 +388,6 @@ mod tests {
             Duration::from_secs(30),
             Duration::from_secs(300),
         ));
-        limiter.on_success("acct:admin", "ip:admin-clean").await;
         for i in 0..20 {
             limiter
                 .record_failure("acct:admin", &format!("ip:attacker-{i}"))
@@ -423,7 +413,12 @@ mod tests {
         let started = Instant::now();
         barrier.wait().await;
         limiter
-            .enter_account_login("acct:admin", "ip:admin-clean", None, || async { "ok" })
+            .enter_account_login(
+                "acct:admin",
+                "ip:admin-clean",
+                Some("ip:admin-clean"),
+                || async { "ok" },
+            )
             .await
             .expect("admin login succeeds");
         assert!(
@@ -440,7 +435,6 @@ mod tests {
             Duration::from_secs(30),
             Duration::from_secs(300),
         ));
-        limiter.on_success("acct:admin", "ip:admin-home").await;
         for i in 0..30 {
             limiter
                 .record_failure("acct:admin", &format!("ip:seed-{i}"))
@@ -465,7 +459,12 @@ mod tests {
         let started = Instant::now();
         barrier.wait().await;
         limiter
-            .enter_account_login("acct:admin", "ip:admin-home", None, || async { "ok" })
+            .enter_account_login(
+                "acct:admin",
+                "ip:admin-home",
+                Some("ip:admin-home"),
+                || async { "ok" },
+            )
             .await
             .expect("privileged admin ip");
         assert!(started.elapsed() < Duration::from_secs(3));

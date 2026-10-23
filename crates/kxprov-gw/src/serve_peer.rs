@@ -33,10 +33,16 @@ pub enum ServeListenerError {
     Io(#[from] io::Error),
     #[error("serve socket group {name:?} not found")]
     GroupMissing { name: String },
+    #[error("serve runtime directory {path} is missing (systemd RuntimeDirectory=kx-provision?)")]
+    RuntimeDirMissing { path: PathBuf },
     #[error("serve runtime directory {path} must be mode 0750")]
     RuntimeDirMode { path: PathBuf },
-    #[error("serve runtime directory {path} must be root-owned")]
-    RuntimeDirOwner { path: PathBuf },
+    #[error("serve runtime directory {path} must be owned by the gateway user (uid {expected})")]
+    RuntimeDirOwner { path: PathBuf, expected: u32 },
+    #[error("refusing to use runtime directory {path}: symlink")]
+    RuntimeDirSymlink { path: PathBuf },
+    #[error("serve runtime directory {path} is not a directory")]
+    RuntimeDirNotDir { path: PathBuf },
     #[error("refusing to bind: {path} is a symlink")]
     SocketSymlink { path: PathBuf },
     #[error("refusing to bind: {path} exists and is not a socket")]
@@ -100,40 +106,59 @@ pub fn peer_connection_uid(_stream: &UnixStream) -> Option<u32> {
 }
 
 #[cfg(unix)]
-fn enforce_root_runtime_checks() -> bool {
-    nix::unistd::geteuid().is_root()
-}
-
-#[cfg(not(unix))]
-fn enforce_root_runtime_checks() -> bool {
-    false
-}
-
-/// Ensures `{parent}` exists with mode `0750` and (when root) root ownership.
-#[cfg(unix)]
-pub fn ensure_provision_runtime_dir(dir: &Path) -> Result<(), ServeListenerError> {
-    use std::os::unix::fs::{MetadataExt, PermissionsExt};
-    if !dir.exists() {
-        std::fs::create_dir_all(dir)?;
-        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(RUNTIME_DIR_MODE))?;
-    }
+fn verify_runtime_dir(dir: &Path) -> Result<(), ServeListenerError> {
+    use std::os::unix::fs::MetadataExt;
     let meta = std::fs::metadata(dir)?;
+    if !meta.is_dir() {
+        return Err(ServeListenerError::RuntimeDirNotDir {
+            path: dir.to_path_buf(),
+        });
+    }
     if meta.mode() & 0o777 != RUNTIME_DIR_MODE {
         return Err(ServeListenerError::RuntimeDirMode {
             path: dir.to_path_buf(),
         });
     }
-    if enforce_root_runtime_checks() && meta.uid() != 0 {
+    let expected = nix::unistd::geteuid().as_raw();
+    if meta.uid() != expected {
         return Err(ServeListenerError::RuntimeDirOwner {
             path: dir.to_path_buf(),
+            expected,
         });
     }
     Ok(())
 }
 
+/// Ensures the runtime directory exists (root-only create) and matches `0750` + gateway uid.
+#[cfg(unix)]
+pub fn ensure_provision_runtime_dir(dir: &Path) -> Result<(), ServeListenerError> {
+    use std::os::unix::fs::PermissionsExt;
+
+    match std::fs::symlink_metadata(dir) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            if nix::unistd::geteuid().is_root() {
+                std::fs::create_dir_all(dir)?;
+                std::fs::set_permissions(dir, std::fs::Permissions::from_mode(RUNTIME_DIR_MODE))?;
+                return verify_runtime_dir(dir);
+            }
+            return Err(ServeListenerError::RuntimeDirMissing {
+                path: dir.to_path_buf(),
+            });
+        }
+        Err(e) => return Err(ServeListenerError::Io(e)),
+        Ok(_) if dir.is_symlink() => {
+            return Err(ServeListenerError::RuntimeDirSymlink {
+                path: dir.to_path_buf(),
+            });
+        }
+        Ok(_) => {}
+    }
+    verify_runtime_dir(dir)
+}
+
 #[cfg(not(unix))]
 pub fn ensure_provision_runtime_dir(dir: &Path) -> Result<(), ServeListenerError> {
-    std::fs::create_dir_all(dir)?;
+    std::fs::create_dir_all(dir).map_err(ServeListenerError::Io)?;
     Ok(())
 }
 
@@ -175,7 +200,7 @@ fn resolve_serve_group(name: &str) -> Result<nix::unistd::Gid, ServeListenerErro
     }
 }
 
-/// Prepare runtime dir, bind Serve socket (`0660`), optional group via path `chown`.
+/// Prepare runtime dir, bind Serve socket (`0660`), group via path `chown` (e.g. `tailscale`).
 pub async fn bind_web_serve_listener(
     path: &Path,
     group: Option<&str>,
@@ -186,10 +211,10 @@ pub async fn bind_web_serve_listener(
     remove_stale_socket(path)?;
 
     #[cfg(unix)]
-    let gid = if let Some(name) = group {
-        Some(resolve_serve_group(name)?)
+    let socket_gid = if let Some(name) = group {
+        resolve_serve_group(name)?
     } else {
-        None
+        nix::unistd::getegid()
     };
 
     #[cfg(unix)]
@@ -205,12 +230,9 @@ pub async fn bind_web_serve_listener(
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(SOCKET_MODE))?;
-        let uid = if enforce_root_runtime_checks() {
-            Some(nix::unistd::Uid::from_raw(0))
-        } else {
-            None
-        };
-        nix::unistd::chown(path, uid, gid).map_err(|e| ServeListenerError::Io(e.into()))?;
+        let uid = nix::unistd::geteuid();
+        nix::unistd::chown(path, Some(uid), Some(socket_gid))
+            .map_err(|e| ServeListenerError::Io(e.into()))?;
     }
     Ok(listener)
 }

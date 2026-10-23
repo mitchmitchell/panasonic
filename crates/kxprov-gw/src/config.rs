@@ -67,7 +67,7 @@ pub struct GatewayConfig {
     pub web_https_port: u16,
     /// Unix socket for Tailscale Serve (`tailscale serve … unix:…`).
     pub web_serve_socket: PathBuf,
-    /// Group owning the Serve socket (mode 0660); gateway should run as root.
+    /// Group on the Serve socket (mode 0660); gateway runs as `kxprov-gw` (see systemd unit).
     pub serve_socket_group: Option<String>,
     pub mcp_tailnet_bind: String,
     pub mcp_tokens_path: PathBuf,

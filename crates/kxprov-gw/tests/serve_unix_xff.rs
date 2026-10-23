@@ -87,6 +87,7 @@ async fn tcp_loopback_connection_never_trusts_xff() {
 async fn web_serve_bind_sets_runtime_dir_0750_and_socket_mode_0660() {
     let dir = tempfile::tempdir().unwrap();
     let runtime = dir.path().join("run");
+    prep_runtime_dir(&runtime);
     let path = runtime.join("web-serve.sock");
     let _listener = kxprov_gw::serve_peer::bind_web_serve_listener(&path, None)
         .await
@@ -118,6 +119,18 @@ async fn bind_fails_when_serve_socket_group_missing() {
     .await
     .unwrap_err();
     assert!(err.to_string().contains("not found"), "{err}");
+}
+
+#[tokio::test]
+async fn bind_rejects_symlink_runtime_directory() {
+    let dir = tempfile::tempdir().unwrap();
+    let runtime = dir.path().join("run");
+    std::os::unix::fs::symlink(dir.path(), &runtime).unwrap();
+    let path = runtime.join("web-serve.sock");
+    let err = kxprov_gw::serve_peer::bind_web_serve_listener(&path, None)
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("symlink"), "{err}");
 }
 
 #[tokio::test]

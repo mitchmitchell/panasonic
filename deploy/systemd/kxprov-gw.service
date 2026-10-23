@@ -5,16 +5,30 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+User=kxprov-gw
+Group=kxprov-gw
+# tailscale: connect to web-serve.sock; kxprovision: kxprovd.sock (mode 0660).
+SupplementaryGroups=tailscale kxprovision
 RuntimeDirectory=kx-provision
 RuntimeDirectoryMode=0750
+
 EnvironmentFile=-/etc/kx-provision/gateway.env
 ExecStart=/usr/bin/kxprov-gw --config /etc/kx-provision/gateway.toml
 Restart=on-failure
 RestartSec=5
 
-# Gateway binds Serve Unix socket as root; drops only after listeners are up.
-User=root
-Group=root
+# Bind HTTPS on :443 without running as root.
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+NoNewPrivileges=yes
+
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+ReadOnlyPaths=/etc/kx-provision /var/lib/kx-provision
+ReadWritePaths=/run/kx-provision
 
 [Install]
 WantedBy=multi-user.target

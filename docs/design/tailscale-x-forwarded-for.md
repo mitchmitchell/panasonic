@@ -9,8 +9,8 @@ Production defaults:
 - Runtime directory: `/run/kx-provision` (mode **0750**, root-owned in production)
 - Socket path: `/run/kx-provision/web-serve.sock`
 - Mode: **0660** (umask tightened before `bind`, then explicit `chmod`)
-- Owner: **root** (gateway should start as root)
-- Group: **tailscale** (configurable via `serve_socket_group`; startup **fails** if the group name is missing)
+- Owner: **`kxprov-gw`** (systemd `User=`; `RuntimeDirectory=` creates `/run/kx-provision` owned by that uid)
+- Group on Serve socket: **`tailscale`** (configurable via `serve_socket_group`; startup **fails** if the group name is missing). Gateway user is in `SupplementaryGroups=tailscale kxprovision` to reach `web-serve.sock` and `kxprovd.sock`.
 
 Stale sockets are removed only after **`lstat`**: symlinks and non-socket paths are rejected.
 
@@ -60,12 +60,9 @@ SO_PEERCRED on **TCP** loopback does not identify Tailscale Serve (peer uid is n
 
 ## systemd
 
-Ship `deploy/systemd/kxprov-gw.service` with:
+Ship `deploy/systemd/kxprov-gw.service`: runs as **`User=kxprov-gw`**, `RuntimeDirectory=kx-provision` / `RuntimeDirectoryMode=0750`, `AmbientCapabilities=CAP_NET_BIND_SERVICE` for HTTPS `:443`, and hardening (`ProtectSystem=strict`, `ReadWritePaths=/run/kx-provision`, …). Root-only **`kxprov sim-mark`** stays in the CLI, not the gateway.
 
-```ini
-RuntimeDirectory=kx-provision
-RuntimeDirectoryMode=0750
-```
+Runtime directory checks use **`symlink_metadata`** on `/run/kx-provision` (reject symlinks; verify mode `0750` and owner uid matches the gateway process).
 
 ## References
 
