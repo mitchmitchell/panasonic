@@ -1,8 +1,14 @@
 [workspace]
 resolver = "2"
-members = ["crates/kxtd1232", "crates/kxtd1232-sim", "crates/kxprov"]
-# Later phases (stubs only, not yet members): crates/kxprovd, crates/kxprov-api,
-# crates/kxprov-web, crates/kxprov-mcp, crates/kxprov-gw.
+members = [
+    "crates/kxtd1232",
+    "crates/kxtd1232-sim",
+    "crates/kxprov",
+    "crates/kxprov-api",
+    "crates/kxprovd",
+]
+# Later phases (stubs only, not yet members): crates/kxprov-web, crates/kxprov-mcp,
+# crates/kxprov-gw.
 
 [workspace.package]
 version = "0.1.0"

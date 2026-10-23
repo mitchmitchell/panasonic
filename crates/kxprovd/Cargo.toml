@@ -1,0 +1,34 @@
+[package]
+name = "kxprovd"
+description = "kx-provision daemon: single serial owner, job queue, backups, journal, gates"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "kxprovd"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+kxtd1232 = { path = "../kxtd1232" }
+kxtd1232-sim = { path = "../kxtd1232-sim" }
+kxprov-api = { path = "../kxprov-api" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+hex = "0.4"
+thiserror = "2"
+fs2 = "0.4"
+nix = { version = "0.29", features = ["socket", "user", "term"] }
+tokio = { version = "1", features = ["rt", "sync", "io-util", "net", "fs", "time", "macros"] }
+tokio-serial = "5.4"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+[dev-dependencies]
+tempfile = "3"

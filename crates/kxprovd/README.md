@@ -1,4 +1,7 @@
-# kxprovd (stub, Phase A3)
-The single serial owner: one-worker job queue, flock + TIOCEXCL, backups, journal, modes,
-gates, audit, Goliath copy, Unix-socket API. Current-thread tokio; `tokio-serial` behind the
-`kxtd1232::Transport` trait. Not a workspace member yet. See design v2.2 §2, §9, §9a, §9b.
+# kxprovd
+
+Single serial owner for kx-provision (design v2.2/v2.3): one-worker job queue, flock process
+lock, synthetic backups + journal replay, gate flags, immutable content-addressed plans,
+single-use arms (plan id + diff hash, TTL), SO_PEERCRED scope enforcement, Goliath copy queue
+(A3 uses a local directory target). Phase A3: simulator reads/plans/backups only; apply
+execution is A5.
