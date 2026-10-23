@@ -109,8 +109,9 @@ pub fn frame_length(buf: &[u8]) -> Result<Option<usize>, FrameError> {
 
 /// Decode one complete frame.
 pub fn decode(raw: &[u8]) -> Result<Frame, FrameError> {
-    let n = frame_length(raw)?.unwrap_or(0);
-    if raw.len() != n || n < 3 {
+    let n = frame_length(raw)?.ok_or(FrameError::Empty)?;
+    // frame_length rejects LEN < 2, so n >= 3 here.
+    if raw.len() != n {
         return Err(FrameError::LengthMismatch {
             expected: n,
             got: raw.len(),

@@ -2,7 +2,7 @@
 //! supplies bytes and the time, so the same rules run under the simulator (virtual time)
 //! and, later, under the daemon's serial port.
 
-use crate::error::{Error, FrameError, LoginFailure, UnackedReason, UnackedWrite};
+use crate::error::{Error, FrameError, LoginFailure, Op, UnackedReason, UnackedWrite};
 use crate::frame::{self, Access, Cmd, Encoder, Reply, ReplyKind};
 use crate::session::{Login, LoginState};
 use crate::tables;
@@ -177,6 +177,8 @@ impl<T: Transport> Client<T> {
 
     fn recv(&mut self, timeout_ms: u64) -> Result<Vec<u8>, Error> {
         match self.t.recv(timeout_ms) {
+            // The trait forbids an empty Ok; treat one as a dead link so no loop spins.
+            Ok(b) if b.is_empty() => Err(Error::LinkDown("transport returned no bytes".into())),
             Ok(b) => Ok(b),
             Err(TransportError::Timeout) => Err(Error::Timeout),
             Err(TransportError::LinkDown(s)) => Err(Error::LinkDown(s)),
@@ -245,7 +247,10 @@ impl<T: Transport> Client<T> {
     fn request(&mut self, raw: &[u8], cmd: Cmd, timeout_ms: u64) -> Result<Reply, Error> {
         self.require_session()?;
         if matches!(self.state, SessionState::Text | SessionState::Closed) {
-            return Err(Error::UnexpectedReply("not in binary mode".into()));
+            return Err(Error::BadState {
+                op: Op::Request,
+                state: self.state.clone(),
+            });
         }
         if let Err(e) = self.flush_pending() {
             if matches!(&e, Error::PreSend(inner) if matches!(**inner, Error::LinkDown(_))) {
@@ -447,7 +452,12 @@ impl<T: Transport> Client<T> {
             }
             SessionState::Locked => return Err(Error::Locked),
             SessionState::Disconnected => return Err(Error::SessionLost),
-            _ => return Err(Error::UnexpectedReply("not in binary mode".into())),
+            _ => {
+                return Err(Error::BadState {
+                    op: Op::Write,
+                    state: self.state.clone(),
+                })
+            }
         }
         let raw = self.enc.write(table, record, word, payload)?;
         let reason = match self.request(&raw, Cmd::Write, self.timing.ack_timeout_ms) {
@@ -533,6 +543,13 @@ impl<T: Transport> Client<T> {
         if new.len() != base.len() || new.len() % 2 != 0 || new.is_empty() || new.len() > 252 {
             return Err(FrameError::BadPayloadLen(new.len()).into());
         }
+        // Verifying the pending block must cover the whole pending write: same start and
+        // the same new bytes, so a prefix can never clear AwaitingVerify.
+        if let SessionState::AwaitingVerify(u) = &self.state {
+            if (u.table, u.record, u.word) == (table, record, word) && u.payload != new {
+                return Err(Error::NotPendingBlock);
+            }
+        }
         if let Err(e) = self.drain_until_quiet() {
             if e == Error::LineNotQuiet {
                 self.state = SessionState::Locked;
@@ -575,7 +592,16 @@ impl<T: Transport> Client<T> {
             self.state,
             SessionState::NeedsRollback(_) | SessionState::AwaitingVerify(_)
         ) {
-            return Err(Error::UnexpectedReply("nothing to roll back".into()));
+            return Err(Error::BadState {
+                op: Op::Rollback,
+                state: self.state.clone(),
+            });
+        }
+        // Only the block that needs recovery, with a backup of the same length.
+        if let SessionState::NeedsRollback(u) | SessionState::AwaitingVerify(u) = &self.state {
+            if (u.table, u.record, u.word, u.payload.len()) != (table, record, word, base.len()) {
+                return Err(Error::NotPendingBlock);
+            }
         }
         self.state = SessionState::Binary;
         match self.write(table, record, word, base) {
@@ -625,11 +651,37 @@ impl<T: Transport> Client<T> {
         let raw = self.enc.end_binary();
         let r = self.request(&raw, Cmd::EndBinary, self.timing.reply_timeout_ms)?;
         match r.kind {
-            ReplyKind::Ack => {
+            ReplyKind::Ack => {}
+            k => return Err(Error::UnexpectedReply(format!("end-binary: {k:?}"))),
+        }
+        // Text logout (recorded exchange step 28): BYE, then wait for OK. The PBX may
+        // follow the OK with its sign-on prompt, which also confirms the logout.
+        self.state = SessionState::Text;
+        self.send(b"BYE\r\n")?;
+        let start = self.t.now_ms();
+        let mut text = Vec::new();
+        loop {
+            let s = String::from_utf8_lossy(&text).into_owned();
+            let lines: Vec<&str> = s.split('\n').map(str::trim).collect();
+            if lines.iter().any(|l| *l == "OK" || *l == "Enter Password") {
                 self.state = SessionState::Closed;
-                Ok(())
+                return Ok(());
             }
-            k => Err(Error::UnexpectedReply(format!("end-binary: {k:?}"))),
+            if let Some(l) = lines.iter().find(|l| l.starts_with("NG")) {
+                return Err(Error::ByeNotConfirmed((*l).to_string()));
+            }
+            if text.len() > crate::session::MAX_LINE * crate::session::MAX_LINES {
+                return Err(Error::ByeNotConfirmed("too much text".into()));
+            }
+            let elapsed = self.t.now_ms().saturating_sub(start);
+            if elapsed >= self.timing.reply_timeout_ms {
+                return Err(Error::ByeNotConfirmed("no reply".into()));
+            }
+            match self.recv(self.timing.reply_timeout_ms - elapsed) {
+                Ok(b) => text.extend(b),
+                Err(Error::Timeout) => return Err(Error::ByeNotConfirmed("no reply".into())),
+                Err(e) => return Err(e),
+            }
         }
     }
 }

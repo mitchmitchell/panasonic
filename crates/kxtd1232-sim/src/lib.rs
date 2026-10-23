@@ -120,6 +120,8 @@ pub struct SimPbx {
     pub commands: Vec<u8>,
     /// Response latency for every reply.
     pub latency_ms: u64,
+    /// When set, BYE gets no answer (logout not confirmed).
+    pub silent_bye: bool,
 }
 
 impl Default for SimPbx {
@@ -147,6 +149,7 @@ impl SimPbx {
             writes: Vec::new(),
             commands: Vec::new(),
             latency_ms: 30,
+            silent_bye: false,
         }
     }
 
@@ -219,6 +222,7 @@ impl SimPbx {
                 self.mode = Mode::Binary;
                 b"OK\r\n".to_vec()
             }
+            Mode::AwaitBye if line == b"BYE" && self.silent_bye => Vec::new(),
             Mode::AwaitBye if line == b"BYE" => {
                 self.mode = Mode::AwaitPassword;
                 let mut v = b"OK\r\n".to_vec();

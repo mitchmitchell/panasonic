@@ -6,6 +6,8 @@ use std::fmt;
 /// A frame that cannot be built or parsed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FrameError {
+    /// No bytes at all.
+    Empty,
     /// LEN byte below 2.
     InvalidLen(u8),
     /// LEN + 1 does not equal the buffer length.
@@ -23,6 +25,7 @@ pub enum FrameError {
 impl fmt::Display for FrameError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Empty => write!(f, "empty frame"),
             Self::InvalidLen(b) => write!(f, "invalid LEN byte {b:#04x}"),
             Self::LengthMismatch { expected, got } => {
                 write!(f, "length mismatch: LEN says {expected}, got {got}")
@@ -253,7 +256,63 @@ pub enum Error {
     /// Verify did not match plan or backup, or rollback failed: session is LOCKED.
     Locked,
     /// The plan could not be built.
-    Plan(String),
+    Plan(PlanError),
+    /// The operation is not valid in the current session state.
+    BadState {
+        op: Op,
+        state: crate::client::SessionState,
+    },
+    /// `verify_block` or `rollback_block` named a block other than the pending write, or
+    /// a different payload or length for it.
+    NotPendingBlock,
+    /// The PBX did not confirm BYE after end-binary.
+    ByeNotConfirmed(String),
+}
+
+/// Client operations, for [`Error::BadState`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Op {
+    Request,
+    Write,
+    Rollback,
+}
+
+/// Why a write plan could not be built.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PlanError {
+    BaseSize {
+        table: u8,
+        expected: usize,
+        got: usize,
+    },
+    WrongTable {
+        plan: u8,
+        patch: u8,
+    },
+    PatchOutsideImage,
+    BadChunk(usize),
+}
+
+impl fmt::Display for PlanError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::BaseSize {
+                table,
+                expected,
+                got,
+            } => {
+                write!(
+                    f,
+                    "base image is {got} bytes, table {table:#04x} is {expected}"
+                )
+            }
+            Self::WrongTable { plan, patch } => {
+                write!(f, "patch for table {patch:#04x} in a plan for {plan:#04x}")
+            }
+            Self::PatchOutsideImage => write!(f, "patch outside table image"),
+            Self::BadChunk(n) => write!(f, "chunk of {n} bytes"),
+        }
+    }
 }
 
 impl fmt::Display for Error {
@@ -285,7 +344,10 @@ impl fmt::Display for Error {
             Self::EndBinaryHeld => write!(f, "end_binary held until verify/rollback finishes"),
             Self::LineNotQuiet => write!(f, "line did not go quiet before verify re-read"),
             Self::Locked => write!(f, "session LOCKED: verify or rollback failed"),
-            Self::Plan(s) => write!(f, "plan: {s}"),
+            Self::Plan(e) => write!(f, "plan: {e}"),
+            Self::BadState { op, state } => write!(f, "{op:?} not allowed in state {state:?}"),
+            Self::NotPendingBlock => write!(f, "not the block pending verify or rollback"),
+            Self::ByeNotConfirmed(s) => write!(f, "BYE not confirmed: {s}"),
         }
     }
 }
