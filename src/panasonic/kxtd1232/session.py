@@ -11,6 +11,7 @@ from enum import Enum, auto
 XOFF = 0x13
 XON = 0x11
 MAX_LINE = 256  # banner and prompts are well under this
+MAX_LOGIN_LINES = 64  # total text lines allowed before binary mode
 
 
 class State(Enum):
@@ -35,6 +36,7 @@ class Login:
         self.state = State.WAIT_XON
         self.failure: str | None = None
         self._buf = b""
+        self._lines = 0
         self.leftover = b""  # bytes received after the switch to binary; hand to the client
 
     def __repr__(self) -> str:  # never expose the password
@@ -54,6 +56,10 @@ class Login:
         self._buf += data
         while b"\n" in self._buf and self.state not in (State.BINARY, State.FAILED):
             line, self._buf = self._buf.split(b"\n", 1)
+            self._lines += 1
+            if self._lines > MAX_LOGIN_LINES:
+                self._fail(f"more than {MAX_LOGIN_LINES} text lines before binary mode")
+                break
             out += self._line(line.strip(b"\r\x00 ").decode("ascii", "replace"))
         if self.state is State.BINARY:
             self.leftover, self._buf = self._buf, b""

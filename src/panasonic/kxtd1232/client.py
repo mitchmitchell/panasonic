@@ -22,6 +22,8 @@ READ_BLOCK_BYTES = 150  # DSHSOMT reads 0x24 in 150-byte blocks
 # Observed busy run: ~128 ms cadence for ~7 s (live-capture §6). 12 s = 7 s plus margin.
 BUSY_LIMIT_S = 12.0
 MAX_STALE_FRAMES = 4
+QUIET_S = 0.05  # after a reply, any further frame inside this window is an error
+MAX_DRAIN_READS = 64
 
 
 class ProtocolError(RuntimeError):
@@ -99,14 +101,40 @@ class Client:
     def request(self, raw: bytes, timeout: float = DEFAULT_TIMEOUT) -> Reply:
         """Send once and return the reply. Busy frames are waited out, never answered with a
         resend (design §3), for at most ``busy_limit`` seconds (BusyTimeoutError)."""
+        self._drain()
         self.t.send(raw)
         try:
-            return self._await_reply(raw[1], timeout)
+            reply = self._await_reply(raw[1], timeout)
+            self._expect_quiet()
+            return reply
         except (TimeoutError, ProtocolError):
             # Drop leftover busy or partial bytes so a following re-read (verify_block)
             # starts on a clean frame boundary.
             self._rx = b""
             raise
+
+    def _drain(self) -> None:
+        """Discard anything already waiting, so a stale frame is never read as this reply."""
+        self._rx = b""
+        for _ in range(MAX_DRAIN_READS):
+            try:
+                if not self.t.recv(0):
+                    return
+            except TimeoutError:
+                return
+        raise ProtocolError("link will not go quiet before send")
+
+    def _expect_quiet(self) -> None:
+        """A second frame right after the reply means we may have taken a stale frame with
+        the same command as the answer, so the reply cannot be trusted."""
+        extra = self._rx
+        if not extra:
+            try:
+                extra = self.t.recv(QUIET_S)
+            except TimeoutError:
+                return
+        if extra:
+            raise ProtocolError(f"unexpected extra bytes after reply: {extra[:8].hex()}")
 
     def _await_reply(self, request_cmd: int, timeout: float) -> Reply:
         busy_since: float | None = None

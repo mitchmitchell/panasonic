@@ -173,5 +173,5 @@ def classify(raw: bytes, request_cmd: int) -> Reply:
         return Reply(kind, f.cmd, code=code)
     if f.body[:1] == b"\x00":
         data = f.body[1:]
-        return Reply(ReplyKind.DATA if data else "ack", f.cmd, data=data)
+        return Reply(ReplyKind.DATA if data else ReplyKind.ACK, f.cmd, data=data)
     return Reply(ReplyKind.OTHER, f.cmd, data=f.body)

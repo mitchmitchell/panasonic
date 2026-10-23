@@ -71,3 +71,11 @@ def test_granularity_enum_and_chunk_limit():
         build_plan(0x25, 16, base, [p], granularity="whole")
     with pytest.raises(ValueError):
         build_plan(0x25, 16, base, [p], records_per_chunk=13)  # 208 bytes > 200
+
+
+def test_session_caps_total_login_lines():
+    from panasonic.kxtd1232.session import MAX_LOGIN_LINES, Login, State
+
+    sm = Login("0000")
+    sm.feed(b"\x11" + b"x\n" * (MAX_LOGIN_LINES + 5))
+    assert sm.state is State.FAILED

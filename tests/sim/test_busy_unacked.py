@@ -5,10 +5,11 @@ import pytest
 from panasonic.kxtd1232.client import (
     BusyTimeoutError,
     Client,
+    ProtocolError,
     UnackedWriteError,
     WriteRejectedError,
 )
-from panasonic.kxtd1232.frame import READ_ONLY_COMMANDS, WRITE_COMMANDS, Encoder
+from panasonic.kxtd1232.frame import READ_ONLY_COMMANDS, WRITE_COMMANDS, Cmd, Encoder
 from panasonic.kxtd1232.writeplan import build_plan, field_patch
 from panasonic.sim import LoopbackTransport, SimPBX
 
@@ -125,3 +126,48 @@ def test_write_nak_raises_rejected():
     with pytest.raises(WriteRejectedError) as e:
         c.write(w.table, w.record, w.word, w.new)
     assert e.value.reply.code == 2
+
+
+# -- same-command stale frames (Tester @19fa60df3a26) -------------------------
+def _mk():
+    s = SimPBX()
+    c = Client(LoopbackTransport(s), encoder=Encoder(READ_ONLY_COMMANDS | {Cmd.WRITE}))
+    c.login("0000")
+    return s, c
+
+
+def test_same_cmd_stale_ack_is_not_taken_as_ack():
+    s, c = _mk()
+    s.inject("stale_ack")
+    with pytest.raises(UnackedWriteError):
+        c.write(0x25, 1, 0, b"\x11" * 16)
+    assert c._rx == b""
+
+
+def test_dropped_write_after_stale_ack_is_unacked():
+    s, c = _mk()
+    s.inject("stale_ack")
+    with pytest.raises(UnackedWriteError):
+        c.write(0x25, 1, 0, b"\x11" * 16)
+    base = bytes(s.db[0x25][32:48])
+    s.inject("no_ack_dropped")
+    with pytest.raises(UnackedWriteError):
+        c.write(0x25, 2, 0, b"\x22" * 16)
+    assert c.verify_block(0x25, 2, 0, b"\x22" * 16, base) == "not_applied"
+
+
+def test_same_cmd_stale_read_is_not_returned_as_data():
+    s, c = _mk()
+    real = bytes(s.db[0x24][0:6])
+    s.inject("stale_read")
+    with pytest.raises(ProtocolError):
+        c.read(0x24, 0, 0, 3)
+    assert c.read(0x24, 0, 0, 3) == real
+
+
+def test_pending_input_is_drained_before_send():
+    s, c = _mk()
+    c.t._rx += bytes.fromhex("03000003")  # stray ack already waiting
+    s.inject("no_ack_dropped")
+    with pytest.raises(UnackedWriteError):
+        c.write(0x25, 1, 0, b"\x11" * 16)
