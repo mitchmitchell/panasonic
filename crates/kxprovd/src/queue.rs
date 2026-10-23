@@ -241,4 +241,32 @@ mod tests {
             .await
             .expect("uid 200 has its own bucket");
     }
+
+    #[tokio::test]
+    async fn synthetic_root_has_its_own_rate_bucket() {
+        let (tx, _rx) = mpsc::channel(64);
+        let q = JobQueue::new(tx);
+        let now = 3_000_000u64;
+        let root = JobPrincipal::SyntheticRoot;
+        let local = JobPrincipal::SyntheticLocal { uid: 0 };
+        let kind = || JobKind::ReadFields {
+            params: ReadFieldsParams {
+                kind: FieldKindWire::CidName,
+                first: 0,
+                count: 1,
+            },
+        };
+        for _ in 0..QUEUE_DEPTH_MAX {
+            q.enqueue(kind(), Some(root.clone()), now)
+                .await
+                .expect("root under cap");
+        }
+        assert!(matches!(
+            q.enqueue(kind(), Some(root.clone()), now).await,
+            Err(QueueError::RateLimit)
+        ));
+        q.enqueue(kind(), Some(local.clone()), now)
+            .await
+            .expect("local uid bucket separate from root");
+    }
 }

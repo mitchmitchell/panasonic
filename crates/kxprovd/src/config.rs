@@ -13,6 +13,8 @@ use thiserror::Error;
 pub const ETC_CONFIG: &str = "/etc/kxprov/kxprovd.json";
 pub const PROVISION_ROOT: &str = "/var/lib/kx-provision";
 pub const DEFAULT_SOCKET: &str = "/run/kx-provision/kxprovd.sock";
+/// Root-only epoch counters (P4-R10), separate from per-profile `mode.json` / `profile.json`.
+pub const EPOCH_DIR_NAME: &str = ".epoch";
 
 pub fn profile_data_dir(provision_root: impl AsRef<Path>, profile: Profile) -> PathBuf {
     let seg = match profile {
@@ -21,6 +23,18 @@ pub fn profile_data_dir(provision_root: impl AsRef<Path>, profile: Profile) -> P
         Profile::Prod => "prod",
     };
     provision_root.as_ref().join(seg)
+}
+
+pub fn profile_epoch_counter_path(provision_root: impl AsRef<Path>, profile: Profile) -> PathBuf {
+    let seg = match profile {
+        Profile::Sim => "sim",
+        Profile::Test => "test",
+        Profile::Prod => "prod",
+    };
+    provision_root
+        .as_ref()
+        .join(EPOCH_DIR_NAME)
+        .join(format!("{seg}.counter"))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

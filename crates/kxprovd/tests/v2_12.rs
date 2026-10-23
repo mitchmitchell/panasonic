@@ -17,14 +17,11 @@ fn rolled_back_mode_json_fails_closed_to_production() {
     store
         .set_operational(OperationalMode::Testing, Profile::Test, true)
         .unwrap();
-    store
-        .set_operational(OperationalMode::Production, Profile::Sim, true)
-        .unwrap();
     std::fs::write(
         tmp.path().join("mode.json"),
         serde_json::to_vec_pretty(&ModeFileBody {
             mode: OperationalMode::Testing,
-            counter: 1,
+            counter: 0,
         })
         .unwrap(),
     )
@@ -47,7 +44,7 @@ fn rolled_back_profile_json_fails_closed_to_prod_profile() {
     std::fs::write(
         tmp.path().join("profile.json"),
         serde_json::to_vec_pretty(&ProfileFileBody {
-            profile: Profile::Test,
+            profile: Profile::Sim,
             counter: 0,
         })
         .unwrap(),
@@ -205,14 +202,20 @@ fn profile_data_dir_honors_configured_provision_root() {
 
 #[test]
 fn mode_counter_is_per_profile_data_directory() {
+    use kxprovd::config::profile_epoch_counter_path;
     use kxprovd::mode::ProfileFileBody;
     let root = tempfile::tempdir().unwrap();
     let sim_dir = root.path().join("sim");
     let prod_dir = root.path().join("prod");
     std::fs::create_dir_all(&sim_dir).unwrap();
     std::fs::create_dir_all(&prod_dir).unwrap();
-    std::fs::write(sim_dir.join("mode.counter"), "1\n").unwrap();
-    std::fs::write(prod_dir.join("mode.counter"), "9\n").unwrap();
+    std::fs::create_dir_all(root.path().join(".epoch")).unwrap();
+    std::fs::write(profile_epoch_counter_path(root.path(), Profile::Sim), "1\n").unwrap();
+    std::fs::write(
+        profile_epoch_counter_path(root.path(), Profile::Prod),
+        "9\n",
+    )
+    .unwrap();
     std::fs::write(
         sim_dir.join("profile.json"),
         serde_json::to_vec_pretty(&ProfileFileBody {
@@ -232,11 +235,36 @@ fn mode_counter_is_per_profile_data_directory() {
     )
     .unwrap();
     assert_eq!(
-        ModeStore::new(&sim_dir, Profile::Sim).load_profile(),
+        ModeStore::new_with_epoch_root(&sim_dir, root.path(), Profile::Sim).load_profile(),
         Profile::Sim
     );
     assert_eq!(
-        ModeStore::new(&prod_dir, Profile::Prod).load_profile(),
+        ModeStore::new_with_epoch_root(&prod_dir, root.path(), Profile::Prod).load_profile(),
         Profile::Prod
+    );
+}
+
+#[test]
+fn profile_epoch_counter_lives_outside_profile_data_dir() {
+    use kxprovd::config::profile_epoch_counter_path;
+    let root = tempfile::tempdir().unwrap();
+    let sim_dir = root.path().join("sim");
+    std::fs::create_dir_all(&sim_dir).unwrap();
+    let counter = profile_epoch_counter_path(root.path(), Profile::Sim);
+    std::fs::create_dir_all(counter.parent().unwrap()).unwrap();
+    std::fs::write(&counter, "4\n").unwrap();
+    std::fs::write(
+        sim_dir.join("profile.json"),
+        serde_json::to_vec_pretty(&kxprovd::mode::ProfileFileBody {
+            profile: Profile::Sim,
+            counter: 4,
+        })
+        .unwrap(),
+    )
+    .unwrap();
+    assert!(!counter.starts_with(&sim_dir));
+    assert_eq!(
+        ModeStore::new_with_epoch_root(&sim_dir, root.path(), Profile::Sim).load_profile(),
+        Profile::Sim
     );
 }

@@ -103,8 +103,11 @@ fn p4_r9_missing_mode_counter_with_stored_epoch_fails_closed() {
 
 #[test]
 fn p4_r2_corrupt_mode_counter_fails_closed() {
+    use kxprovd::config::profile_epoch_counter_path;
     let tmp = tempfile::tempdir().unwrap();
-    std::fs::write(tmp.path().join("mode.counter"), "not-a-number\n").unwrap();
+    let counter = profile_epoch_counter_path(tmp.path(), Profile::Sim);
+    std::fs::create_dir_all(counter.parent().unwrap()).unwrap();
+    std::fs::write(counter, "not-a-number\n").unwrap();
     let store = ModeStore::new(tmp.path(), Profile::Sim);
     assert_eq!(store.load_profile(), Profile::Prod);
     let eff = store.effective(Profile::Sim);
@@ -138,8 +141,11 @@ fn prod_data_dir_profile_json_sim_fails_closed_to_prod() {
 
 #[test]
 fn p4_r3_missing_profile_after_epoch_fails_closed_to_prod() {
+    use kxprovd::config::profile_epoch_counter_path;
     let tmp = tempfile::tempdir().unwrap();
-    std::fs::write(tmp.path().join("mode.counter"), "2\n").unwrap();
+    let counter = profile_epoch_counter_path(tmp.path(), Profile::Sim);
+    std::fs::create_dir_all(counter.parent().unwrap()).unwrap();
+    std::fs::write(counter, "2\n").unwrap();
     let store = ModeStore::new(tmp.path(), Profile::Sim);
     assert_eq!(store.load_profile(), Profile::Prod);
 }
