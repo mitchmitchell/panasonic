@@ -201,6 +201,8 @@ pub enum Error {
     Login(LoginFailure),
     /// The transport reported the link is down.
     LinkDown(String),
+    /// The serial session was lost (link drop); log in again before reads, writes, or verify.
+    SessionLost,
     /// No reply within the timeout.
     Timeout,
     /// A busy run outlasted the bound: a link failure.
@@ -245,6 +247,7 @@ impl fmt::Display for Error {
             Self::Field(e) => write!(f, "invalid value: {e}"),
             Self::Login(e) => write!(f, "login failed: {e}"),
             Self::LinkDown(s) => write!(f, "link down: {s}"),
+            Self::SessionLost => write!(f, "session lost: login required"),
             Self::Timeout => write!(f, "timeout waiting for reply"),
             Self::BusyTimeout => write!(f, "busy run longer than the bound"),
             Self::Garbled(e) => write!(f, "bad reply: {e}"),

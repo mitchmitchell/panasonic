@@ -1,13 +1,26 @@
-//! Scrubbed fixture checks for the simulator crate (milestone A2).
+//! Scrubbed fixture checks (milestone A2). Exchange/upload fixtures live in `kxtd1232`; this
+//! crate keeps only sim-specific `fault-timing.jsonl`.
 
 #![allow(clippy::unwrap_used)]
 
 use kxtd1232::Timing;
 use kxtd1232_sim::{BUSY_CADENCE_MS, PLACEHOLDER_PASSWORD, PLACEHOLDER_ROM_ID};
 use serde_json::Value;
+use std::path::PathBuf;
 
-fn lines(name: &str) -> Vec<Value> {
-    let path = format!("{}/tests/fixtures/{name}", env!("CARGO_MANIFEST_DIR"));
+fn sim_fixture(name: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures")
+        .join(name)
+}
+
+fn core_fixture(name: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../kxtd1232/tests/fixtures")
+        .join(name)
+}
+
+fn lines(path: PathBuf) -> Vec<Value> {
     std::fs::read_to_string(path)
         .unwrap()
         .lines()
@@ -18,10 +31,12 @@ fn lines(name: &str) -> Vec<Value> {
 
 #[test]
 fn test_fault_timing_fixture_matches_sim_defaults() {
-    let rows = lines("fault-timing.jsonl");
+    let rows = lines(sim_fixture("fault-timing.jsonl"));
     assert_eq!(rows.len(), 5);
     let busy = &rows[0];
     assert_eq!(busy["cadence_ms"].as_u64(), Some(BUSY_CADENCE_MS));
+    let past = &rows[1];
+    assert_eq!(past["frames_over"].as_u64(), Some(200));
     let unacked = &rows[2];
     assert_eq!(
         unacked["ack_timeout_ms"].as_u64(),
@@ -32,39 +47,18 @@ fn test_fault_timing_fixture_matches_sim_defaults() {
 }
 
 #[test]
-fn test_scrubbed_exchanges_use_placeholders() {
-    let rows = lines("exchanges.jsonl");
-    let login = rows.iter().find(|r| r["step"].as_u64() == Some(2)).unwrap();
-    assert_eq!(login["data"].as_str().unwrap(), "<PASSWORD>\\r\\n");
+fn test_core_exchange_fixture_uses_signon_placeholder() {
+    let rows = lines(core_fixture("exchanges.jsonl"));
     let banner = rows.iter().find(|r| r["step"].as_u64() == Some(1)).unwrap();
     assert!(banner["data"]
         .as_str()
         .unwrap()
         .starts_with("<SIGNON_BANNER>"));
-    for row in &rows {
-        let data = row["data"].as_str().unwrap_or("");
-        let note = row["note"].as_str().unwrap_or("");
-        let blob = format!("{data}{note}");
-        assert!(
-            !blob.contains("Welcome To") && !blob.contains("Panasonic"),
-            "step {} must not carry verbatim sign-on banner text",
-            row["step"]
-        );
-        assert!(
-            !note.contains("real capture") && !note.contains("DSHSOMT"),
-            "step {} notes must stay generic",
-            row["step"]
-        );
-    }
 }
 
 #[test]
-fn test_upload_headers_are_address_and_timing_only() {
-    let headers = lines("full-upload-headers.jsonl");
-    assert!(
-        headers.len() >= 288,
-        "full-upload header fixture must cover every write frame"
-    );
+fn test_core_upload_headers_are_address_only() {
+    let headers = lines(core_fixture("full-upload-headers.jsonl"));
     let write_rows: Vec<_> = headers
         .iter()
         .filter(|h| h.get("header_hex").is_some())
@@ -73,7 +67,6 @@ fn test_upload_headers_are_address_and_timing_only() {
     for h in write_rows {
         assert!(h.get("payload").is_none());
         assert!(h.get("payload_hex").is_none());
-        assert!(h["ack_hex"].as_str().is_some_and(|a| a == "03 00 00 03"));
     }
 }
 

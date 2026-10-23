@@ -65,6 +65,8 @@ pub enum SessionState {
     Locked,
     /// `end_binary` acked.
     Closed,
+    /// Link lost while in binary mode; [`Client::login`] after transport reconnect.
+    Disconnected,
 }
 
 /// Result of verifying a block after an unacked write.
@@ -91,6 +93,8 @@ pub struct Client<T: Transport> {
     timing: Timing,
     rx: Vec<u8>,
     state: SessionState,
+    /// Restored after [`Client::login`] following [`SessionState::Disconnected`].
+    resume: Option<SessionState>,
     drained: Vec<Drained>,
 }
 
@@ -107,8 +111,30 @@ impl<T: Transport> Client<T> {
             timing,
             rx: Vec::new(),
             state: SessionState::Text,
+            resume: None,
             drained: Vec::new(),
         }
+    }
+
+    fn require_session(&self) -> Result<(), Error> {
+        if matches!(self.state, SessionState::Disconnected) {
+            return Err(Error::SessionLost);
+        }
+        Ok(())
+    }
+
+    fn note_link_down(&mut self, pending_verify: Option<UnackedWrite>) {
+        self.resume = pending_verify
+            .map(SessionState::AwaitingVerify)
+            .or_else(|| {
+                matches!(
+                    self.state,
+                    SessionState::AwaitingVerify(_) | SessionState::NeedsRollback(_)
+                )
+                .then(|| self.state.clone())
+            });
+        self.state = SessionState::Disconnected;
+        self.rx.clear();
     }
 
     pub fn state(&self) -> &SessionState {
@@ -156,7 +182,7 @@ impl<T: Transport> Client<T> {
         match sm.state() {
             LoginState::Failed(f) => Err(Error::Login(f.clone())),
             _ => {
-                self.state = SessionState::Binary;
+                self.state = self.resume.take().unwrap_or(SessionState::Binary);
                 Ok(())
             }
         }
@@ -182,11 +208,18 @@ impl<T: Transport> Client<T> {
     /// command byte differs from the request, is an error. On any error the receive buffer
     /// is cleared so the next exchange starts on a frame boundary.
     fn request(&mut self, raw: &[u8], cmd: Cmd, timeout_ms: u64) -> Result<Reply, Error> {
+        self.require_session()?;
         if matches!(self.state, SessionState::Text | SessionState::Closed) {
             return Err(Error::UnexpectedReply("not in binary mode".into()));
         }
-        self.send(raw)?;
+        if let Err(e @ Error::LinkDown(_)) = self.send(raw) {
+            self.note_link_down(None);
+            return Err(e);
+        }
         let r = self.await_reply(cmd, timeout_ms);
+        if matches!(r, Err(Error::LinkDown(_))) {
+            self.note_link_down(None);
+        }
         if r.is_err() {
             self.rx.clear();
         }
@@ -249,6 +282,7 @@ impl<T: Transport> Client<T> {
         word: u16,
         nwords: u8,
     ) -> Result<Vec<u8>, Error> {
+        self.require_session()?;
         let raw = self.enc.read(table, record, word, nwords)?;
         self.expect_data(&raw, Cmd::Read, 2 * nwords as usize)
     }
@@ -301,16 +335,37 @@ impl<T: Transport> Client<T> {
         word: u16,
         payload: &[u8],
     ) -> Result<(), Error> {
+        self.require_session()?;
         match self.state {
             SessionState::Binary => {}
             SessionState::AwaitingVerify(_) | SessionState::NeedsRollback(_) => {
                 return Err(Error::VerifyPending)
             }
             SessionState::Locked => return Err(Error::Locked),
+            SessionState::Disconnected => return Err(Error::SessionLost),
             _ => return Err(Error::UnexpectedReply("not in binary mode".into())),
         }
         let raw = self.enc.write(table, record, word, payload)?;
-        let reason = match self.request(&raw, Cmd::Write, self.timing.ack_timeout_ms) {
+        if let Err(e @ Error::LinkDown(_)) = self.send(&raw) {
+            self.note_link_down(None);
+            return Err(e);
+        }
+        let reply = self.await_reply(Cmd::Write, self.timing.ack_timeout_ms);
+        if let Err(e @ Error::LinkDown(_)) = reply {
+            let u = UnackedWrite {
+                table,
+                record,
+                word,
+                payload: payload.to_vec(),
+                reason: UnackedReason::Timeout,
+            };
+            self.note_link_down(Some(u));
+            return Err(e);
+        }
+        if reply.is_err() {
+            self.rx.clear();
+        }
+        let reason = match reply {
             Ok(Reply {
                 kind: ReplyKind::Ack,
                 ..
@@ -373,6 +428,7 @@ impl<T: Transport> Client<T> {
         new: &[u8],
         base: &[u8],
     ) -> Result<VerifyOutcome, Error> {
+        self.require_session()?;
         if new.len() != base.len() || new.len() % 2 != 0 || new.is_empty() || new.len() > 252 {
             return Err(FrameError::BadPayloadLen(new.len()).into());
         }
@@ -410,6 +466,7 @@ impl<T: Transport> Client<T> {
         word: u16,
         base: &[u8],
     ) -> Result<(), Error> {
+        self.require_session()?;
         if !matches!(
             self.state,
             SessionState::NeedsRollback(_) | SessionState::AwaitingVerify(_)
@@ -438,12 +495,16 @@ impl<T: Transport> Client<T> {
     /// Leave binary mode. Held (refused, nothing sent) while a write awaits verify or
     /// rollback.
     pub fn end_binary(&mut self) -> Result<(), Error> {
+        if matches!(self.state, SessionState::Disconnected) {
+            return Err(Error::SessionLost);
+        }
         match self.state {
             SessionState::Binary | SessionState::Locked => {}
             SessionState::AwaitingVerify(_) | SessionState::NeedsRollback(_) => {
                 return Err(Error::EndBinaryHeld)
             }
             SessionState::Text | SessionState::Closed => return Ok(()),
+            SessionState::Disconnected => return Err(Error::SessionLost),
         }
         let raw = self.enc.end_binary();
         let r = self.request(&raw, Cmd::EndBinary, self.timing.reply_timeout_ms)?;

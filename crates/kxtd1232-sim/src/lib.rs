@@ -1,11 +1,13 @@
 //! Sans-I/O KX-TD1232 simulator built from the behavior spec, plus a virtual-time
 //! [`SimTransport`]. All data is synthetic; nothing here comes from a real unit.
 //!
-//! Fault hooks for design §6 / milestone A2: NAK, silent write, busy run, unacked write
-//! (applied / dropped), late ack, garbled ack, stale reply, and link drop mid-chunk.
+//! Fault injection (design §6 / milestone A2) is behind the **`faults`** cargo feature
+//! (dev/tests only; production binaries must not enable it).
 
 use kxtd1232::fields::{encode_cid_name, encode_cid_number, encode_ext_name};
-use kxtd1232::frame::{checksum, encode_raw, Cmd, BUSY_FRAME};
+use kxtd1232::frame::{checksum, encode_raw, Cmd};
+#[cfg(feature = "faults")]
+use kxtd1232::frame::BUSY_FRAME;
 use kxtd1232::tables;
 use kxtd1232::{Transport, TransportError};
 use std::collections::{HashMap, VecDeque};
@@ -17,8 +19,9 @@ pub const BANNER: &[u8] = b"<SIGNON_BANNER>\r\nEnter Password\r\n";
 /// Busy-frame cadence (behavior spec / design §9b default until H5).
 pub const BUSY_CADENCE_MS: u64 = 128;
 
-/// Injected faults, consumed in order.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Injected faults, consumed in order. Requires the `faults` feature.
+#[cfg(feature = "faults")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Fault {
     /// Next request gets a bad-checksum NAK (`01 02`).
     Nak,
@@ -28,6 +31,8 @@ pub enum Fault {
     Busy { frames: u32 },
     /// Next write is stored, no ack is sent.
     NoAckApplied,
+    /// Next write is stored with no ack; `busy_frames` busy frames follow on the line before verify.
+    NoAckThenBusy { busy_frames: u32 },
     /// Next write is dropped, no ack is sent.
     NoAckDropped,
     /// Next write is stored and its ack arrives `delay_ms` later.
@@ -38,11 +43,37 @@ pub enum Fault {
     StaleReply,
     /// Next write is stored; the ack is cut off after `partial_len` bytes, then the link drops.
     LinkDropMidChunk { partial_len: usize },
+    /// Drop the link after `after_bytes` of the next outgoing write frame (not stored).
+    LinkDropMidSend { after_bytes: usize },
+    /// Next read gets end-of-table refusal (`01 03`) even in range.
+    ReadRefused,
+    /// Next failed password attempt gets the default re-prompt (gate G5 guess).
+    WrongPassword,
+    /// Next password attempt gets an "another terminal" style line (parameterized text).
+    AnotherTerminal(String),
+    /// Next password attempt gets a custom login line (tests / unmeasured replies).
+    LoginReply(String),
 }
 
+#[cfg(feature = "faults")]
 impl Fault {
-    const fn write_only(self) -> bool {
-        !matches!(self, Self::Nak | Self::Busy { .. })
+    fn write_only(&self) -> bool {
+        !matches!(
+            self,
+            Self::Nak
+                | Self::Busy { .. }
+                | Self::ReadRefused
+                | Self::WrongPassword
+                | Self::AnotherTerminal(_)
+                | Self::LoginReply(_)
+        )
+    }
+
+    fn mid_send_drop(&self) -> Option<usize> {
+        match self {
+            Self::LinkDropMidSend { after_bytes } => Some(*after_bytes),
+            _ => None,
+        }
     }
 }
 
@@ -91,6 +122,7 @@ pub struct SimPbx {
     rom_id: [u8; 16],
     mode: Mode,
     buf: Vec<u8>,
+    #[cfg(feature = "faults")]
     faults: VecDeque<Fault>,
     /// Writes received with valid checksums (stored or not).
     pub writes: Vec<WriteRecord>,
@@ -98,8 +130,10 @@ pub struct SimPbx {
     pub commands: Vec<u8>,
     /// Response latency for every reply.
     pub latency_ms: u64,
-    /// When set, the transport delivers this many ack bytes then reports link down.
+    #[cfg(feature = "faults")]
     pub(crate) link_drop_partial: Option<usize>,
+    #[cfg(feature = "faults")]
+    pub(crate) post_write_busy: Option<u32>,
 }
 
 impl Default for SimPbx {
@@ -123,20 +157,41 @@ impl SimPbx {
             rom_id,
             mode: Mode::Idle,
             buf: Vec::new(),
+            #[cfg(feature = "faults")]
             faults: VecDeque::new(),
             writes: Vec::new(),
             commands: Vec::new(),
             latency_ms: 30,
+            #[cfg(feature = "faults")]
             link_drop_partial: None,
+            #[cfg(feature = "faults")]
+            post_write_busy: None,
         }
     }
 
+    #[cfg(feature = "faults")]
     pub fn inject(&mut self, fault: Fault) {
         self.faults.push_back(fault);
     }
 
+    #[cfg(feature = "faults")]
     pub fn pending_faults(&self) -> usize {
         self.faults.len()
+    }
+
+    #[cfg(feature = "faults")]
+    pub(crate) fn take_mid_send_fault(&mut self, data: &[u8]) -> Option<usize> {
+        if data.get(1) != Some(&Cmd::Write.byte()) {
+            return None;
+        }
+        match self.faults.front()? {
+            f if f.mid_send_drop().is_some() => {
+                let n = f.mid_send_drop()?;
+                self.faults.pop_front();
+                Some(n)
+            }
+            _ => None,
+        }
     }
 
     pub fn dtr_up(&mut self) -> Vec<u8> {
@@ -147,6 +202,7 @@ impl SimPbx {
 
     pub fn dtr_down(&mut self) {
         self.mode = Mode::Idle;
+        self.buf.clear();
     }
 
     pub fn feed(&mut self, data: &[u8]) -> Emits {
@@ -180,6 +236,15 @@ impl SimPbx {
         }
     }
 
+    #[cfg(feature = "faults")]
+    fn take_login_fault(&mut self, wrong_attempt: bool) -> Option<Fault> {
+        match self.faults.front() {
+            Some(Fault::WrongPassword) if wrong_attempt => self.faults.pop_front(),
+            Some(Fault::AnotherTerminal(_) | Fault::LoginReply(_)) => self.faults.pop_front(),
+            _ => None,
+        }
+    }
+
     fn text(&mut self, line: &[u8]) -> Vec<u8> {
         match self.mode {
             Mode::AwaitCrlf => {
@@ -187,11 +252,31 @@ impl SimPbx {
                 BANNER.to_vec()
             }
             Mode::AwaitPassword if line == self.password.as_slice() => {
+                #[cfg(feature = "faults")]
+                if let Some(f) = self.take_login_fault(false) {
+                    return match f {
+                        Fault::AnotherTerminal(s) | Fault::LoginReply(s) => {
+                            format!("{s}\r\n").into_bytes()
+                        }
+                        _ => b"EIA Mode Start\r\n".to_vec(),
+                    };
+                }
                 self.mode = Mode::AwaitEcs;
                 b"EIA Mode Start\r\n".to_vec()
             }
-            // Wrong-password reply is a guess, like the RE simulator (gate G5).
-            Mode::AwaitPassword => b"Enter Password\r\n".to_vec(),
+            Mode::AwaitPassword => {
+                #[cfg(feature = "faults")]
+                if let Some(f) = self.take_login_fault(true) {
+                    return match f {
+                        Fault::AnotherTerminal(s) | Fault::LoginReply(s) => {
+                            format!("{s}\r\n").into_bytes()
+                        }
+                        Fault::WrongPassword => b"Enter Password\r\n".to_vec(),
+                        _ => b"Enter Password\r\n".to_vec(),
+                    };
+                }
+                b"Enter Password\r\n".to_vec()
+            }
             Mode::AwaitEcs if line == b"ECS OF" => {
                 self.mode = Mode::AwaitPrg;
                 b"ECS OF\r\nOK\r\n".to_vec()
@@ -221,13 +306,15 @@ impl SimPbx {
             return vec![(lat, Self::reply(cmd, &[0x01, 0x02]))];
         }
         self.commands.push(cmd);
+        let body = &raw[2..raw.len() - 1];
+        let mut out: Emits = Vec::new();
+        #[cfg(feature = "faults")]
+        {
         let is_write = cmd == Cmd::Write.byte();
         let fault = match self.faults.front() {
             Some(f) if is_write || !f.write_only() => self.faults.pop_front(),
             _ => None,
         };
-        let body = &raw[2..raw.len() - 1];
-        let mut out: Emits = Vec::new();
         let mut t = lat;
         match fault {
             Some(Fault::Nak) => return vec![(lat, Self::reply(cmd, &[0x01, 0x02]))],
@@ -239,6 +326,11 @@ impl SimPbx {
             }
             Some(Fault::NoAckApplied) => {
                 self.store(body, true);
+                return out;
+            }
+            Some(Fault::NoAckThenBusy { busy_frames }) => {
+                self.store(body, true);
+                self.post_write_busy = Some(busy_frames);
                 return out;
             }
             Some(Fault::NoAckDropped) => {
@@ -265,8 +357,17 @@ impl SimPbx {
                 self.link_drop_partial = Some(partial_len);
                 return vec![(lat, r)];
             }
-            _ => {}
+            Some(Fault::ReadRefused) => {
+                return vec![(lat, Self::reply(Cmd::Read.byte(), &[0x01, 0x03]))];
+            }
+            Some(Fault::SilentWrite) => {}
+            Some(Fault::LinkDropMidSend { .. })
+            | Some(Fault::WrongPassword)
+            | Some(Fault::AnotherTerminal(_))
+            | Some(Fault::LoginReply(_)) => {}
+            None => {}
         }
+        let silent = fault == Some(Fault::SilentWrite);
         let r = match Cmd::from_byte(cmd) {
             Some(Cmd::Probe) if body == [0x00] => {
                 let mut b = vec![0x00];
@@ -275,17 +376,39 @@ impl SimPbx {
             }
             Some(Cmd::Probe) if body == [0x01] => Self::reply(cmd, &[0x01, 0x03]),
             Some(Cmd::Read) if body.len() == 6 => self.read(body),
-            Some(Cmd::Write) if body.len() > 6 => {
-                self.store(body, fault != Some(Fault::SilentWrite))
-            }
+            Some(Cmd::Write) if body.len() > 6 => self.store(body, !silent),
             Some(Cmd::Clock) => Self::reply(cmd, &[0x00, 0x1A, 1, 2, 0, 3, 4, 5, 0]),
             Some(Cmd::EndBinary) => {
                 self.mode = Mode::AwaitBye;
                 Self::reply(cmd, &[0x00])
             }
-            _ => Self::reply(cmd, &[0x00]), // guess, like the RE simulator
+            _ => Self::reply(cmd, &[0x00]),
         };
         out.push((t, r));
+        return out;
+        }
+        #[cfg(not(feature = "faults"))]
+        let r = match Cmd::from_byte(cmd) {
+            Some(Cmd::Probe) if body == [0x00] => {
+                let mut b = vec![0x00];
+                b.extend_from_slice(&self.rom_id);
+                Self::reply(cmd, &b)
+            }
+            Some(Cmd::Probe) if body == [0x01] => Self::reply(cmd, &[0x01, 0x03]),
+            Some(Cmd::Read) if body.len() == 6 => self.read(body),
+            Some(Cmd::Write) if body.len() > 6 => self.store(body, true),
+            Some(Cmd::Clock) => Self::reply(cmd, &[0x00, 0x1A, 1, 2, 0, 3, 4, 5, 0]),
+            Some(Cmd::EndBinary) => {
+                self.mode = Mode::AwaitBye;
+                Self::reply(cmd, &[0x00])
+            }
+            _ => Self::reply(cmd, &[0x00]),
+        };
+        #[cfg(not(feature = "faults"))]
+        {
+            out.push((lat, r));
+        }
+        #[allow(unreachable_code)]
         out
     }
 
@@ -317,7 +440,7 @@ impl SimPbx {
     fn store(&mut self, body: &[u8], apply: bool) -> Vec<u8> {
         let payload = &body[6..];
         let Some((table, start)) = self.span(body, payload.len()) else {
-            return Self::reply(Cmd::Write.byte(), &[0x01, 0x03]); // guess (G4)
+            return Self::reply(Cmd::Write.byte(), &[0x01, 0x03]);
         };
         let rec = u16::from_be_bytes([body[1], body[2]]);
         let word = u16::from_be_bytes([body[3], body[4]]);
@@ -338,9 +461,7 @@ pub struct SimTransport {
     queue: VecDeque<(u64, Vec<u8>)>,
     /// Every byte the client sent.
     pub sent: Vec<u8>,
-    /// Sticky until [`Self::clear_link_down`]: send and recv fail with [`TransportError::LinkDown`].
     link_down: bool,
-    /// Set when a truncated reply was queued; the link drops after that data is delivered once.
     link_drop_pending: bool,
 }
 
@@ -364,7 +485,16 @@ impl SimTransport {
         self.now
     }
 
-    /// Clear a simulated link-down so a test can "reconnect" without rebuilding the PBX image.
+    /// Cable re-seat: PBX returns to the text login state; queues are cleared.
+    pub fn reconnect(&mut self) {
+        self.sim.dtr_down();
+        self.clear_link_down();
+        self.queue.clear();
+        let first = self.sim.dtr_up();
+        self.queue.push_back((self.now, first));
+    }
+
+    /// Transport may send again; the client still needs [`Client::login`] after link loss.
     pub fn clear_link_down(&mut self) {
         self.link_down = false;
         self.link_drop_pending = false;
@@ -391,17 +521,44 @@ impl Transport for SimTransport {
                 "simulated serial link down".into(),
             ));
         }
-        self.sent.extend_from_slice(data);
-        for (delay, mut bytes) in self.sim.feed(data) {
-            if let Some(n) = self.sim.link_drop_partial.take() {
-                let n = n.min(bytes.len());
-                if n < bytes.len() {
-                    bytes.truncate(n);
-                    self.link_drop_pending = true;
+        #[cfg(feature = "faults")]
+        if let Some(n) = self.sim.take_mid_send_fault(data) {
+            let n = n.min(data.len());
+            if n > 0 {
+                self.sent.extend_from_slice(&data[..n]);
+                for (delay, bytes) in self.sim.feed(&data[..n]) {
+                    let at = self.now + delay;
+                    self.schedule(at, bytes);
                 }
             }
+            self.link_down = true;
+            return Err(TransportError::LinkDown(
+                "simulated serial link down mid-send".into(),
+            ));
+        }
+        self.sent.extend_from_slice(data);
+        for (delay, bytes) in self.sim.feed(data) {
+            #[cfg(feature = "faults")]
+            let bytes = {
+                let mut bytes = bytes;
+                if let Some(n) = self.sim.link_drop_partial.take() {
+                    let n = n.min(bytes.len());
+                    if n < bytes.len() {
+                        bytes.truncate(n);
+                        self.link_drop_pending = true;
+                    }
+                }
+                bytes
+            };
             let at = self.now + delay;
             self.schedule(at, bytes);
+        }
+        #[cfg(feature = "faults")]
+        if let Some(frames) = self.sim.post_write_busy.take() {
+            for i in 0..frames {
+                let at = self.now + self.sim.latency_ms + u64::from(i) * BUSY_CADENCE_MS;
+                self.schedule(at, BUSY_FRAME.to_vec());
+            }
         }
         Ok(())
     }

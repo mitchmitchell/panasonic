@@ -164,7 +164,7 @@ fn test_stray_write_ack_is_not_a_read_reply() {
     let (_base, new) = block(&mut c);
     c.transport_mut()
         .sim
-        .inject(Fault::LateAck { delay_ms: 2_100 });
+        .inject(Fault::LateAck { delay_ms: 2_300 });
     assert!(matches!(c.write(0x25, 10, 0, &new), Err(Error::Unacked(_))));
     // Skip the drain on purpose (a raw read) while the ack is in flight.
     c.transport_mut().sim.latency_ms = 500;

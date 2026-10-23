@@ -76,7 +76,7 @@ fn test_a2_late_ack_garbled_stale() {
     let (base, new) = cid_block(&mut c);
     c.transport_mut()
         .sim
-        .inject(Fault::LateAck { delay_ms: 2_100 });
+        .inject(Fault::LateAck { delay_ms: 2_300 });
     assert!(matches!(c.write(0x24, 0, 0, &new), Err(Error::Unacked(_))));
     assert_eq!(
         c.verify_block(0x24, 0, 0, &new, &base),
@@ -122,15 +122,71 @@ fn test_a2_silent_write_and_link_drop() {
     assert_eq!(c.read(0x25, 0, 0, 80).unwrap(), base);
 
     let mut c = client();
-    let (base, new) = cid_block(&mut c);
+    let (_base, new) = cid_block(&mut c);
     c.transport_mut()
         .sim
         .inject(Fault::LinkDropMidChunk { partial_len: 2 });
     assert!(matches!(c.write(0x24, 0, 0, &new), Err(Error::LinkDown(_))));
-    assert_eq!(c.state(), &SessionState::Binary);
-    c.transport_mut().clear_link_down();
+    assert_eq!(c.state(), &SessionState::Disconnected);
+}
+
+#[test]
+fn test_a2_busy_past_bound_from_fixture() {
+    let mut c = client();
+    c.transport_mut().sim.inject(Fault::Busy { frames: 200 });
+    assert_eq!(c.read(0x24, 0, 0, 3), Err(Error::BusyTimeout));
+}
+
+#[test]
+fn test_a2_unacked_then_busy_before_verify() {
+    let mut c = client();
+    let (base, new) = cid_block(&mut c);
+    c.transport_mut()
+        .sim
+        .inject(Fault::NoAckThenBusy { busy_frames: 12 });
+    assert!(matches!(c.write(0x24, 0, 0, &new), Err(Error::Unacked(_))));
     assert_eq!(
         c.verify_block(0x24, 0, 0, &new, &base),
         Ok(VerifyOutcome::Applied)
     );
+    assert!(!c.drained().is_empty());
+}
+
+#[test]
+fn test_a2_read_refused_end_of_table() {
+    let mut c = client();
+    c.transport_mut().sim.inject(Fault::ReadRefused);
+    assert_eq!(c.read(0x24, 0, 0, 3), Err(Error::Refused { cmd: 0x01 }));
+}
+
+#[test]
+fn test_a2_wrong_password_login_fault() {
+    let mut c = Client::with(
+        SimTransport::new(SimPbx::default()),
+        Access::ReadOnly,
+        Timing::default(),
+    );
+    c.transport_mut().sim.inject(Fault::WrongPassword);
+    assert!(matches!(
+        c.login("9999"),
+        Err(Error::Login(
+            kxtd1232::error::LoginFailure::PasswordRejected
+        ))
+    ));
+}
+
+#[test]
+fn test_a2_another_terminal_login_fault() {
+    let mut c = Client::with(
+        SimTransport::new(SimPbx::default()),
+        Access::ReadOnly,
+        Timing::default(),
+    );
+    c.transport_mut()
+        .sim
+        .inject(Fault::AnotherTerminal("Another Terminal Connected".into()));
+    assert!(matches!(
+        c.login(PLACEHOLDER_PASSWORD),
+        Err(Error::Login(kxtd1232::error::LoginFailure::AnotherTerminal))
+    ));
 }
