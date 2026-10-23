@@ -21,6 +21,21 @@ pub fn init_test_daemon(
     kxprovd::Daemon::sim_for_tests_profile(tmp.path(), uid, profile)
 }
 
+/// Daemon where `local_uid` connects as read-only (not admin/gateway).
+pub fn init_test_daemon_local_readonly(
+    tmp: &tempfile::TempDir,
+    local_uid: u32,
+    profile: Profile,
+) -> (kxprovd::Daemon, std::path::PathBuf) {
+    kxprovd::Daemon::sim_for_tests_profile_peers(
+        tmp.path(),
+        local_uid,
+        profile,
+        local_uid.wrapping_add(9002),
+        local_uid.wrapping_add(9001),
+    )
+}
+
 pub fn write_testing_mode_backup_meta(backups_dir: &Path, digest: &str) {
     use kxprovd::backup::BackupMeta;
     let id = "testingmodebackup";

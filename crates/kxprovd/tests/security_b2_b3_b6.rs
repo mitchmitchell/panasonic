@@ -19,12 +19,11 @@ use std::process::Command;
 use std::time::Duration;
 
 fn kxprov_binary() -> PathBuf {
-    PathBuf::from(std::env::var("CARGO_BIN_EXE_kxprov").unwrap_or_else(|_| {
-        format!(
-            "{}/../../target/debug/kxprov",
-            env!("CARGO_MANIFEST_DIR")
-        )
-    }))
+    PathBuf::from(
+        std::env::var("CARGO_BIN_EXE_kxprov").unwrap_or_else(|_| {
+            format!("{}/../../target/debug/kxprov", env!("CARGO_MANIFEST_DIR"))
+        }),
+    )
 }
 
 fn ensure_kxprov_built() -> PathBuf {

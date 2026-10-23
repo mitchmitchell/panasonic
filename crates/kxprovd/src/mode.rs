@@ -15,6 +15,8 @@ pub enum ModeError {
     Json(#[from] serde_json::Error),
     #[error("counter rollback")]
     CounterRollback,
+    #[error("mode.counter corrupt or unreadable")]
+    CounterCorrupt,
     #[error("testing mode requires Test profile")]
     TestingProfile,
     #[error("daemon not idle")]
@@ -68,7 +70,13 @@ impl ModeStore {
     }
 
     pub fn load_profile(&self) -> Profile {
-        let last = self.last_counter().unwrap_or(0);
+        let last = match self.last_counter() {
+            Ok(n) => n,
+            Err(e) => {
+                self.fail_closed(AuditKind::ModeCorrupt, format!("mode.counter: {e}"));
+                return Profile::Prod;
+            }
+        };
         match std::fs::read_to_string(&self.profile_path) {
             Ok(raw) => match serde_json::from_str::<ProfileFileBody>(&raw) {
                 Ok(body) if body.counter < last => {
@@ -81,7 +89,17 @@ impl ModeStore {
                     Profile::Prod
                 }
             },
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => self.boot_profile,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                if last > 0 {
+                    self.fail_closed(
+                        AuditKind::ModeCorrupt,
+                        "profile.json missing after mode.counter epoch started",
+                    );
+                    Profile::Prod
+                } else {
+                    self.boot_profile
+                }
+            }
             Err(e) => {
                 self.fail_closed(AuditKind::ModeCorrupt, e.to_string());
                 Profile::Prod
@@ -101,7 +119,11 @@ impl ModeStore {
             return Ok(0);
         }
         let s = std::fs::read_to_string(&self.counter_path)?;
-        Ok(s.trim().parse().unwrap_or(0))
+        let trimmed = s.trim();
+        if trimmed.is_empty() {
+            return Err(ModeError::CounterCorrupt);
+        }
+        trimmed.parse().map_err(|_| ModeError::CounterCorrupt)
     }
 
     fn save_counter(&self, counter: u64) -> Result<(), ModeError> {
@@ -138,7 +160,12 @@ impl ModeStore {
                 return self.fail_closed(AuditKind::ModeCorrupt, e.to_string());
             }
         };
-        let last = self.last_counter().unwrap_or(0);
+        let last = match self.last_counter() {
+            Ok(n) => n,
+            Err(e) => {
+                return self.fail_closed(AuditKind::ModeCorrupt, format!("mode.counter: {e}"));
+            }
+        };
         if body.counter < last {
             return self.fail_closed(
                 AuditKind::ModeCounterRollback,

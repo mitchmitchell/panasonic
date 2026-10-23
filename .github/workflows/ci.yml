@@ -50,9 +50,14 @@ jobs:
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2
       - run: |
+          set -eo pipefail
           if cargo tree -p kxprovd --locked -e features 2>/dev/null | rg -q 'test-transport-access'; then
             echo 'kxprovd release graph must not include kxtd1232/test-transport-access' >&2
             cargo tree -p kxprovd --locked -e features | rg 'test-transport-access' || true
+            exit 1
+          fi
+          if ! cargo tree -p kxprovd --locked --features test-util -e features 2>/dev/null | rg -q 'test-transport-access'; then
+            echo 'positive control failed: test-util build must include test-transport-access' >&2
             exit 1
           fi
       - run: cargo build -p kxprovd --release --locked

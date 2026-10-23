@@ -14,7 +14,7 @@ pub fn write(path: &Path, data: &[u8]) -> std::io::Result<()> {
     ));
     {
         let mut opts = OpenOptions::new();
-        opts.write(true).create(true).truncate(true);
+        opts.write(true).create_new(true);
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt;

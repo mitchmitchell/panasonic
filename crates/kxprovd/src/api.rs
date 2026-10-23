@@ -116,7 +116,7 @@ async fn dispatch(
     let result = match &env.body {
         RequestBody::Status => Ok(ResponseResult::Status(status_snapshot(state, locked).await)),
         RequestBody::ReadFields { params } => {
-            let token = match require_access(state, role, &env.auth, Scope::Read) {
+            let token = match require_access(state, cred, role, &env.auth, Scope::Read) {
                 Ok(t) => t,
                 Err(e) => return err_response(id, e),
             };
@@ -130,14 +130,14 @@ async fn dispatch(
             .await
         }
         RequestBody::PlanChange { params } => {
-            let token = match require_access(state, role, &env.auth, Scope::Plan) {
+            let token = match require_access(state, cred, role, &env.auth, Scope::Plan) {
                 Ok(t) => t,
                 Err(e) => return err_response(id, e),
             };
             run_plan(state, params.clone(), token).await
         }
         RequestBody::SubmitApproval { params } => {
-            let approver = match require_access(state, role, &env.auth, Scope::Approve) {
+            let approver = match require_access(state, cred, role, &env.auth, Scope::Approve) {
                 Ok(t) => t,
                 Err(e) => return err_response(id, e),
             };
@@ -145,7 +145,7 @@ async fn dispatch(
         }
         RequestBody::SetMode { params } => set_mode(state, cred, params.clone()).await,
         RequestBody::BackupNow => {
-            if let Err(e) = require_backup_access(state, role, &env.auth) {
+            if let Err(e) = require_backup_access(state, cred, role, &env.auth) {
                 return err_response(id, e);
             }
             let mode = state
@@ -162,13 +162,13 @@ async fn dispatch(
             .await
         }
         RequestBody::ListBackups => {
-            if let Err(e) = require_access(state, role, &env.auth, Scope::Read) {
+            if let Err(e) = require_access(state, cred, role, &env.auth, Scope::Read) {
                 return err_response(id, e);
             }
             list_backups(state).await
         }
         RequestBody::ApplyPlan { params } => {
-            let token = match require_access(state, role, &env.auth, Scope::Write) {
+            let token = match require_access(state, cred, role, &env.auth, Scope::Write) {
                 Ok(t) => t,
                 Err(e) => return err_response(id, e),
             };
@@ -221,6 +221,7 @@ fn verify_bearer(
 
 fn require_access(
     state: &ApiState,
+    cred: crate::peer::PeerCred,
     role: PeerRole,
     auth: &Option<RequestAuth>,
     need: Scope,
@@ -245,20 +246,21 @@ fn require_access(
             if need != Scope::Read {
                 return Err(api_err("forbidden", "read-only peer"));
             }
-            Ok(TokenId("local".into()))
+            Ok(TokenId(format!("local:{}", cred.uid)))
         }
     }
 }
 
 fn require_backup_access(
     state: &ApiState,
+    cred: crate::peer::PeerCred,
     role: PeerRole,
     auth: &Option<RequestAuth>,
 ) -> Result<(), ApiErrorBody> {
     if role == PeerRole::Admin && auth.is_none() {
         return Ok(());
     }
-    require_access(state, role, auth, Scope::Write).map(|_| ())
+    require_access(state, cred, role, auth, Scope::Write).map(|_| ())
 }
 
 async fn status_snapshot(state: &ApiState, locked: bool) -> kxprov_api::StatusResponse {

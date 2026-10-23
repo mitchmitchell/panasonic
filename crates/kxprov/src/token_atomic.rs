@@ -24,7 +24,7 @@ pub(crate) fn atomic_write_tokens_inner(
     ));
     {
         let mut opts = OpenOptions::new();
-        opts.write(true).create(true).truncate(true);
+        opts.write(true).create_new(true);
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt;
@@ -49,6 +49,8 @@ pub(crate) fn atomic_write_tokens_inner(
 
 #[cfg(all(test, unix))]
 mod tests {
+    #![allow(clippy::unwrap_used)]
+
     use super::*;
     use std::os::unix::fs::PermissionsExt;
 
