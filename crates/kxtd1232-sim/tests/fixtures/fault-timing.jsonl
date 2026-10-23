@@ -1,0 +1,5 @@
+{"fault": "busy_run", "cadence_ms": 128, "default_frames": 55, "note": "~7 s observed busy run at 128 ms cadence"}
+{"fault": "busy_past_bound", "busy_limit_ms": 12000, "frames_over": 200, "note": "design §9b default BUSY bound"}
+{"fault": "unacked_write", "ack_timeout_ms": 2000, "max_observed_ack_ms": 589, "note": "G2/H5: never resend blind"}
+{"fault": "late_ack", "delay_ms": 2300, "note": "after ack timeout, inside drain quiet window (mandatory test)"}
+{"fault": "link_drop_mid_chunk", "partial_len": 2, "full_ack_len": 4, "note": "truncated write ack then cable drop"}

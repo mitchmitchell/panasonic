@@ -1,9 +1,8 @@
 //! Sans-I/O KX-TD1232 simulator built from the behavior spec, plus a virtual-time
 //! [`SimTransport`]. All data is synthetic; nothing here comes from a real unit.
 //!
-//! A1 fault hooks: NAK, silent write, busy run, unacked write (applied / dropped), late
-//! ack, garbled ack and stale reply. The rest of design §6 (link drop, wrong-password
-//! variants, ...) lands in A2.
+//! Fault hooks for design §6 / milestone A2: NAK, silent write, busy run, unacked write
+//! (applied / dropped), late ack, garbled ack, stale reply, and link drop mid-chunk.
 
 use kxtd1232::fields::{encode_cid_name, encode_cid_number, encode_ext_name};
 use kxtd1232::frame::{checksum, encode_raw, Cmd, BUSY_FRAME};
@@ -36,6 +35,8 @@ pub enum Fault {
     GarbledAck,
     /// Next write is stored and answered with an ack for another command (0x01).
     StaleReply,
+    /// Next write is stored; the ack is cut off after `partial_len` bytes, then the link drops.
+    LinkDropMidChunk { partial_len: usize },
 }
 
 impl Fault {
@@ -96,6 +97,8 @@ pub struct SimPbx {
     pub commands: Vec<u8>,
     /// Response latency for every reply.
     pub latency_ms: u64,
+    /// When set, the transport delivers this many ack bytes then reports link down.
+    pub(crate) link_drop_partial: Option<usize>,
 }
 
 impl Default for SimPbx {
@@ -123,6 +126,7 @@ impl SimPbx {
             writes: Vec::new(),
             commands: Vec::new(),
             latency_ms: 30,
+            link_drop_partial: None,
         }
     }
 
@@ -255,6 +259,11 @@ impl SimPbx {
                 self.store(body, true);
                 return vec![(lat, Self::reply(Cmd::Read.byte(), &[0x00]))];
             }
+            Some(Fault::LinkDropMidChunk { partial_len }) => {
+                let r = self.store(body, true);
+                self.link_drop_partial = Some(partial_len);
+                return vec![(lat, r)];
+            }
             _ => {}
         }
         let r = match Cmd::from_byte(cmd) {
@@ -328,6 +337,10 @@ pub struct SimTransport {
     queue: VecDeque<(u64, Vec<u8>)>,
     /// Every byte the client sent.
     pub sent: Vec<u8>,
+    /// Sticky until [`Self::clear_link_down`]: send and recv fail with [`TransportError::LinkDown`].
+    link_down: bool,
+    /// Set when a truncated reply was queued; the link drops after that data is delivered once.
+    link_drop_pending: bool,
 }
 
 impl SimTransport {
@@ -341,11 +354,23 @@ impl SimTransport {
             now: 0,
             queue: q,
             sent: Vec::new(),
+            link_down: false,
+            link_drop_pending: false,
         }
     }
 
     pub fn now(&self) -> u64 {
         self.now
+    }
+
+    /// Clear a simulated link-down so a test can "reconnect" without rebuilding the PBX image.
+    pub fn clear_link_down(&mut self) {
+        self.link_down = false;
+        self.link_drop_pending = false;
+    }
+
+    pub fn is_link_down(&self) -> bool {
+        self.link_down
     }
 
     fn schedule(&mut self, at: u64, bytes: Vec<u8>) {
@@ -360,8 +385,20 @@ impl SimTransport {
 
 impl Transport for SimTransport {
     fn send(&mut self, data: &[u8]) -> Result<(), TransportError> {
+        if self.link_down {
+            return Err(TransportError::LinkDown(
+                "simulated serial link down".into(),
+            ));
+        }
         self.sent.extend_from_slice(data);
-        for (delay, bytes) in self.sim.feed(data) {
+        for (delay, mut bytes) in self.sim.feed(data) {
+            if let Some(n) = self.sim.link_drop_partial.take() {
+                let n = n.min(bytes.len());
+                if n < bytes.len() {
+                    bytes.truncate(n);
+                    self.link_drop_pending = true;
+                }
+            }
             let at = self.now + delay;
             self.schedule(at, bytes);
         }
@@ -369,6 +406,11 @@ impl Transport for SimTransport {
     }
 
     fn recv(&mut self, timeout_ms: u64) -> Result<Vec<u8>, TransportError> {
+        if self.link_down {
+            return Err(TransportError::LinkDown(
+                "simulated serial link down".into(),
+            ));
+        }
         match self.queue.front() {
             Some(&(at, _)) if at <= self.now + timeout_ms => {
                 self.now = self.now.max(at);
@@ -380,6 +422,10 @@ impl Transport for SimTransport {
                     if let Some((_, b)) = self.queue.pop_front() {
                         out.extend(b);
                     }
+                }
+                if self.link_drop_pending {
+                    self.link_drop_pending = false;
+                    self.link_down = true;
                 }
                 Ok(out)
             }
