@@ -32,28 +32,42 @@ def decode_cid_number(raw: bytes) -> str:
     return "".join("0" if d == 0xA else str(d) for d in digits)
 
 
-def _encode_ascii(text: str, size: int, terminator: bool) -> bytes:
-    room = size - (1 if terminator else 0)
+def _encode_ascii(text: str, room: int) -> bytes:
+    """ASCII padded with 0x00 (RE table spec); an empty field is all 0x00."""
     if len(text) > room or not text.isascii() or not text.isprintable():
         raise ValueError(f"name must be printable ASCII, at most {room} chars")
-    raw = text.encode("ascii").ljust(room, b" ")
-    return raw + (b"\xff" if terminator else b"")
+    return text.encode("ascii").ljust(room, b"\x00")
+
+
+def _decode_ascii(raw: bytes) -> str:
+    return raw.split(b"\x00", 1)[0].decode("ascii")
+
+
+# Caller-ID names: bytes 0-14 ASCII, 0x00-padded; byte 15 is always 0xFF, even when empty.
+# A full 15-character name (no 0x00 before the 0xFF) has never been tested on hardware,
+# so the encoder refuses it and allows at most 14 characters until RE confirms it.
+MAX_CID_NAME_CHARS = CID_NAME_SIZE - 2
 
 
 def encode_cid_name(name: str) -> bytes:
-    return _encode_ascii(name, CID_NAME_SIZE, terminator=True)
+    return _encode_ascii(name, MAX_CID_NAME_CHARS).ljust(CID_NAME_SIZE - 1, b"\x00") + b"\xff"
 
 
 def decode_cid_name(raw: bytes) -> str:
-    return raw[: CID_NAME_SIZE - 1].decode("ascii").rstrip(" ")
+    if len(raw) != CID_NAME_SIZE or raw[-1] != 0xFF:
+        raise ValueError("caller-ID name record must be 16 bytes ending in 0xFF")
+    return _decode_ascii(raw[: CID_NAME_SIZE - 1])
 
 
 def encode_ext_name(name: str) -> bytes:
-    return _encode_ascii(name, EXT_NAME_SIZE, terminator=False)
+    """Extension names (table 0x05): 10 bytes, ASCII, 0x00-padded."""
+    return _encode_ascii(name, EXT_NAME_SIZE)
 
 
 def decode_ext_name(raw: bytes) -> str:
-    return raw.decode("ascii").rstrip(" ")
+    if len(raw) != EXT_NAME_SIZE:
+        raise ValueError("extension name record must be 10 bytes")
+    return _decode_ascii(raw)
 
 
 # record size and codec per editable field kind

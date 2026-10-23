@@ -23,11 +23,33 @@ def test_cid_number_rejects(bad):
         f.encode_cid_number(bad)
 
 
-def test_names():
+def test_cid_name_layout():
     raw = f.encode_cid_name("TEST")
-    assert len(raw) == 16 and raw[-1] == 0xFF
+    assert raw == b"TEST" + b"\x00" * 11 + b"\xff"
     assert f.decode_cid_name(raw) == "TEST"
-    assert f.decode_ext_name(f.encode_ext_name("EXT 101")) == "EXT 101"
+
+
+def test_empty_records_are_zero():
+    assert f.encode_cid_name("") == b"\x00" * 15 + b"\xff"
+    assert f.decode_cid_name(b"\x00" * 15 + b"\xff") == ""
+    assert f.encode_ext_name("") == b"\x00" * 10
+    assert f.decode_ext_name(b"\x00" * 10) == ""
+
+
+def test_cid_name_15_chars_untested_so_refused():
+    assert f.decode_cid_name(f.encode_cid_name("N" * 14)) == "N" * 14
+    with pytest.raises(ValueError):
+        f.encode_cid_name("N" * 15)
+
+
+def test_cid_name_requires_ff_terminator():
+    with pytest.raises(ValueError):
+        f.decode_cid_name(b"\x00" * 16)
+
+
+def test_ext_name_layout():
+    assert f.encode_ext_name("EXT 101") == b"EXT 101\x00\x00\x00"
+    assert f.decode_ext_name(f.encode_ext_name("X" * 10)) == "X" * 10
     with pytest.raises(ValueError):
         f.encode_ext_name("X" * 11)
     with pytest.raises(ValueError):

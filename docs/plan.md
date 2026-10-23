@@ -12,6 +12,7 @@ or serial contact. Every PR goes through the usual gates.
   write-path §6 chunk table and a corrected tag layout as a spec, not code), headers-only
   upload fixture from RE as a contract test, clock decode, `backup` CLI to a synthetic image.
 - **Done in PR #1 review round:** writes/plans limited to 0x24/0x25 until G6/H8; tables >= 0x40 refused for writes (half-table rule); bounded busy wait (12 s) raising `BusyTimeoutError`; `UnackedWriteError` + `verify_block` re-read (never resend), sim faults `busy_forever`, `no_ack_applied`, `no_ack_dropped`. Still to do: read-side second-half guard needs per-table first-half record counts from RE (A1); real-time busy cadence in a paced sim (A2); journal-driven continue/rollback/LOCKED decision after verify (A5).
+- **Remaining A1 inputs from RE (now available, not started):** `table-spec-DRAFT.md` and `fixtures/` (`exchanges.jsonl`, `full-upload-headers.jsonl`, README marking what is synthetic) under the vault's `reverse-engineering/kx-td1232/`. Use them for the 75-table read plan, record sizes, first-half counts (read-side half-table guard), and the headers-only upload contract test. Copy only synthetic fixtures.
 - **A2:** simulator faults: bounded busy run (128 ms cadence, 7 s default, past-bound),
   unacked write (applied / not applied, plus busy), timeout, link drop, wrong password,
   Another Terminal Connected, refusal; paced timing mode; RE's scrubbed fixtures.
