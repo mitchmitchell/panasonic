@@ -31,3 +31,4 @@ prod.toml
 *.key
 # Rust
 target/
+/.run/
