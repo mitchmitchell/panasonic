@@ -7,7 +7,7 @@ use kxprov_api::{
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Condvar, Mutex, Weak};
 use std::time::{Duration, Instant};
 use thiserror::Error;
 
@@ -67,6 +67,7 @@ enum DiskFingerprint {
     Unreadable,
 }
 
+#[derive(Clone)]
 struct ReloadPlan {
     path: PathBuf,
     outage_start: Option<Instant>,
@@ -74,6 +75,7 @@ struct ReloadPlan {
     failed_fp: Option<DiskFingerprint>,
 }
 
+#[derive(Clone)]
 enum DiskProbe {
     Ok(Vec<u8>),
     UnchangedBad,
@@ -83,9 +85,21 @@ enum DiskProbe {
     },
 }
 
+enum TransientFlightState {
+    Idle,
+    Running,
+    Done(DiskProbe),
+}
+
+struct TransientReloadFlight {
+    inner: Mutex<TransientFlightState>,
+    cv: Condvar,
+}
+
 pub struct TokenStore {
     inner: Arc<Mutex<TokenState>>,
     job_queue: Arc<Mutex<Option<Weak<JobQueue>>>>,
+    transient_flight: Arc<TransientReloadFlight>,
 }
 
 struct TokenRefreshDelta {
@@ -99,7 +113,23 @@ impl Clone for TokenStore {
         Self {
             inner: Arc::clone(&self.inner),
             job_queue: Arc::clone(&self.job_queue),
+            transient_flight: Arc::clone(&self.transient_flight),
         }
+    }
+}
+
+impl TransientReloadFlight {
+    fn new() -> Self {
+        Self {
+            inner: Mutex::new(TransientFlightState::Idle),
+            cv: Condvar::new(),
+        }
+    }
+
+    fn reset(&self) {
+        let mut guard = self.inner.lock().expect("transient flight lock");
+        *guard = TransientFlightState::Idle;
+        self.cv.notify_all();
     }
 }
 
@@ -140,6 +170,7 @@ impl TokenStore {
         Ok(Self {
             inner: Arc::new(Mutex::new(state)),
             job_queue: Arc::new(Mutex::new(None)),
+            transient_flight: Arc::new(TransientReloadFlight::new()),
         })
     }
 
@@ -151,6 +182,7 @@ impl TokenStore {
         Ok(Self {
             inner: Arc::new(Mutex::new(state)),
             job_queue: Arc::new(Mutex::new(None)),
+            transient_flight: Arc::new(TransientReloadFlight::new()),
         })
     }
 
@@ -232,12 +264,47 @@ impl TokenStore {
         Err(last_fp)
     }
 
-    fn clear_reload_outage(state: &mut TokenState) {
+    fn clear_reload_outage(state: &mut TokenState, flight: &TransientReloadFlight) {
         state.reload_failure_since = None;
         state.store_unavailable = false;
         state.store_unavailable_logged = false;
         state.reload_transient_done = false;
         state.reload_failed_disk_fingerprint = None;
+        flight.reset();
+    }
+
+    fn run_disk_probe_off_thread(plan: ReloadPlan) -> DiskProbe {
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        let worker = std::thread::Builder::new()
+            .name("token-reload-probe".into())
+            .spawn(move || {
+                let _ = tx.send(Self::execute_disk_probe(&plan));
+            })
+            .expect("spawn token reload probe thread");
+        let probe = rx.recv().expect("token reload probe result");
+        let _ = worker.join();
+        probe
+    }
+
+    fn coordinated_transient_probe(flight: &TransientReloadFlight, plan: ReloadPlan) -> DiskProbe {
+        let mut guard = flight.inner.lock().expect("transient flight lock");
+        loop {
+            match &*guard {
+                TransientFlightState::Done(probe) => return probe.clone(),
+                TransientFlightState::Running => {
+                    guard = flight.cv.wait(guard).expect("transient flight wait");
+                }
+                TransientFlightState::Idle => {
+                    *guard = TransientFlightState::Running;
+                    drop(guard);
+                    let probe = Self::run_disk_probe_off_thread(plan);
+                    let mut guard = flight.inner.lock().expect("transient flight lock");
+                    *guard = TransientFlightState::Done(probe.clone());
+                    flight.cv.notify_all();
+                    return probe;
+                }
+            }
+        }
     }
 
     fn fingerprint_unchanged(expected: DiskFingerprint, path: &Path) -> bool {
@@ -375,11 +442,12 @@ impl TokenStore {
 
     fn merge_disk_probe(
         state: &mut TokenState,
+        flight: &TransientReloadFlight,
         probe: DiskProbe,
     ) -> Result<TokenRefreshDelta, TokenError> {
         match probe {
             DiskProbe::Ok(raw) => {
-                Self::clear_reload_outage(state);
+                Self::clear_reload_outage(state, flight);
                 Self::apply_reloaded_bytes(state, raw)
             }
             DiskProbe::UnchangedBad => {
@@ -423,10 +491,14 @@ impl TokenStore {
             }
         };
 
-        let probe = Self::execute_disk_probe(&plan);
+        let probe = if plan.transient_done {
+            Self::execute_disk_probe(&plan)
+        } else {
+            Self::coordinated_transient_probe(&self.transient_flight, plan)
+        };
 
         let mut state = self.inner.lock().expect("token store lock");
-        Self::merge_disk_probe(&mut state, probe)
+        Self::merge_disk_probe(&mut state, &self.transient_flight, probe)
     }
 
     fn apply_reloaded_bytes(
@@ -580,6 +652,7 @@ impl TokenStore {
         Self {
             inner: Arc::new(Mutex::new(state)),
             job_queue: Arc::new(Mutex::new(None)),
+            transient_flight: Arc::new(TransientReloadFlight::new()),
         }
     }
 
@@ -720,21 +793,34 @@ mod tests {
     }
 
     #[test]
-    fn reload_outage_verify_does_not_block_other_requests() {
+    fn reload_concurrent_transient_single_flight() {
+        use std::sync::Barrier;
         let tmp = tempfile::tempdir().expect("tempdir");
         let path = tmp.path().join("tokens.json");
         write_tokens_revoking_writer(&path, false);
-        let store = TokenStore::load_insecure(path.clone()).expect("load");
+        let store = Arc::new(TokenStore::load_insecure(path.clone()).expect("load"));
         store
             .verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan)
             .expect("warm");
         std::fs::write(&path, b"{bad").unwrap();
-        let _ = store.verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan);
-        let quick_start = Instant::now();
-        let _ = store.verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan);
+        let barrier = Arc::new(Barrier::new(4));
+        let wall = Instant::now();
+        let handles: Vec<_> = (0..4)
+            .map(|_| {
+                let store = Arc::clone(&store);
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    let _ = store.verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan);
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().expect("join");
+        }
         assert!(
-            quick_start.elapsed() < Duration::from_millis(100),
-            "second verify during grace should not repeat the full retry sleep window"
+            wall.elapsed() <= Duration::from_secs(2) + Duration::from_millis(300),
+            "four concurrent first-outage verifies must share one transient retry window"
         );
     }
 

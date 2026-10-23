@@ -3,6 +3,8 @@
 use crate::config::{profile_epoch_counter_path, EPOCH_DIR_NAME};
 use kxprov_api::Profile;
 use std::path::{Path, PathBuf};
+#[cfg(feature = "test-util")]
+use std::sync::atomic::{AtomicBool, Ordering};
 
 #[derive(Debug, thiserror::Error)]
 pub enum EpochError {
@@ -16,41 +18,103 @@ pub enum EpochError {
     Corrupt,
 }
 
+#[cfg(feature = "test-util")]
+static EPOCH_SECURE_CHECKS: AtomicBool = AtomicBool::new(false);
+
 pub fn epoch_dir(provision_root: &Path) -> PathBuf {
     provision_root.join(EPOCH_DIR_NAME)
 }
 
+#[cfg(feature = "test-util")]
+pub fn set_epoch_secure_checks_for_test(enforce: bool) {
+    EPOCH_SECURE_CHECKS.store(enforce, Ordering::Relaxed);
+}
+
+fn secure_checks_enabled() -> bool {
+    #[cfg(feature = "test-util")]
+    if EPOCH_SECURE_CHECKS.load(Ordering::Relaxed) {
+        return true;
+    }
+    #[cfg(unix)]
+    {
+        nix::unistd::geteuid().is_root()
+    }
+    #[cfg(not(unix))]
+    {
+        false
+    }
+}
+
 #[cfg(unix)]
-fn enforce_root_epoch_permissions() -> bool {
-    nix::unistd::geteuid().is_root()
+fn required_owner_uid() -> u32 {
+    #[cfg(feature = "test-util")]
+    if EPOCH_SECURE_CHECKS.load(Ordering::Relaxed) {
+        return nix::unistd::geteuid().as_raw();
+    }
+    0
 }
 
 #[cfg(not(unix))]
-fn enforce_root_epoch_permissions() -> bool {
-    false
+fn required_owner_uid() -> u32 {
+    0
+}
+
+#[cfg(unix)]
+fn check_epoch_dir_secure(dir: &Path) -> Result<(), EpochError> {
+    use std::os::unix::fs::MetadataExt;
+    if !secure_checks_enabled() {
+        return Ok(());
+    }
+    let meta = std::fs::symlink_metadata(dir)?;
+    if meta.file_type().is_symlink() {
+        return Err(EpochError::InsecureDir);
+    }
+    if !meta.is_dir() {
+        return Err(EpochError::InsecureDir);
+    }
+    let owner = required_owner_uid();
+    if meta.uid() != owner || meta.mode() & 0o777 != 0o700 {
+        return Err(EpochError::InsecureDir);
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn check_epoch_dir_secure(_dir: &Path) -> Result<(), EpochError> {
+    Ok(())
 }
 
 pub fn ensure_epoch_dir(provision_root: &Path) -> Result<(), EpochError> {
+    std::fs::create_dir_all(provision_root)?;
     let dir = epoch_dir(provision_root);
-    std::fs::create_dir_all(&dir)?;
+    if dir.symlink_metadata().is_ok() {
+        check_epoch_dir_secure(&dir)?;
+        return Ok(());
+    }
     #[cfg(unix)]
     {
-        use std::os::unix::fs::{MetadataExt, PermissionsExt};
-        if enforce_root_epoch_permissions() {
-            let meta = std::fs::metadata(&dir)?;
-            if meta.uid() != 0 || meta.mode() & 0o777 != 0o700 {
-                return Err(EpochError::InsecureDir);
-            }
+        use std::fs::DirBuilder;
+        use std::os::unix::fs::DirBuilderExt;
+        let mut builder = DirBuilder::new();
+        builder.mode(0o700);
+        match builder.create(&dir) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(EpochError::Io(e)),
         }
-        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
     }
+    #[cfg(not(unix))]
+    {
+        std::fs::create_dir(&dir)?;
+    }
+    check_epoch_dir_secure(&dir)?;
     Ok(())
 }
 
 #[cfg(unix)]
 fn check_counter_secure(path: &Path) -> Result<(), EpochError> {
     use std::os::unix::fs::MetadataExt;
-    if !enforce_root_epoch_permissions() {
+    if !secure_checks_enabled() {
         return Ok(());
     }
     if !path.exists() {
@@ -60,7 +124,8 @@ fn check_counter_secure(path: &Path) -> Result<(), EpochError> {
     if meta.file_type().is_symlink() || !meta.is_file() {
         return Err(EpochError::InsecureCounter);
     }
-    if meta.uid() != 0 || meta.mode() & 0o777 != 0o600 {
+    let owner = required_owner_uid();
+    if meta.uid() != owner || meta.mode() & 0o777 != 0o600 {
         return Err(EpochError::InsecureCounter);
     }
     Ok(())
@@ -72,6 +137,8 @@ fn check_counter_secure(_path: &Path) -> Result<(), EpochError> {
 }
 
 pub fn read_counter(provision_root: &Path, profile: Profile) -> Result<Option<u64>, EpochError> {
+    let dir = epoch_dir(provision_root);
+    check_epoch_dir_secure(&dir)?;
     let path = profile_epoch_counter_path(provision_root, profile);
     check_counter_secure(&path)?;
     if !path.exists() {
@@ -95,4 +162,52 @@ pub fn write_counter(
     crate::atomic_write::write(&path, counter.to_string().as_bytes())?;
     check_counter_secure(&path)?;
     Ok(())
+}
+
+#[cfg(all(test, feature = "test-util"))]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::*;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    #[test]
+    fn fresh_install_creates_epoch_dir_mode_0700() {
+        set_epoch_secure_checks_for_test(true);
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(!epoch_dir(tmp.path()).exists());
+        write_counter(tmp.path(), Profile::Sim, 1).unwrap();
+        let meta = std::fs::symlink_metadata(epoch_dir(tmp.path())).unwrap();
+        assert_eq!(meta.mode() & 0o777, 0o700);
+        assert_eq!(meta.uid(), nix::unistd::geteuid().as_raw());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_rejects_world_writable_epoch_dir() {
+        set_epoch_secure_checks_for_test(true);
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path()).unwrap();
+        let dir = epoch_dir(tmp.path());
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o777)).unwrap();
+        assert!(matches!(
+            read_counter(tmp.path(), Profile::Sim),
+            Err(EpochError::InsecureDir)
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_rejects_symlink_epoch_dir() {
+        set_epoch_secure_checks_for_test(true);
+        let tmp = tempfile::tempdir().unwrap();
+        let real = tmp.path().join("epoch-real");
+        std::fs::create_dir(&real).unwrap();
+        std::os::unix::fs::symlink(&real, epoch_dir(tmp.path())).unwrap();
+        assert!(matches!(
+            read_counter(tmp.path(), Profile::Sim),
+            Err(EpochError::InsecureDir)
+        ));
+    }
 }
