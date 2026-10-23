@@ -25,5 +25,23 @@ fn run_a4_script_smoke_exits_zero() {
             String::from_utf8_lossy(&output.stderr)
         );
     }
-    assert!(output.status.success(), "run-a4.sh smoke failed");
+    assert!(output.status.success(), "run-a4.sh smoke failed (first run)");
+
+    let output2 = Command::new("bash")
+        .arg(root.join("scripts/run-a4.sh"))
+        .arg("smoke")
+        .current_dir(&root)
+        .output()
+        .expect("run-a4.sh smoke second run");
+    if !output2.status.success() {
+        eprintln!(
+            "second run stdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output2.stdout),
+            String::from_utf8_lossy(&output2.stderr)
+        );
+    }
+    assert!(
+        output2.status.success(),
+        "run-a4.sh smoke failed on second consecutive run (stale socket/pid)"
+    );
 }

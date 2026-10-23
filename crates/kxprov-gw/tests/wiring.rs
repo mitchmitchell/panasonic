@@ -20,4 +20,16 @@ fn run_a4_script_starts_real_kxprovd_and_gateway() {
         !script.contains("MockDaemon"),
         "run-a4 must not use MockDaemon"
     );
+    assert!(
+        script.contains("[web_tailnet]") && script.contains("trust_x_forwarded_for = true"),
+        "run-a4 must trust XFF only on Serve-fronted tailnet HTTP"
+    );
+    assert!(
+        !script.contains("[web_https]"),
+        "run-a4 must not configure web_https XFF trust on direct TLS"
+    );
+    assert!(
+        script.contains("rm -f \"$run_dir/kxprovd.pid\" \"$run_dir/kxprovd.sock\""),
+        "run-a4 must drop stale pid/socket before starting kxprovd"
+    );
 }

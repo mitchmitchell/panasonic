@@ -212,7 +212,7 @@ fn caller_from_session(session: &Session) -> CallerIdentity {
 }
 
 /// Client IP for login rate limiting. Trust `X-Forwarded-For` only when the listener sets
-/// [`ClientIpPolicy::trust_x_forwarded_for`] (Tailscale Serve fronted HTTPS).
+/// [`ClientIpPolicy::trust_x_forwarded_for`] (Tailscale Serve fronted plain HTTP on loopback).
 ///
 /// Tailscale Serve **replaces** `X-Forwarded-For` with the client it observed (see
 /// `docs/design/tailscale-x-forwarded-for.md`).

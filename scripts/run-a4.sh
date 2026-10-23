@@ -73,7 +73,7 @@ daemon_socket_path = "$run_dir/kxprovd.sock"
 tls_cert_path = "$tls_dir/lan.crt"
 tls_key_path = "$tls_dir/lan.key"
 
-[web_https]
+[web_tailnet]
 trust_x_forwarded_for = true
 TOML
 
@@ -99,6 +99,7 @@ start_kxprovd() {
     echo "run-a4: kxprovd already running (pid $(cat "$run_dir/kxprovd.pid"))" >&2
     return 0
   fi
+  rm -f "$run_dir/kxprovd.pid" "$run_dir/kxprovd.sock"
   env KXPROV_DAEMON_CONFIG="$KXPROV_DAEMON_CONFIG" "$bin_dir/kxprovd" &
   echo $! | tee "$run_dir/kxprovd.pid" >/dev/null
 }

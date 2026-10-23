@@ -53,6 +53,7 @@ pub async fn serve(
 ) -> anyhow::Result<GatewayHandles> {
     ensure_rustls_provider();
     config.validate_site_bind_settings()?;
+    config.validate_web_xff_trust()?;
     config.warn_if_lan_ip_unset();
     config.warn_if_insecure_bind();
     let admin = Arc::new(AdminPassword::from_file(&config.admin_password_path)?);

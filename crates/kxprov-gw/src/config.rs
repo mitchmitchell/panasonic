@@ -356,7 +356,19 @@ impl GatewayConfig {
         config.apply_cli(std::env::args().skip(1))?;
         config.validate_site_bind_settings()?;
         config.validate_mcp_loopback_binds()?;
+        config.validate_web_xff_trust()?;
         Ok(config)
+    }
+
+    /// Direct TLS / LAN HTTPS must not trust client-supplied `X-Forwarded-For` (only Serve-fronted loopback).
+    pub fn validate_web_xff_trust(&self) -> anyhow::Result<()> {
+        if self.web_https.trust_x_forwarded_for {
+            anyhow::bail!(
+                "web_https.trust_x_forwarded_for must remain false; \
+                 enable trust_x_forwarded_for only on [web_tailnet] (Tailscale Serve fronted HTTP)"
+            );
+        }
+        Ok(())
     }
 
     pub fn validate_mcp_loopback_binds(&self) -> anyhow::Result<()> {
@@ -566,6 +578,20 @@ mod tests {
         GatewayConfig::default()
             .validate_mcp_loopback_binds()
             .unwrap();
+    }
+
+    #[test]
+    fn web_https_xff_trust_is_rejected_at_startup() {
+        let err = GatewayConfig {
+            web_https: WebListenerSettings {
+                trust_x_forwarded_for: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+        .validate_web_xff_trust()
+        .unwrap_err();
+        assert!(err.to_string().contains("web_https"), "{err}");
     }
 
     #[test]

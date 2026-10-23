@@ -1,6 +1,6 @@
 # Tailscale Serve and `X-Forwarded-For`
 
-When the gateway web listener is bound to loopback and exposed with **Tailscale Serve**, the TCP connection to the gateway process appears from `127.0.0.1`. Login rate limiting trusts `X-Forwarded-For` **only** on listeners configured with `web_https.trust_x_forwarded_for = true` (or the matching `[web_https]` table in `gateway.toml`).
+When the gateway web listener is bound to loopback and exposed with **Tailscale Serve**, the TCP connection to the gateway process appears from `127.0.0.1`. Login rate limiting trusts `X-Forwarded-For` **only** on the plain HTTP tailnet listener (`web_tailnet_bind`), via `[web_tailnet] trust_x_forwarded_for = true` in `gateway.toml`. Direct TLS / LAN HTTPS (`web_https`) must **never** enable this flag.
 
 ## Does Serve append?
 
