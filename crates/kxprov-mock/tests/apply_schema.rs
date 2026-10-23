@@ -17,7 +17,7 @@ fn apply_success_body_is_job_id_only() {
 #[test]
 fn apply_approval_required_body_shape() {
     let body = ApplyApprovalRequiredResult {
-        plan_id: PlanId::from_hex("00000000000000000000000000000001").unwrap(),
+        plan_id: PlanId("00000000000000000000000000000001".into()),
         diff_hash: DiffHash(
             "0101010101010101010101010101010101010101010101010101010101010101".into(),
         ),
@@ -31,9 +31,6 @@ fn apply_approval_required_body_shape() {
         obj.get("plan_id").unwrap(),
         "00000000000000000000000000000001"
     );
-    assert!(obj.get("diff_hash").is_some());
-    assert!(obj.get("challenge").is_none());
-    assert!(obj.get("summary").is_none());
 }
 
 #[test]

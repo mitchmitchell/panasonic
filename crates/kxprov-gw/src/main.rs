@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use kxprov_api::MockDaemon;
+use kxprov_mock::MockDaemon;
 use kxprov_gw::config::GatewayConfig;
 use kxprov_gw::server::serve;
 use tracing_subscriber::EnvFilter;

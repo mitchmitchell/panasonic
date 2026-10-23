@@ -20,6 +20,7 @@ base64.workspace = true
 hex.workspace = true
 http.workspace = true
 kxprov-api.workspace = true
+kxprov-mock.workspace = true
 kxprov-mcp = { workspace = true }
 rmcp = { workspace = true }
 tower-service = "0.3"

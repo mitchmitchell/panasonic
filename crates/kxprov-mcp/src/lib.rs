@@ -1,9 +1,11 @@
 use std::borrow::Cow;
 use std::sync::Arc;
 
-use kxprov_api::{
-    ApiError, ApplyApprovalRequiredResult, CallerIdentity, DaemonBackend, DiffHash, JobId, JobRef,
-    PlanChangeRequest, PlanId, Profile, ReadFieldsRequest,
+use kxprov_api::{ApplyApprovalRequiredResult, JobRef, Profile, TokenId};
+use kxprov_mock::{diff_hash_from_hex, plan_id_from_hex};
+use kxprov_mock::{
+    BackendError, CallerIdentity, DaemonBackend, JobId, McpTokenIdentity, PlanChangeRequest,
+    ReadFieldsRequest, ScopeSet,
 };
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
@@ -161,13 +163,13 @@ impl KxMcpServer {
         Parameters(params): Parameters<ApplyPlanParams>,
     ) -> Result<CallToolResult, ErrorData> {
         let caller = Self::caller()?;
-        let plan_id = PlanId::from_hex(&params.plan_id).map_err(api_err)?;
-        let diff_hash = DiffHash::from_hex(&params.diff_hash).map_err(api_err)?;
+        let plan_id = plan_id_from_hex(&params.plan_id).map_err(api_err)?;
+        let diff_hash = diff_hash_from_hex(&params.diff_hash).map_err(api_err)?;
         match self.backend.apply_plan(&caller, plan_id, diff_hash).await {
             Ok(job) => Ok(text_json(JobRef {
                 job_id: job.job_id.0,
             })),
-            Err(ApiError::ApprovalRequired(body)) => Ok(text_json(ApplyApprovalRequiredResult {
+            Err(BackendError::ApprovalRequired(body)) => Ok(text_json(ApplyApprovalRequiredResult {
                 plan_id: body.plan_id,
                 diff_hash: body.diff_hash,
                 status: body.status,
@@ -184,11 +186,11 @@ impl KxMcpServer {
         Parameters(params): Parameters<SubmitApprovalParams>,
     ) -> Result<CallToolResult, ErrorData> {
         let caller = Self::caller()?;
-        let diff_hash = DiffHash::from_hex(&params.diff_hash).map_err(api_err)?;
-        let profile = Profile::parse_wire(&params.profile).map_err(api_err)?;
+        let diff_hash = diff_hash_from_hex(&params.diff_hash).map_err(api_err)?;
+        let profile = parse_profile(&params.profile).map_err(api_err)?;
         let approval = self
             .backend
-            .submit_approval(&caller, &params.plan_id, diff_hash, &profile)
+            .submit_approval(&caller, &params.plan_id, diff_hash, profile)
             .await
             .map_err(api_err)?;
         Ok(text_json(approval))
@@ -215,7 +217,12 @@ fn text_json<T: serde::Serialize>(value: T) -> CallToolResult {
     )])
 }
 
-fn api_err(err: ApiError) -> ErrorData {
+fn parse_profile(raw: &str) -> Result<Profile, BackendError> {
+    serde_json::from_value(serde_json::Value::String(raw.trim().to_string()))
+        .map_err(|_| BackendError::BadRequest("profile"))
+}
+
+fn api_err(err: BackendError) -> ErrorData {
     ErrorData {
         code: ErrorCode::INTERNAL_ERROR,
         message: Cow::Owned(err.to_string()),
@@ -236,10 +243,10 @@ impl ServerHandler for KxMcpServer {
         _context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, ErrorData> {
         let caller = Self::caller().unwrap_or_else(|_| {
-            CallerIdentity::Mcp(kxprov_api::McpTokenIdentity {
-                token_id: kxprov_api::TokenId("unknown".into()),
+            CallerIdentity::Mcp(McpTokenIdentity {
+                token_id: TokenId("unknown".into()),
                 agent_name: "unknown".into(),
-                scopes: kxprov_api::ScopeSet::empty(),
+                scopes: ScopeSet::empty(),
             })
         });
         let scopes = caller.scopes();

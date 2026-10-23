@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use kxprov_api::{mcp_tool_mutates_mode_or_profile, MockDaemon, MCP_TOOLS};
+use kxprov_mock::{mcp_tool_mutates_mode_or_profile, MockDaemon, MCP_TOOLS};
 use kxprov_mcp::KxMcpServer;
 
 #[test]

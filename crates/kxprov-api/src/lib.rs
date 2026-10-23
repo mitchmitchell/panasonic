@@ -1,39 +1,18 @@
-//! Shared daemon API types and the backend trait (`kxprovd` implements in A3).
+//! Unix-socket API types and client for [`kxprovd`](../../kxprovd/README.md).
+//!
+//! v2.3: per-plan [`Approval`] (no daemon-wide arm), immutable plans tied to [`TokenId`],
+//! [`PlanId`] + [`DiffHash`] + [`Profile`]; daemon enforces scope from SO_PEERCRED.
 
-mod approval;
-mod backend;
-mod error;
-mod identity;
-mod mock;
-mod mode;
-mod plan;
-mod profile;
-mod route_table;
-mod scope;
-mod token_id;
+mod client;
+mod ids;
+mod plan_hash;
+mod protocol;
+mod surface;
 mod types;
-mod write_gates;
 
-pub use approval::{
-    approval_ttl, plan_storage_ttl, Approval, ApprovalId, APPROVAL_SUBMIT_LIMIT_PER_DAY,
-    APPROVAL_SUBMIT_LIMIT_PER_HOUR,
-};
-pub use backend::DaemonBackend;
-pub use error::ApiError;
-pub use identity::{CallerIdentity, McpTokenIdentity, WebAdminIdentity};
-pub use mock::MockDaemon;
-pub use mode::Mode;
-pub use plan::{canonical_plan_bytes, DiffHash, ImmutablePlan, PlanId};
-pub use profile::Profile;
-pub use route_table::{
-    http_route_mutates_mode_or_profile, mcp_tool_mutates_mode_or_profile, HttpRoute,
-    FORBIDDEN_MODE_PROFILE_PATHS, MCP_TOOLS, WEB_ROUTES,
-};
-pub use scope::{scopes_for_role, Scope, ScopeSet};
-pub use token_id::TokenId;
-pub use types::{
-    ApplyApprovalRequiredResult, ApplyJob, ApplyPlanAwaitingStatus, BackupInfo, BackupList,
-    DaemonStatus, FieldValue, JobId, JobRef, JobState, PlanChangeRequest, PlanSummary,
-    ReadFieldsRequest, ReadFieldsResponse, RequestedBy, SubmitApprovalParams,
-};
-pub use write_gates::prod_profile_write_gates_active;
+pub use client::{ApiClient, ApiError};
+pub use ids::{Approval, DiffHash, PlanId, Profile, TokenId};
+pub use plan_hash::{diff_hash, CanonicalPlan, CanonicalWrite};
+pub use protocol::*;
+pub use surface::*;
+pub use types::*;

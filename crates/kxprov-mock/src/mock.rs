@@ -2,31 +2,29 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration as StdDuration, Instant};
 
-use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
-use argon2::Argon2;
 use async_trait::async_trait;
+use kxprov_api::{
+    ApplyApprovalRequiredResult, ApplyPlanAwaitingStatus, Approval, DiffHash, OperationalMode,
+    PlanId, Profile, Scope,
+};
 use time::OffsetDateTime;
 use tokio::sync::RwLock;
 
-use crate::approval::{
-    plan_storage_ttl, Approval, APPROVAL_SUBMIT_LIMIT_PER_DAY, APPROVAL_SUBMIT_LIMIT_PER_HOUR,
-};
 use crate::backend::DaemonBackend;
-use crate::error::ApiError;
+use crate::error::BackendError;
 use crate::identity::CallerIdentity;
-use crate::mode::Mode;
-use crate::plan::{DiffHash, ImmutablePlan, PlanId};
-use crate::profile::Profile;
-use crate::scope::Scope;
+use crate::plan::{approval_ttl, plan_id_from_hex, plan_storage_ttl, ImmutablePlan};
 use crate::types::{
-    ApplyJob, BackupInfo, BackupList, DaemonStatus, FieldValue, JobId, JobState, PlanChangeRequest,
-    PlanSummary, ReadFieldsRequest, ReadFieldsResponse, RequestedBy,
+    ApplyJob, BackupInfo, BackupList, DaemonStatus, FieldValue, JobId, JobState,
+    PlanChangeRequest, PlanSummary, ReadFieldsRequest, ReadFieldsResponse,
 };
 use crate::write_gates::prod_profile_write_gates_active;
 
+pub const APPROVAL_SUBMIT_LIMIT_PER_HOUR: u32 = 5;
+pub const APPROVAL_SUBMIT_LIMIT_PER_DAY: u32 = 20;
+
 struct StoredApproval {
     approval: Approval,
-    consumed: bool,
 }
 
 struct SubmitRateState {
@@ -38,7 +36,7 @@ struct SubmitRateState {
 
 struct Inner {
     profile: Profile,
-    mode: Mode,
+    operational_mode: OperationalMode,
     plans: HashMap<String, ImmutablePlan>,
     plan_approvals: HashMap<String, StoredApproval>,
     submit_rates: HashMap<String, SubmitRateState>,
@@ -49,46 +47,35 @@ struct Inner {
 
 pub struct MockDaemon {
     inner: Arc<RwLock<Inner>>,
-    admin_hash: String,
 }
 
 impl MockDaemon {
     pub fn new() -> Self {
-        Self::with_admin_password("test-admin-password")
+        Self::with_operational_mode(OperationalMode::Testing)
     }
 
-    pub fn with_admin_password(password: &str) -> Self {
-        Self::with_mode_and_password(Mode::Testing, password)
+    pub fn with_operational_mode(mode: OperationalMode) -> Self {
+        Self::with_mode_profile(mode, Profile::Test)
     }
 
-    pub fn with_mode(mode: Mode) -> Self {
-        Self::with_mode_and_password(mode, "test-admin-password")
+    /// Compatibility helper for tests that previously passed an admin password.
+    pub fn with_mode_and_password(mode: OperationalMode, _password: &str) -> Self {
+        Self::with_operational_mode(mode)
     }
 
     pub fn with_profile(profile: Profile) -> Self {
-        Self::with_mode_profile_and_password(Mode::Production, profile, "test-admin-password")
+        Self::with_mode_profile(OperationalMode::Production, profile)
     }
 
-    /// Test helper: allow prod-profile live writes (gate G5).
     pub async fn test_set_live_writes_approved(&self, approved: bool) {
         self.inner.write().await.live_writes_approved = approved;
     }
 
-    pub fn with_mode_and_password(mode: Mode, password: &str) -> Self {
-        Self::with_mode_profile_and_password(mode, Profile::test(), password)
-    }
-
-    pub fn with_mode_profile_and_password(mode: Mode, profile: Profile, password: &str) -> Self {
-        let salt = SaltString::generate(&mut rand::thread_rng());
-        let hash = Argon2::default()
-            .hash_password(password.as_bytes(), &salt)
-            .expect("hash")
-            .to_string();
+    pub fn with_mode_profile(operational_mode: OperationalMode, profile: Profile) -> Self {
         Self {
-            admin_hash: hash,
             inner: Arc::new(RwLock::new(Inner {
                 profile,
-                mode,
+                operational_mode,
                 plans: HashMap::new(),
                 plan_approvals: HashMap::new(),
                 submit_rates: HashMap::new(),
@@ -102,69 +89,57 @@ impl MockDaemon {
         }
     }
 
-    fn require_scope(caller: &CallerIdentity, scope: Scope) -> Result<(), ApiError> {
+    fn require_scope(caller: &CallerIdentity, scope: Scope) -> Result<(), BackendError> {
         if caller.scopes().contains(scope) {
             Ok(())
         } else {
-            Err(ApiError::ForbiddenScope)
+            Err(BackendError::ForbiddenScope)
         }
     }
 
-    fn verify_password(hash: &str, password: &str) -> bool {
-        let parsed = match PasswordHash::new(hash) {
-            Ok(p) => p,
-            Err(_) => return false,
-        };
-        Argon2::default()
-            .verify_password(password.as_bytes(), &parsed)
-            .is_ok()
-    }
-
     fn plan_key(id: &PlanId) -> String {
-        id.to_hex()
+        id.0.clone()
     }
 
     fn resolve_plan_id(
         plans: &HashMap<String, ImmutablePlan>,
         plan_id_or_prefix: &str,
-    ) -> Result<PlanId, ApiError> {
+    ) -> Result<PlanId, BackendError> {
         let id = plan_id_or_prefix.trim();
         if id.len() == 32 {
-            return PlanId::from_hex(id);
+            return plan_id_from_hex(id);
         }
         if id.len() == 8 {
             let matches: Vec<&String> = plans.keys().filter(|k| k.starts_with(id)).collect();
             return match matches.len() {
-                0 => Err(ApiError::PlanNotFound),
-                1 => PlanId::from_hex(matches[0]),
-                _ => Err(ApiError::AmbiguousPlanPrefix),
+                0 => Err(BackendError::PlanNotFound),
+                1 => plan_id_from_hex(matches[0]),
+                _ => Err(BackendError::AmbiguousPlanPrefix),
             };
         }
-        Err(ApiError::BadRequest("plan_id"))
+        Err(BackendError::BadRequest("plan_id"))
     }
 
     fn validate_plan_approval(
         stored: &StoredApproval,
         plan_id: &PlanId,
         diff_hash: &DiffHash,
-        profile: &Profile,
-    ) -> Result<(), ApiError> {
-        if stored.consumed {
-            return Err(ApiError::InvalidApproval);
+        profile: Profile,
+        now_ms: u64,
+    ) -> Result<(), BackendError> {
+        if stored.approval.consumed {
+            return Err(BackendError::InvalidApproval);
         }
-        if stored.approval.expires_at < OffsetDateTime::now_utc() {
-            return Err(ApiError::InvalidApproval);
+        if !stored.approval.active(now_ms, profile) {
+            return Err(BackendError::InvalidApproval);
         }
-        if &stored.approval.plan_id != plan_id
-            || stored.approval.diff_hash != *diff_hash
-            || stored.approval.profile != *profile
-        {
-            return Err(ApiError::InvalidApproval);
+        if !stored.approval.matches(plan_id, diff_hash, profile) {
+            return Err(BackendError::InvalidApproval);
         }
         Ok(())
     }
 
-    fn check_submit_rate(state: &mut SubmitRateState) -> Result<(), ApiError> {
+    fn check_submit_rate(state: &mut SubmitRateState) -> Result<(), BackendError> {
         let now = Instant::now();
         if now.duration_since(state.hour_window) >= StdDuration::from_secs(3600) {
             state.hour_window = now;
@@ -177,14 +152,13 @@ impl MockDaemon {
         if state.hour_count >= APPROVAL_SUBMIT_LIMIT_PER_HOUR
             || state.day_count >= APPROVAL_SUBMIT_LIMIT_PER_DAY
         {
-            return Err(ApiError::ApprovalRateLimited);
+            return Err(BackendError::ApprovalRateLimited);
         }
         state.hour_count += 1;
         state.day_count += 1;
         Ok(())
     }
 
-    /// Test helper: backdate a stored plan so the approval window appears expired.
     pub async fn test_backdate_plan(&self, plan_id: PlanId, by: time::Duration) {
         let mut inner = self.inner.write().await;
         if let Some(plan) = inner.plans.get_mut(&Self::plan_key(&plan_id)) {
@@ -199,44 +173,29 @@ impl Default for MockDaemon {
     }
 }
 
-fn plan_summary_from(
-    plan_id: &PlanId,
-    diff_hash: &DiffHash,
-    summary_text: &str,
-    requested_by: &Option<RequestedBy>,
-    plan: &ImmutablePlan,
-) -> PlanSummary {
-    let expires_at = (plan.stored_at + plan_storage_ttl())
-        .format(&time::format_description::well_known::Rfc3339)
-        .unwrap_or_else(|_| "unknown".into());
-    PlanSummary {
-        plan_id: plan_id.clone(),
-        diff_hash: diff_hash.clone(),
-        summary: summary_text.to_string(),
-        expires_at,
-        requested_by: requested_by.clone(),
-    }
+fn now_ms() -> u64 {
+    OffsetDateTime::now_utc().unix_timestamp() as u64 * 1000
+}
+
+fn expires_at_ms_from_ttl(ttl: time::Duration) -> u64 {
+    (OffsetDateTime::now_utc() + ttl).unix_timestamp() as u64 * 1000
 }
 
 #[async_trait]
 impl DaemonBackend for MockDaemon {
-    async fn status(&self, caller: &CallerIdentity) -> Result<DaemonStatus, ApiError> {
+    async fn status(&self, caller: &CallerIdentity) -> Result<DaemonStatus, BackendError> {
         Self::require_scope(caller, Scope::Read)?;
         let inner = self.inner.read().await;
         Ok(DaemonStatus {
-            profile: serde_json::to_string(&inner.profile)
-                .unwrap_or_else(|_| "\"test\"".into())
-                .trim_matches('"')
-                .to_string(),
-            simulator: true,
-            mode: inner.mode,
+            profile: inner.profile,
+            operational_mode: inner.operational_mode,
             locked: false,
             live_writes_approved: inner.live_writes_approved,
             queue_depth: 0,
         })
     }
 
-    async fn list_backups(&self, caller: &CallerIdentity) -> Result<BackupList, ApiError> {
+    async fn list_backups(&self, caller: &CallerIdentity) -> Result<BackupList, BackendError> {
         Self::require_scope(caller, Scope::Read)?;
         let inner = self.inner.read().await;
         Ok(BackupList {
@@ -244,7 +203,7 @@ impl DaemonBackend for MockDaemon {
         })
     }
 
-    async fn backup_now(&self, caller: &CallerIdentity) -> Result<BackupInfo, ApiError> {
+    async fn backup_now(&self, caller: &CallerIdentity) -> Result<BackupInfo, BackendError> {
         Self::require_scope(caller, Scope::Plan)?;
         let mut inner = self.inner.write().await;
         inner.next_job += 1;
@@ -262,7 +221,7 @@ impl DaemonBackend for MockDaemon {
         &self,
         caller: &CallerIdentity,
         req: ReadFieldsRequest,
-    ) -> Result<ReadFieldsResponse, ApiError> {
+    ) -> Result<ReadFieldsResponse, BackendError> {
         Self::require_scope(caller, Scope::Read)?;
         Ok(ReadFieldsResponse {
             fields: vec![FieldValue {
@@ -276,7 +235,7 @@ impl DaemonBackend for MockDaemon {
         &self,
         caller: &CallerIdentity,
         req: PlanChangeRequest,
-    ) -> Result<PlanSummary, ApiError> {
+    ) -> Result<PlanSummary, BackendError> {
         Self::require_scope(caller, Scope::Plan)?;
         let inner = self.inner.read().await;
         let profile = inner.profile;
@@ -284,16 +243,17 @@ impl DaemonBackend for MockDaemon {
         let creator = caller.token_id().cloned();
         let plan = ImmutablePlan::from_request(profile, req, creator)?;
         let summary_text = format!("{} → {}", plan.request.field, plan.request.new_value);
-        let requested_by = caller.token_id().map(|id| RequestedBy {
-            agent: match caller {
-                CallerIdentity::Mcp(t) => t.agent_name.clone(),
-                _ => "admin".into(),
-            },
-            token_id: id.clone(),
-        });
         let plan_id = plan.id.clone();
         let diff_hash = plan.diff_hash.clone();
-        let summary = plan_summary_from(&plan_id, &diff_hash, &summary_text, &requested_by, &plan);
+        let expires_at = (plan.stored_at + plan_storage_ttl())
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap_or_else(|_| "unknown".into());
+        let summary = PlanSummary {
+            plan_id: plan_id.clone(),
+            diff_hash,
+            summary: summary_text,
+            expires_at,
+        };
         let mut inner = self.inner.write().await;
         inner.plans.insert(Self::plan_key(&plan_id), plan);
         Ok(summary)
@@ -304,31 +264,31 @@ impl DaemonBackend for MockDaemon {
         caller: &CallerIdentity,
         plan_id_or_prefix: &str,
         diff_hash: DiffHash,
-        profile: &Profile,
-    ) -> Result<Approval, ApiError> {
+        profile: Profile,
+    ) -> Result<Approval, BackendError> {
         Self::require_scope(caller, Scope::Approve)?;
-        let approver = caller.token_id().cloned().ok_or(ApiError::ForbiddenScope)?;
+        let approver = caller.token_id().cloned().ok_or(BackendError::ForbiddenScope)?;
         let mut inner = self.inner.write().await;
         let plan_id = Self::resolve_plan_id(&inner.plans, plan_id_or_prefix)?;
         let plan = inner
             .plans
             .get(&Self::plan_key(&plan_id))
-            .ok_or(ApiError::PlanNotFound)?;
+            .ok_or(BackendError::PlanNotFound)?;
         if plan.diff_hash != diff_hash {
-            return Err(ApiError::InvalidApproval);
+            return Err(BackendError::InvalidApproval);
         }
-        if &plan.profile != profile {
-            return Err(ApiError::BadRequest("profile mismatch"));
+        if plan.profile != profile {
+            return Err(BackendError::BadRequest("profile mismatch"));
         }
         if plan.is_expired(plan_storage_ttl()) {
-            return Err(ApiError::PlanExpired);
+            return Err(BackendError::PlanExpired);
         }
         let requester = plan
             .creator_token
             .clone()
-            .ok_or(ApiError::BadRequest("plan has no requester token"))?;
+            .ok_or(BackendError::BadRequest("plan has no requester token"))?;
         if requester == approver {
-            return Err(ApiError::ApproverMustDiffer);
+            return Err(BackendError::ApproverMustDiffer);
         }
         let rate = inner
             .submit_rates
@@ -340,14 +300,17 @@ impl DaemonBackend for MockDaemon {
                 day_count: 0,
             });
         Self::check_submit_rate(rate)?;
-        let approval = Approval::new(plan_id, diff_hash, inner.profile, approver.clone());
-        inner.plan_approvals.insert(
-            approval.id.0.clone(),
-            StoredApproval {
-                approval: approval.clone(),
-                consumed: false,
-            },
-        );
+        let approval = Approval {
+            plan_id,
+            diff_hash,
+            profile: inner.profile,
+            approver_token: approver,
+            expires_at_ms: expires_at_ms_from_ttl(approval_ttl()),
+            consumed: false,
+        };
+        inner
+            .plan_approvals
+            .insert(approval.plan_id.0.clone(), StoredApproval { approval: approval.clone() });
         Ok(approval)
     }
 
@@ -356,43 +319,42 @@ impl DaemonBackend for MockDaemon {
         caller: &CallerIdentity,
         plan_id: PlanId,
         diff_hash: DiffHash,
-    ) -> Result<ApplyJob, ApiError> {
+    ) -> Result<ApplyJob, BackendError> {
         Self::require_scope(caller, Scope::Write)?;
         let mut inner = self.inner.write().await;
         let active_profile = inner.profile;
-        if prod_profile_write_gates_active(&active_profile) && !inner.live_writes_approved {
-            return Err(ApiError::LiveWritesBlocked);
+        if prod_profile_write_gates_active(active_profile) && !inner.live_writes_approved {
+            return Err(BackendError::LiveWritesBlocked);
         }
         {
             let plan = inner
                 .plans
                 .get(&Self::plan_key(&plan_id))
-                .ok_or(ApiError::PlanNotFound)?;
+                .ok_or(BackendError::PlanNotFound)?;
             if plan.diff_hash != diff_hash {
-                return Err(ApiError::InvalidApproval);
+                return Err(BackendError::InvalidApproval);
             }
         }
-        let profile = active_profile;
-
-        if prod_profile_write_gates_active(&profile) {
+        if prod_profile_write_gates_active(active_profile) {
+            let now = now_ms();
             let key = inner.plan_approvals.iter().find_map(|(id, stored)| {
-                Self::validate_plan_approval(stored, &plan_id, &diff_hash, &profile).ok()?;
+                Self::validate_plan_approval(stored, &plan_id, &diff_hash, active_profile, now).ok()?;
                 Some(id.clone())
             });
             let Some(approval_key) = key else {
-                return Err(ApiError::ApprovalRequired(
-                    crate::types::ApplyApprovalRequiredResult {
+                return Err(BackendError::ApprovalRequired(
+                    ApplyApprovalRequiredResult {
                         plan_id,
                         diff_hash,
-                        status: crate::types::ApplyPlanAwaitingStatus::ApprovalRequired,
+                        status: ApplyPlanAwaitingStatus::ApprovalRequired,
                     },
                 ));
             };
             let stored = inner
                 .plan_approvals
                 .get_mut(&approval_key)
-                .ok_or(ApiError::InvalidApproval)?;
-            stored.consumed = true;
+                .ok_or(BackendError::InvalidApproval)?;
+            stored.approval.consumed = true;
         }
 
         inner.next_job += 1;
@@ -403,10 +365,10 @@ impl DaemonBackend for MockDaemon {
         })
     }
 
-    async fn rollback(&self, caller: &CallerIdentity, job_id: JobId) -> Result<ApplyJob, ApiError> {
+    async fn rollback(&self, caller: &CallerIdentity, job_id: JobId) -> Result<ApplyJob, BackendError> {
         Self::require_scope(caller, Scope::Write)?;
         if job_id.0.is_empty() {
-            return Err(ApiError::JobNotFound);
+            return Err(BackendError::JobNotFound);
         }
         Ok(ApplyJob {
             job_id,
@@ -414,16 +376,12 @@ impl DaemonBackend for MockDaemon {
             message: "simulated rollback".into(),
         })
     }
-
-    fn verify_admin_password(&self, password: &str) -> bool {
-        Self::verify_password(&self.admin_hash, password)
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::token_id::TokenId;
+    use kxprov_api::TokenId;
 
     #[test]
     fn ambiguous_plan_prefix_is_rejected() {
@@ -431,7 +389,7 @@ mod tests {
         plans.insert(
             "aabbccdd1111111111111111111111".into(),
             ImmutablePlan::from_request(
-                Profile::test(),
+                Profile::Test,
                 PlanChangeRequest {
                     table: 0x24,
                     record: 1,
@@ -447,7 +405,7 @@ mod tests {
         plans.insert(
             "aabbccdd2222222222222222222222".into(),
             ImmutablePlan::from_request(
-                Profile::test(),
+                Profile::Test,
                 PlanChangeRequest {
                     table: 0x24,
                     record: 2,
@@ -462,7 +420,7 @@ mod tests {
         );
         assert!(matches!(
             MockDaemon::resolve_plan_id(&plans, "aabbccdd"),
-            Err(ApiError::AmbiguousPlanPrefix)
+            Err(BackendError::AmbiguousPlanPrefix)
         ));
     }
 }

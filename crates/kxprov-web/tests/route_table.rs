@@ -1,16 +1,14 @@
-use std::sync::Arc;
-
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
-use kxprov_api::{MockDaemon, FORBIDDEN_MODE_PROFILE_PATHS, WEB_ROUTES};
-use kxprov_web::{router, WebState};
+use kxprov_mock::{FORBIDDEN_MODE_PROFILE_PATHS, WEB_ROUTES};
+use kxprov_web::router;
+
+mod support;
+use support::test_web_state;
 use tower::ServiceExt;
 
 fn app() -> axum::Router {
-    router(WebState {
-        backend: Arc::new(MockDaemon::new()),
-        session_id: Arc::from("route-table-test"),
-    })
+    router(test_web_state())
 }
 
 fn allowed_status(status: StatusCode) -> bool {

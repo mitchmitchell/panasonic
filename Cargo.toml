@@ -5,6 +5,7 @@ members = [
     "crates/kxtd1232-sim",
     "crates/kxprov",
     "crates/kxprov-api",
+    "crates/kxprov-mock",
     "crates/kxprov-web",
     "crates/kxprov-mcp",
     "crates/kxprov-gw",
@@ -38,7 +39,7 @@ argon2 = "0.5"
 askama = "0.12"
 axum = "0.8"
 axum-server = { version = "0.7", features = ["tls-rustls"] }
-axum_csrf = "0.12"
+axum_csrf = { version = "0.12", features = ["layer"] }
 base64 = "0.22"
 bytes = "1"
 hex = "0.4"
@@ -72,6 +73,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "=1.11.0", features = ["v4", "serde"] }
 kxprov-api = { path = "crates/kxprov-api" }
+kxprov-mock = { path = "crates/kxprov-mock" }
 kxprov-web = { path = "crates/kxprov-web" }
 kxprov-mcp = { path = "crates/kxprov-mcp" }
 kxtd1232 = { path = "crates/kxtd1232" }

@@ -1,7 +1,10 @@
 use kxprov_api::{
-    ApiError, ApplyApprovalRequiredResult, ApplyPlanAwaitingStatus, CallerIdentity, DaemonBackend,
-    DiffHash, McpTokenIdentity, MockDaemon, Mode, PlanChangeRequest, Profile, Scope, ScopeSet,
-    TokenId,
+    ApplyApprovalRequiredResult, ApplyPlanAwaitingStatus, DiffHash, OperationalMode, Profile,
+    Scope, TokenId,
+};
+use kxprov_mock::{
+    BackendError, CallerIdentity, DaemonBackend, McpTokenIdentity, MockDaemon, PlanChangeRequest,
+    ScopeSet,
 };
 
 fn tester() -> CallerIdentity {
@@ -31,7 +34,7 @@ fn approver() -> CallerIdentity {
     })
 }
 
-async fn sample_plan(daemon: &MockDaemon) -> kxprov_api::PlanSummary {
+async fn sample_plan(daemon: &MockDaemon) -> kxprov_mock::PlanSummary {
     daemon
         .plan_change(
             &comms(),
@@ -52,11 +55,11 @@ async fn enable_prod_live_writes(daemon: &MockDaemon) {
     daemon.test_set_live_writes_approved(true).await;
 }
 
-async fn submit_for_plan(daemon: &MockDaemon, plan: &kxprov_api::PlanSummary, profile: &Profile) {
+async fn submit_for_plan(daemon: &MockDaemon, plan: &kxprov_mock::PlanSummary, profile: Profile) {
     daemon
         .submit_approval(
             &approver(),
-            &plan.plan_id.to_hex(),
+            &plan.plan_id.0,
             plan.diff_hash.clone(),
             profile,
         )
@@ -72,13 +75,13 @@ async fn tester_cannot_apply_or_rollback() {
         daemon
             .apply_plan(&tester(), plan.plan_id, plan.diff_hash)
             .await,
-        Err(ApiError::ForbiddenScope)
+        Err(BackendError::ForbiddenScope)
     ));
 }
 
 #[tokio::test]
 async fn test_profile_apply_skips_prod_approval_gates() {
-    let daemon = MockDaemon::with_mode(Mode::Production);
+    let daemon = MockDaemon::with_operational_mode(OperationalMode::Production);
     let plan = sample_plan(&daemon).await;
     assert!(daemon
         .apply_plan(&comms(), plan.plan_id, plan.diff_hash)
@@ -88,7 +91,7 @@ async fn test_profile_apply_skips_prod_approval_gates() {
 
 #[tokio::test]
 async fn prod_profile_apply_without_approval_returns_status_only() {
-    let daemon = MockDaemon::with_profile(Profile::prod());
+    let daemon = MockDaemon::with_profile(Profile::Prod);
     enable_prod_live_writes(&daemon).await;
     let plan = sample_plan(&daemon).await;
     let err = daemon
@@ -97,7 +100,7 @@ async fn prod_profile_apply_without_approval_returns_status_only() {
         .expect_err("needs approval");
     assert!(matches!(
         err,
-        ApiError::ApprovalRequired(ApplyApprovalRequiredResult {
+        BackendError::ApprovalRequired(ApplyApprovalRequiredResult {
             status: ApplyPlanAwaitingStatus::ApprovalRequired,
             ..
         })
@@ -106,50 +109,50 @@ async fn prod_profile_apply_without_approval_returns_status_only() {
 
 #[tokio::test]
 async fn prod_profile_blocks_writes_until_live_writes_gate() {
-    let daemon = MockDaemon::with_profile(Profile::prod());
+    let daemon = MockDaemon::with_profile(Profile::Prod);
     let plan = sample_plan(&daemon).await;
     assert!(matches!(
         daemon
             .apply_plan(&comms(), plan.plan_id, plan.diff_hash)
             .await,
-        Err(ApiError::LiveWritesBlocked)
+        Err(BackendError::LiveWritesBlocked)
     ));
 }
 
 #[tokio::test]
 async fn submit_approval_then_apply_succeeds_on_prod_profile() {
-    let daemon = MockDaemon::with_profile(Profile::prod());
+    let daemon = MockDaemon::with_profile(Profile::Prod);
     enable_prod_live_writes(&daemon).await;
     let plan = sample_plan(&daemon).await;
     assert!(matches!(
         daemon
             .apply_plan(&comms(), plan.plan_id.clone(), plan.diff_hash.clone())
             .await,
-        Err(ApiError::ApprovalRequired(_))
+        Err(BackendError::ApprovalRequired(_))
     ));
-    submit_for_plan(&daemon, &plan, &Profile::prod()).await;
+    submit_for_plan(&daemon, &plan, Profile::Prod).await;
     let job = daemon
         .apply_plan(&comms(), plan.plan_id, plan.diff_hash)
         .await
         .expect("apply");
-    assert_eq!(job.state, kxprov_api::JobState::Succeeded);
+    assert_eq!(job.state, kxprov_mock::JobState::Succeeded);
 }
 
 #[tokio::test]
 async fn submit_approval_accepts_eight_hex_prefix() {
-    let daemon = MockDaemon::with_profile(Profile::prod());
+    let daemon = MockDaemon::with_profile(Profile::Prod);
     enable_prod_live_writes(&daemon).await;
     let plan = sample_plan(&daemon).await;
     let _ = daemon
         .apply_plan(&comms(), plan.plan_id.clone(), plan.diff_hash.clone())
         .await;
-    let prefix = &plan.plan_id.to_hex()[..8];
+    let prefix = &plan.plan_id.0[..8];
     daemon
         .submit_approval(
             &approver(),
             prefix,
             plan.diff_hash.clone(),
-            &Profile::prod(),
+            Profile::Prod,
         )
         .await
         .expect("prefix submit");
@@ -157,41 +160,41 @@ async fn submit_approval_accepts_eight_hex_prefix() {
 
 #[tokio::test]
 async fn submit_rejects_diff_hash_mismatch() {
-    let daemon = MockDaemon::with_profile(Profile::prod());
+    let daemon = MockDaemon::with_profile(Profile::Prod);
     let plan = sample_plan(&daemon).await;
     assert!(matches!(
         daemon
             .submit_approval(
                 &approver(),
-                &plan.plan_id.to_hex(),
+                &plan.plan_id.0,
                 DiffHash("0000000000000000000000000000000000000000000000000000000000000000".into()),
-                &Profile::prod(),
+                Profile::Prod,
             )
             .await,
-        Err(ApiError::InvalidApproval)
+        Err(BackendError::InvalidApproval)
     ));
 }
 
 #[tokio::test]
 async fn submit_rejects_profile_mismatch() {
-    let daemon = MockDaemon::with_profile(Profile::prod());
+    let daemon = MockDaemon::with_profile(Profile::Prod);
     let plan = sample_plan(&daemon).await;
     assert!(matches!(
         daemon
             .submit_approval(
                 &approver(),
-                &plan.plan_id.to_hex(),
+                &plan.plan_id.0,
                 plan.diff_hash.clone(),
-                &Profile::test(),
+                Profile::Test,
             )
             .await,
-        Err(ApiError::BadRequest("profile mismatch"))
+        Err(BackendError::BadRequest("profile mismatch"))
     ));
 }
 
 #[tokio::test]
 async fn approver_cannot_approve_own_plan() {
-    let daemon = MockDaemon::with_profile(Profile::prod());
+    let daemon = MockDaemon::with_profile(Profile::Prod);
     enable_prod_live_writes(&daemon).await;
     let solo = CallerIdentity::Mcp(McpTokenIdentity {
         token_id: TokenId("solo-token".into()),
@@ -227,41 +230,41 @@ async fn approver_cannot_approve_own_plan() {
         daemon
             .submit_approval(
                 &approver_same,
-                &plan.plan_id.to_hex(),
+                &plan.plan_id.0,
                 plan.diff_hash,
-                &Profile::prod(),
+                Profile::Prod,
             )
             .await,
-        Err(ApiError::ApproverMustDiffer)
+        Err(BackendError::ApproverMustDiffer)
     ));
 }
 
 #[tokio::test]
 async fn write_scope_cannot_submit_approval() {
-    let daemon = MockDaemon::with_profile(Profile::prod());
+    let daemon = MockDaemon::with_profile(Profile::Prod);
     let plan = sample_plan(&daemon).await;
     assert!(matches!(
         daemon
             .submit_approval(
                 &comms(),
-                &plan.plan_id.to_hex(),
+                &plan.plan_id.0,
                 plan.diff_hash.clone(),
-                &Profile::prod(),
+                Profile::Prod,
             )
             .await,
-        Err(ApiError::ForbiddenScope)
+        Err(BackendError::ForbiddenScope)
     ));
 }
 
 #[tokio::test]
 async fn approval_is_single_use_on_prod_profile() {
-    let daemon = MockDaemon::with_profile(Profile::prod());
+    let daemon = MockDaemon::with_profile(Profile::Prod);
     enable_prod_live_writes(&daemon).await;
     let plan = sample_plan(&daemon).await;
     let _ = daemon
         .apply_plan(&comms(), plan.plan_id.clone(), plan.diff_hash.clone())
         .await;
-    submit_for_plan(&daemon, &plan, &Profile::prod()).await;
+    submit_for_plan(&daemon, &plan, Profile::Prod).await;
     daemon
         .apply_plan(&comms(), plan.plan_id.clone(), plan.diff_hash.clone())
         .await
@@ -270,15 +273,15 @@ async fn approval_is_single_use_on_prod_profile() {
         daemon
             .apply_plan(&comms(), plan.plan_id, plan.diff_hash)
             .await,
-        Err(ApiError::ApprovalRequired(_))
+        Err(BackendError::ApprovalRequired(_))
     ));
 }
 
 #[tokio::test]
 async fn submit_approval_rate_limit() {
-    let daemon = MockDaemon::with_profile(Profile::prod());
+    let daemon = MockDaemon::with_profile(Profile::Prod);
     enable_prod_live_writes(&daemon).await;
-    for i in 0..kxprov_api::APPROVAL_SUBMIT_LIMIT_PER_HOUR {
+    for i in 0..kxprov_mock::APPROVAL_SUBMIT_LIMIT_PER_HOUR {
         let plan = daemon
             .plan_change(
                 &comms(),
@@ -299,9 +302,9 @@ async fn submit_approval_rate_limit() {
         daemon
             .submit_approval(
                 &approver(),
-                &plan.plan_id.to_hex(),
+                &plan.plan_id.0,
                 plan.diff_hash,
-                &Profile::prod(),
+                Profile::Prod,
             )
             .await
             .expect("submit");
@@ -311,11 +314,11 @@ async fn submit_approval_rate_limit() {
         daemon
             .submit_approval(
                 &approver(),
-                &plan.plan_id.to_hex(),
+                &plan.plan_id.0,
                 plan.diff_hash,
-                &Profile::prod(),
+                Profile::Prod,
             )
             .await,
-        Err(ApiError::ApprovalRateLimited)
+        Err(BackendError::ApprovalRateLimited)
     ));
 }

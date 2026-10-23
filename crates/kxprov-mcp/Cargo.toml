@@ -12,6 +12,7 @@ http-body-util.workspace = true
 http.workspace = true
 hex = "0.4"
 kxprov-api.workspace = true
+kxprov-mock.workspace = true
 time.workspace = true
 rmcp.workspace = true
 schemars = "1"

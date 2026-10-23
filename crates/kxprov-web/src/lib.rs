@@ -1,25 +1,45 @@
+mod login_limit;
+mod session;
 mod static_files;
 mod templates;
 
 use std::sync::Arc;
 
 use askama::Template;
-use axum::extract::{Form, Path, State};
-use axum::response::{Html, IntoResponse, Redirect};
+use axum::extract::{Form, FromRef, Path, State};
+use axum::http::HeaderMap;
+use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use axum::Router;
-use kxprov_api::{
-    ApiError, CallerIdentity, DaemonBackend, Mode, PlanChangeRequest, PlanSummary, WebAdminIdentity,
+use axum_csrf::{CsrfConfig, CsrfToken};
+use kxprov_api::{OperationalMode, Profile};
+use kxprov_mock::{
+    BackendError, CallerIdentity, DaemonBackend, PlanChangeRequest, PlanSummary, WebSessionIdentity,
 };
 use serde::Deserialize;
 use templates::DashboardTemplate;
+use tower_sessions::Session;
 
 pub use static_files::serve_static;
+pub use session::{reject_authenticated_login, require_web_session, SESSION_AUTH_KEY};
+pub use login_limit::LoginRateLimiter;
+
+pub trait PasswordVerifier: Send + Sync {
+    fn verify(&self, password: &str) -> bool;
+}
 
 #[derive(Clone)]
 pub struct WebState {
     pub backend: Arc<dyn DaemonBackend>,
-    pub session_id: Arc<str>,
+    pub admin: Arc<dyn PasswordVerifier>,
+    pub login_limiter: Arc<crate::login_limit::LoginRateLimiter>,
+    pub csrf_config: CsrfConfig,
+}
+
+impl FromRef<WebState> for CsrfConfig {
+    fn from_ref(state: &WebState) -> CsrfConfig {
+        state.csrf_config.clone()
+    }
 }
 
 pub fn router(state: WebState) -> Router {
@@ -34,6 +54,20 @@ pub fn router(state: WebState) -> Router {
 
 async fn static_file(Path(file): Path<String>) -> impl IntoResponse {
     serve_static(file).await
+}
+
+pub fn operational_mode_banner_label(mode: OperationalMode) -> &'static str {
+    match mode {
+        OperationalMode::Testing => "TESTING",
+        OperationalMode::Production => "PRODUCTION",
+    }
+}
+
+pub fn operational_mode_banner_class(mode: OperationalMode) -> &'static str {
+    match mode {
+        OperationalMode::Testing => "testing",
+        OperationalMode::Production => "production",
+    }
 }
 
 fn default_plan_form() -> (String, String, String, String) {
@@ -69,10 +103,10 @@ fn empty_dashboard(csrf: &str) -> DashboardTemplate {
     }
 }
 
-fn profile_badge_label(profile: &str) -> (String, String) {
-    let trimmed = profile.trim();
-    let class = trimmed.to_ascii_lowercase();
-    (trimmed.to_ascii_uppercase(), class)
+fn profile_badge_label(profile: Profile) -> (String, String) {
+    let wire = serde_json::to_string(&profile).unwrap_or_else(|_| "\"test\"".into());
+    let trimmed = wire.trim_matches('"');
+    (trimmed.to_ascii_uppercase(), trimmed.to_string())
 }
 
 async fn fill_dashboard_from_status(
@@ -82,10 +116,10 @@ async fn fill_dashboard_from_status(
 ) {
     if let Ok(status) = state.backend.status(caller).await {
         tpl.show_mode_banner = true;
-        tpl.mode_banner = status.mode.banner_label().into();
-        tpl.mode_banner_class = status.mode.banner_class().into();
+        tpl.mode_banner = operational_mode_banner_label(status.operational_mode).into();
+        tpl.mode_banner_class = operational_mode_banner_class(status.operational_mode).into();
         tpl.show_profile_badge = true;
-        let (badge, badge_class) = profile_badge_label(&status.profile);
+        let (badge, badge_class) = profile_badge_label(status.profile);
         tpl.profile_badge = badge;
         tpl.profile_badge_class = badge_class;
         tpl.show_status = true;
@@ -94,56 +128,115 @@ async fn fill_dashboard_from_status(
     }
 }
 
-fn apply_plan_result(tpl: &mut DashboardTemplate, summary: &PlanSummary, mode: Mode) {
+fn apply_plan_result(tpl: &mut DashboardTemplate, summary: &PlanSummary, mode: OperationalMode) {
     tpl.show_plan = true;
-    tpl.plan_id_hex = summary.plan_id.to_hex();
-    tpl.diff_hash_hex = summary.diff_hash.to_hex();
+    tpl.plan_id_hex = summary.plan_id.0.clone();
+    tpl.diff_hash_hex = summary.diff_hash.0.clone();
     tpl.plan_summary = summary.summary.clone();
-    if mode == Mode::Production {
-        let hex = summary.diff_hash.to_hex();
-        tpl.diff_hash_prefix = hex.chars().take(8).collect();
+    if mode == OperationalMode::Production {
+        tpl.diff_hash_prefix = summary.diff_hash.0.chars().take(8).collect();
         tpl.plan_expires_at = summary.expires_at.clone();
         tpl.show_production_plan_hint = true;
     }
 }
 
-fn plan_error_message(err: ApiError) -> String {
+fn plan_error_message(err: BackendError) -> String {
     match err {
-        ApiError::ForbiddenScope => {
+        BackendError::ForbiddenScope => {
             "You don't have permission to create plans with this session.".into()
         }
-        ApiError::BadRequest(field) => format!("Invalid input: {field}."),
-        ApiError::PlanExpired => "That plan window has expired. Create a new plan.".into(),
+        BackendError::BadRequest(field) => format!("Invalid input: {field}."),
+        BackendError::PlanExpired => "That plan window has expired. Create a new plan.".into(),
         _ => "Could not create the plan. Check your entries and try again.".into(),
     }
 }
 
-async fn login_form() -> impl IntoResponse {
+fn caller_from_session(session: &Session) -> CallerIdentity {
+    let session_key = session.id().map(|id| id.to_string()).unwrap_or_default();
+    CallerIdentity::Web(WebSessionIdentity { session_key })
+}
+
+fn client_ip(headers: &HeaderMap) -> String {
+    if let Some(v) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
+        if let Some(first) = v.split(',').next() {
+            return first.trim().to_string();
+        }
+    }
+    "unknown".into()
+}
+
+async fn login_form(csrf_token: CsrfToken) -> impl IntoResponse {
+    let token = csrf_token
+        .authenticity_token()
+        .unwrap_or_else(|_| String::new());
+    (
+        csrf_token,
+        Html(
+            templates::LoginTemplate {
+                banner: "Web sign-in".into(),
+                show_error: false,
+                error: String::new(),
+                csrf_token: token,
+            }
+            .render()
+            .unwrap_or_default(),
+        ),
+    )
+}
+
+#[derive(Deserialize)]
+struct LoginForm {
+    password: String,
+    #[serde(rename = "_csrf")]
+    _csrf: String,
+}
+
+#[derive(Deserialize)]
+struct LogoutForm {
+    #[serde(rename = "_csrf")]
+    _csrf: String,
+}
+
+async fn login_submit(
+    State(state): State<WebState>,
+    session: Session,
+    headers: HeaderMap,
+    Form(form): Form<LoginForm>,
+) -> Response {
+    let ip = client_ip(&headers);
+    let acct_key = "acct:admin".to_string();
+    let ip_key = format!("ip:{ip}");
+    if !state.login_limiter.allow(&acct_key).await || !state.login_limiter.allow(&ip_key).await {
+        return login_error_html("", "Too many attempts. Try again later.").into_response();
+    }
+    if !state.admin.verify(&form.password) {
+        state
+            .login_limiter
+            .record_failure(&acct_key, &ip_key)
+            .await;
+        return Redirect::to("/login?error=1").into_response();
+    }
+    state.login_limiter.reset(&acct_key, &ip_key).await;
+    let _ = session.cycle_id().await;
+    let _ = session.insert(crate::session::SESSION_AUTH_KEY, true).await;
+    Redirect::to("/").into_response()
+}
+
+fn login_error_html(csrf: &str, message: &str) -> Html<String> {
     Html(
         templates::LoginTemplate {
-            banner: "Simulator profile".into(),
-            show_error: false,
-            error: String::new(),
-            csrf_token: String::new(),
+            banner: "Web sign-in".into(),
+            show_error: true,
+            error: message.into(),
+            csrf_token: csrf.to_string(),
         }
         .render()
         .unwrap_or_default(),
     )
 }
 
-#[derive(Deserialize)]
-struct LoginForm {
-    #[serde(rename = "password")]
-    _password: String,
-    #[serde(rename = "_csrf")]
-    _csrf: String,
-}
-
-async fn login_submit() -> impl IntoResponse {
-    Redirect::to("/")
-}
-
-async fn logout() -> impl IntoResponse {
+async fn logout(session: Session, Form(_form): Form<LogoutForm>) -> impl IntoResponse {
+    let _ = session.delete().await;
     Redirect::to("/login")
 }
 
@@ -157,15 +250,16 @@ pub struct PlanForm {
     pub _csrf: String,
 }
 
-fn admin_caller(state: &WebState) -> CallerIdentity {
-    CallerIdentity::WebAdmin(WebAdminIdentity {
-        session_id: state.session_id.to_string(),
-    })
-}
-
-async fn dashboard(State(state): State<WebState>) -> impl IntoResponse {
-    let caller = admin_caller(&state);
-    let mut tpl = empty_dashboard("");
+async fn dashboard(
+    State(state): State<WebState>,
+    session: Session,
+    csrf_token: CsrfToken,
+) -> impl IntoResponse {
+    let token = csrf_token
+        .authenticity_token()
+        .unwrap_or_else(|_| String::new());
+    let caller = caller_from_session(&session);
+    let mut tpl = empty_dashboard(&token);
     fill_dashboard_from_status(&mut tpl, &state, &caller).await;
     Html(tpl.render().unwrap_or_default())
 }
@@ -201,9 +295,17 @@ fn parse_plan_form(form: &PlanForm) -> Result<(u8, u16, PlanChangeRequest), Stri
     ))
 }
 
-async fn plan_change(State(state): State<WebState>, Form(form): Form<PlanForm>) -> Html<String> {
-    let caller = admin_caller(&state);
-    let mut tpl = empty_dashboard("");
+async fn plan_change(
+    State(state): State<WebState>,
+    session: Session,
+    csrf_token: CsrfToken,
+    Form(form): Form<PlanForm>,
+) -> Html<String> {
+    let token = csrf_token
+        .authenticity_token()
+        .unwrap_or_else(|_| String::new());
+    let caller = caller_from_session(&session);
+    let mut tpl = empty_dashboard(&token);
     tpl.table_value = form.table.clone();
     tpl.record_value = form.record.clone();
     tpl.field_value = form.field.clone();
@@ -214,8 +316,8 @@ async fn plan_change(State(state): State<WebState>, Form(form): Form<PlanForm>) 
         .backend
         .status(&caller)
         .await
-        .map(|s| s.mode)
-        .unwrap_or(Mode::Testing);
+        .map(|s| s.operational_mode)
+        .unwrap_or(OperationalMode::Testing);
 
     let request = match parse_plan_form(&form) {
         Ok((_table, _record, req)) => req,
@@ -227,9 +329,7 @@ async fn plan_change(State(state): State<WebState>, Form(form): Form<PlanForm>) 
     };
 
     match state.backend.plan_change(&caller, request).await {
-        Ok(summary) => {
-            apply_plan_result(&mut tpl, &summary, mode);
-        }
+        Ok(summary) => apply_plan_result(&mut tpl, &summary, mode),
         Err(err) => {
             tpl.show_plan_form_error = true;
             tpl.plan_form_error = plan_error_message(err);

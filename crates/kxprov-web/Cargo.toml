@@ -12,8 +12,12 @@ axum.workspace = true
 axum_csrf.workspace = true
 hex = "0.4"
 kxprov-api.workspace = true
+kxprov-mock.workspace = true
+tower-sessions.workspace = true
+serde_json.workspace = true
 serde.workspace = true
 time.workspace = true
+tokio = { workspace = true, features = ["sync"] }
 
 [dev-dependencies]
 axum = { workspace = true }

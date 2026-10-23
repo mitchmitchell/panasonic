@@ -1,4 +1,4 @@
-use kxprov_api::{
+use kxprov_mock::{
     mcp_tool_mutates_mode_or_profile, FORBIDDEN_MODE_PROFILE_PATHS, MCP_TOOLS, WEB_ROUTES,
 };
 
@@ -39,7 +39,7 @@ fn mcp_tools_are_unique() {
 #[test]
 fn canonical_tables_do_not_mutate_mode_or_profile() {
     for route in WEB_ROUTES {
-        assert!(!kxprov_api::http_route_mutates_mode_or_profile(route));
+        assert!(!kxprov_mock::http_route_mutates_mode_or_profile(route));
     }
     for name in MCP_TOOLS {
         assert!(!mcp_tool_mutates_mode_or_profile(name));

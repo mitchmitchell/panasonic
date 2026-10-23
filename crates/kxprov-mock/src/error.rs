@@ -1,9 +1,8 @@
-use crate::types::ApplyApprovalRequiredResult;
-
+use kxprov_api::ApplyApprovalRequiredResult;
 use thiserror::Error;
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
-pub enum ApiError {
+pub enum BackendError {
     #[error("forbidden: insufficient scope")]
     ForbiddenScope,
     #[error("forbidden: admin web session required")]
@@ -12,8 +11,6 @@ pub enum ApiError {
     Unauthorized,
     #[error("approval required")]
     ApprovalRequired(ApplyApprovalRequiredResult),
-    #[error("rollback approval required")]
-    RollbackApprovalRequired { job_id: String },
     #[error("approval invalid or expired")]
     InvalidApproval,
     #[error("approver must differ from plan requester")]
@@ -34,6 +31,4 @@ pub enum ApiError {
     JobNotFound,
     #[error("invalid request: {0}")]
     BadRequest(&'static str),
-    #[error("re-authentication failed")]
-    ReauthFailed,
 }

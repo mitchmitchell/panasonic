@@ -1,17 +1,14 @@
-use std::sync::Arc;
-
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
-use kxprov_api::MockDaemon;
-use kxprov_web::{router, WebState};
+use kxprov_web::router;
 use tower::ServiceExt;
+
+mod support;
+use support::test_web_state;
 
 #[tokio::test]
 async fn static_logo_is_served() {
-    let app = router(WebState {
-        backend: Arc::new(MockDaemon::new()),
-        session_id: Arc::from("test"),
-    });
+    let app = router(test_web_state());
     let resp = app
         .oneshot(
             Request::builder()
@@ -29,10 +26,7 @@ async fn static_logo_is_served() {
 
 #[tokio::test]
 async fn site_css_is_served() {
-    let app = router(WebState {
-        backend: Arc::new(MockDaemon::new()),
-        session_id: Arc::from("test"),
-    });
+    let app = router(test_web_state());
     let resp = app
         .oneshot(
             Request::builder()

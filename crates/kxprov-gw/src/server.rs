@@ -1,18 +1,22 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::body::Body;
 use axum::extract::{Request, State};
 use axum::http::{header, HeaderMap, StatusCode};
-use axum::middleware::from_fn_with_state;
+use axum::middleware::{from_fn, from_fn_with_state};
 use axum::response::{IntoResponse, Response};
 use axum::routing::any;
 use axum::Router;
 use axum_csrf::{CsrfConfig, CsrfLayer};
 use axum_server::tls_rustls::RustlsConfig;
-use kxprov_api::{CallerIdentity, DaemonBackend, McpTokenIdentity, MockDaemon, TokenId};
+use kxprov_api::TokenId;
+use kxprov_mock::{CallerIdentity, DaemonBackend, McpTokenIdentity, MockDaemon};
 use kxprov_mcp::{KxMcpServer, MCP_CALLER};
-use kxprov_web::WebState;
+use kxprov_web::{
+    reject_authenticated_login, require_web_session, LoginRateLimiter, PasswordVerifier, WebState,
+};
 use rmcp::transport::streamable_http_server::{
     session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
 };
@@ -20,14 +24,15 @@ use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 use tower_http::set_header::SetResponseHeaderLayer;
 use tower_service::Service;
+use tower_sessions::cookie::SameSite;
 use tower_sessions::cookie::time::Duration as CookieDuration;
 use tower_sessions::{Expiry, MemoryStore, SessionManagerLayer};
 
-use crate::auth::McpTokenStore;
+use crate::auth::{AdminPassword, McpTokenStore};
 use crate::config::GatewayConfig;
 use crate::host_origin::{host_origin_middleware, security_headers, HostOriginConfig};
+use crate::post_origin::post_origin_middleware;
 use crate::ratelimit::{rate_limit_middleware, RateLimitState, RateLimiter};
-
 pub struct GatewayHandles {
     pub web_tailnet: SocketAddr,
     pub web_lan: SocketAddr,
@@ -35,16 +40,28 @@ pub struct GatewayHandles {
     pub shutdown: oneshot::Sender<()>,
 }
 
+struct AdminVerifier(Arc<AdminPassword>);
+
+impl PasswordVerifier for AdminVerifier {
+    fn verify(&self, password: &str) -> bool {
+        self.0.verify(password)
+    }
+}
+
 pub async fn serve(
     config: GatewayConfig,
     backend: Option<Arc<dyn DaemonBackend>>,
 ) -> anyhow::Result<GatewayHandles> {
     let backend = backend.unwrap_or_else(|| Arc::new(MockDaemon::new()) as Arc<dyn DaemonBackend>);
+    let admin = Arc::new(AdminPassword::from_file(&config.admin_password_path)?);
     let token_store = Arc::new(McpTokenStore::from_file(&config.mcp_tokens_path)?);
 
+    let csrf_config = CsrfConfig::default();
     let web_state = WebState {
         backend: backend.clone(),
-        session_id: Arc::from("admin-session"),
+        admin: Arc::new(AdminVerifier(admin)),
+        login_limiter: Arc::new(LoginRateLimiter::new(5, Duration::from_secs(900))),
+        csrf_config: csrf_config.clone(),
     };
 
     let host_origin = HostOriginConfig {
@@ -63,24 +80,33 @@ pub async fn serve(
         }),
     };
 
+    let session_layer = SessionManagerLayer::new(MemoryStore::default())
+        .with_name("__Host-kxprov.sid")
+        .with_secure(true)
+        .with_http_only(true)
+        .with_same_site(SameSite::Strict)
+        .with_expiry(Expiry::OnInactivity(CookieDuration::seconds(
+            config.session_ttl_secs as i64,
+        )));
+
     let web_app = kxprov_web::router(web_state)
-        .layer(SetResponseHeaderLayer::overriding(
-            header::CONTENT_SECURITY_POLICY,
-            security_headers(),
-        ))
-        .layer(CsrfLayer::new(CsrfConfig::default()))
-        .layer(
-            SessionManagerLayer::new(MemoryStore::default())
-                .with_secure(false)
-                .with_expiry(Expiry::OnInactivity(CookieDuration::seconds(
-                    config.session_ttl_secs as i64,
-                ))),
-        )
+        .layer(from_fn(require_web_session))
+        .layer(from_fn(reject_authenticated_login))
+        .layer(CsrfLayer::new(csrf_config))
+        .layer(session_layer)
         .layer(from_fn_with_state(
             web_rate.clone(),
             web_identity_rate_limit,
         ))
-        .layer(from_fn_with_state(host_origin.clone(), host_origin_layer));
+        .layer(from_fn_with_state(
+            host_origin.clone(),
+            post_origin_middleware,
+        ))
+        .layer(from_fn_with_state(host_origin.clone(), host_origin_layer))
+        .layer(SetResponseHeaderLayer::overriding(
+            header::CONTENT_SECURITY_POLICY,
+            security_headers(),
+        ));
 
     let mcp_backend = backend.clone();
     let mut mcp_http_config = StreamableHttpServerConfig::default();
@@ -189,8 +215,14 @@ async fn web_identity_rate_limit(
     mut req: Request<Body>,
     next: axum::middleware::Next,
 ) -> Result<Response, StatusCode> {
-    req.extensions_mut()
-        .insert("web-admin:admin-session".to_string());
+    if let Some(session_key) = req
+        .extensions()
+        .get::<String>()
+        .cloned()
+        .or_else(|| Some("web-anonymous".into()))
+    {
+        req.extensions_mut().insert(session_key);
+    }
     rate_limit_middleware(State(rate), req, next).await
 }
 
