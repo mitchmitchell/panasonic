@@ -59,7 +59,8 @@ fn sample_config(dir: &TempDir) -> GatewayConfig {
         lan_ip: None,
         serve_hostname: None,
         web_https_port: 8443,
-        web_tailnet_bind: "127.0.0.1:0".into(),
+        web_serve_socket: dir.path().join("web-serve.sock"),
+        serve_socket_group: None,
         mcp_tailnet_bind: "127.0.0.1:0".into(),
         mcp_tokens_path: tokens_path.clone(),
         daemon_tokens_path: dir.path().join("tokens.json"),
@@ -85,7 +86,7 @@ async fn gateway_starts_from_sample_config() {
     let config = sample_config(&dir);
     let backend = Arc::new(MockDaemon::new());
     let handles = serve(config, backend).await.expect("gateway should start");
-    assert!(handles.web_tailnet.port() > 0);
+    assert!(handles.web_serve_socket.exists());
     assert!(handles.web_lan.port() > 0);
     assert!(handles.mcp.port() > 0);
     handles.shutdown.stop();

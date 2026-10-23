@@ -50,7 +50,7 @@ pub fn ensure_mcp_loopback_bind(field: &str, bind: &str) -> anyhow::Result<()> {
 pub struct WebListenerSettings {
     /// When true, login rate limits use the first `X-Forwarded-For` hop (Tailscale Serve).
     pub trust_x_forwarded_for: bool,
-    /// Linux SO_PEERCRED uid required to trust XFF on loopback (defaults to `tailscale` user).
+    /// SO_PEERCRED uid required to trust XFF on the Serve Unix socket (default root / `0`).
     pub serve_peer_uid: Option<u32>,
     /// When non-empty, overrides global `allowed_hosts` for this listener only.
     pub allowed_hosts: Vec<String>,
@@ -65,7 +65,10 @@ pub struct GatewayConfig {
     /// Site LAN address from config `lan_ip` or `KXPROV_LAN_IP`. When unset, HTTPS listens on loopback only.
     pub lan_ip: Option<IpAddr>,
     pub web_https_port: u16,
-    pub web_tailnet_bind: String,
+    /// Unix socket for Tailscale Serve (`tailscale serve … unix:…`).
+    pub web_serve_socket: PathBuf,
+    /// Group owning the Serve socket (mode 0660); gateway should run as root.
+    pub serve_socket_group: Option<String>,
     pub mcp_tailnet_bind: String,
     pub mcp_tokens_path: PathBuf,
     pub daemon_tokens_path: PathBuf,
@@ -93,7 +96,8 @@ impl Default for GatewayConfig {
             bind: None,
             lan_ip: None,
             web_https_port: 443,
-            web_tailnet_bind: "127.0.0.1:8080".into(),
+            web_serve_socket: "/run/kx-provision/web-serve.sock".into(),
+            serve_socket_group: Some("tailscale".into()),
             mcp_tailnet_bind: "127.0.0.1:8081".into(),
             mcp_tokens_path: "/etc/kx-provision/secrets/mcp-tokens.toml".into(),
             daemon_tokens_path: TOKENS_JSON.into(),
@@ -201,17 +205,27 @@ impl GatewayConfig {
 
     fn derived_web_tailnet_hosts(&self) -> Vec<String> {
         let mut out = Vec::new();
-        if let Ok(addr) = self.web_tailnet_bind.parse::<SocketAddr>() {
-            push_http_listener_hosts(&mut out, addr.port(), &["localhost", "127.0.0.1"]);
+        if let Some(ref name) = self.serve_hostname {
+            let trimmed = name.trim();
+            if !trimmed.is_empty() {
+                push_http_listener_hosts(&mut out, 80, &[trimmed]);
+                return out;
+            }
         }
+        push_http_listener_hosts(&mut out, 80, &["localhost", "127.0.0.1"]);
         out
     }
 
     fn derived_web_tailnet_origins(&self) -> Vec<String> {
         let mut out = Vec::new();
-        if let Ok(addr) = self.web_tailnet_bind.parse::<SocketAddr>() {
-            push_http_listener_origins(&mut out, addr.port(), &["localhost", "127.0.0.1"]);
+        if let Some(ref name) = self.serve_hostname {
+            let trimmed = name.trim();
+            if !trimmed.is_empty() {
+                push_http_listener_origins(&mut out, 80, &[trimmed]);
+                return out;
+            }
         }
+        push_http_listener_origins(&mut out, 80, &["localhost", "127.0.0.1"]);
         out
     }
 
@@ -273,8 +287,7 @@ impl GatewayConfig {
     }
 
     pub fn warn_if_insecure_bind(&self) {
-        let mut addrs: Vec<String> =
-            vec![self.web_tailnet_bind.clone(), self.mcp_tailnet_bind.clone()];
+        let mut addrs: Vec<String> = vec![self.mcp_tailnet_bind.clone()];
         addrs.extend(self.web_lan_bind_addresses());
         for raw in addrs {
             if let Ok(addr) = raw.parse::<std::net::SocketAddr>() {
@@ -362,26 +375,27 @@ impl GatewayConfig {
         Ok(config)
     }
 
-    /// Direct TLS / LAN HTTPS must not trust client-supplied `X-Forwarded-For` (only Serve-fronted loopback).
+    /// TCP listeners must not trust XFF; Serve Unix socket may when peer uid matches.
     pub fn validate_web_xff_trust(&self) -> anyhow::Result<()> {
         if self.web_https.trust_x_forwarded_for {
             anyhow::bail!(
                 "web_https.trust_x_forwarded_for must remain false; \
-                 enable trust_x_forwarded_for only on [web_tailnet] (Tailscale Serve fronted HTTP)"
+                 enable trust_x_forwarded_for only on [web_tailnet] (Tailscale Serve Unix HTTP)"
+            );
+        }
+        if self.web_tailnet.serve_peer_uid == Some(u32::MAX) {
+            anyhow::bail!(
+                "web_tailnet.serve_peer_uid cannot be 4294967295 (invalid / unset peer uid)"
             );
         }
         Ok(())
     }
 
-    /// Serve-fronted tailnet HTTP: trust XFF only when SO_PEERCRED matches [`WebListenerSettings::serve_peer_uid`].
+    /// Serve-fronted Unix HTTP: trust XFF only when SO_PEERCRED matches [`WebListenerSettings::serve_peer_uid`].
     pub fn tailnet_serve_trust(&self) -> crate::serve_peer::ServeTrustConfig {
         crate::serve_peer::ServeTrustConfig {
             trust_x_forwarded_for: self.web_tailnet.trust_x_forwarded_for,
-            expected_peer_uid: self
-                .web_tailnet
-                .serve_peer_uid
-                .or_else(crate::serve_peer::resolve_tailscaled_uid)
-                .unwrap_or(0),
+            expected_peer_uid: self.web_tailnet.serve_peer_uid.unwrap_or(0),
         }
     }
 
@@ -413,8 +427,16 @@ impl GatewayConfig {
         if let Some(v) = file.web_https_port {
             self.web_https_port = v;
         }
-        if let Some(v) = file.web_tailnet_bind {
-            self.web_tailnet_bind = v;
+        if let Some(v) = file.web_serve_socket {
+            self.web_serve_socket = v.into();
+        }
+        if let Some(v) = file.serve_socket_group {
+            let trimmed = v.trim();
+            if trimmed.is_empty() {
+                self.serve_socket_group = None;
+            } else {
+                self.serve_socket_group = Some(trimmed.to_string());
+            }
         }
         if let Some(v) = file.mcp_tokens_path {
             self.mcp_tokens_path = v.into();
@@ -490,7 +512,8 @@ struct FileConfig {
     bind: Option<String>,
     lan_ip: Option<String>,
     web_https_port: Option<u16>,
-    web_tailnet_bind: Option<String>,
+    web_serve_socket: Option<String>,
+    serve_socket_group: Option<String>,
     mcp_tailnet_bind: Option<String>,
     mcp_tokens_path: Option<String>,
     daemon_tokens_path: Option<String>,
@@ -653,12 +676,12 @@ mod tests {
     fn default_allowlist_uses_explicit_listener_ports() {
         let cfg = GatewayConfig::default();
         let hosts = cfg.effective_allowed_hosts();
-        assert!(hosts.contains(&"localhost:8080".to_string()));
-        assert!(hosts.contains(&"127.0.0.1:8080".to_string()));
+        assert!(hosts.contains(&"localhost:80".to_string()));
+        assert!(hosts.contains(&"127.0.0.1:80".to_string()));
         assert!(hosts.contains(&"127.0.0.1".to_string()));
         assert!(hosts.contains(&"127.0.0.1:443".to_string()));
         let origins = cfg.effective_allowed_origins();
-        assert!(origins.contains(&"http://localhost:8080".to_string()));
+        assert!(origins.contains(&"http://localhost:80".to_string()));
         assert!(origins.contains(&"https://127.0.0.1".to_string()));
     }
 

@@ -291,6 +291,11 @@ async fn login_submit(
         .map(|Extension(info)| info)
         .unwrap_or_else(|| WebConnectInfo::from_parts(peer, false));
     let ip_key = login_rate_ip_key(&headers, peer, trust, serve_proxy_trusted);
+    let session_prior_ip_key = session
+        .get::<String>(crate::session::SESSION_LOGIN_IP_KEY)
+        .await
+        .ok()
+        .flatten();
     let acct_key = "acct:admin".to_string();
     match state.login_limiter.precheck_login(&acct_key, &ip_key).await {
         LoginPrecheck::IpRateLimited(delay) => {
@@ -303,23 +308,31 @@ async fn login_submit(
     }
     let outcome = state
         .login_limiter
-        .enter_account_login(&acct_key, &ip_key, || async {
-            if !state.admin.verify(&form.password) {
-                state.login_limiter.record_failure(&acct_key, &ip_key).await;
-                return Redirect::to("/login?error=1").into_response();
-            }
-            state.login_limiter.on_success(&acct_key, &ip_key).await;
-            let _ = session.cycle_id().await;
-            let _ = csrf::rotate_for_session(&session).await;
-            let _ = session.insert(crate::session::SESSION_AUTH_KEY, true).await;
-            let _ = session
-                .insert(
-                    crate::session::SESSION_STARTED_MS_KEY,
-                    crate::session::now_unix_ms(),
-                )
-                .await;
-            Redirect::to("/").into_response()
-        })
+        .enter_account_login(
+            &acct_key,
+            &ip_key,
+            session_prior_ip_key.as_deref(),
+            || async {
+                if !state.admin.verify(&form.password) {
+                    state.login_limiter.record_failure(&acct_key, &ip_key).await;
+                    return Redirect::to("/login?error=1").into_response();
+                }
+                state.login_limiter.on_success(&acct_key, &ip_key).await;
+                let _ = session
+                    .insert(crate::session::SESSION_LOGIN_IP_KEY, ip_key.clone())
+                    .await;
+                let _ = session.cycle_id().await;
+                let _ = csrf::rotate_for_session(&session).await;
+                let _ = session.insert(crate::session::SESSION_AUTH_KEY, true).await;
+                let _ = session
+                    .insert(
+                        crate::session::SESSION_STARTED_MS_KEY,
+                        crate::session::now_unix_ms(),
+                    )
+                    .await;
+                Redirect::to("/").into_response()
+            },
+        )
         .await;
     match outcome {
         Ok(resp) => resp,

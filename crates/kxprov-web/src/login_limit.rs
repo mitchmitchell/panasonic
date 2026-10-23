@@ -32,6 +32,7 @@ pub struct LoginRateLimiter {
     by_key: Arc<Mutex<HashMap<String, Entry>>>,
     account_verify: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
     account_waiters: Arc<Mutex<HashMap<String, u32>>>,
+    last_success_ip: Arc<Mutex<HashMap<String, String>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -53,6 +54,7 @@ impl LoginRateLimiter {
             by_key: Arc::new(Mutex::new(HashMap::new())),
             account_verify: Arc::new(Mutex::new(HashMap::new())),
             account_waiters: Arc::new(Mutex::new(HashMap::new())),
+            last_success_ip: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -70,6 +72,7 @@ impl LoginRateLimiter {
         &self,
         account_key: &str,
         ip_key: &str,
+        session_prior_ip_key: Option<&str>,
         attempt: F,
     ) -> Result<T, LoginGateError>
     where
@@ -80,8 +83,10 @@ impl LoginRateLimiter {
         if ip_delay > Duration::ZERO {
             return Err(LoginGateError::IpRateLimited(ip_delay));
         }
-        let ip_clean = !self.key_has_failure_history(ip_key).await;
-        let bypass_waiter_cap = ip_clean;
+        let privileged = self
+            .is_privileged_login_ip(account_key, ip_key, session_prior_ip_key)
+            .await;
+        let bypass_waiter_cap = privileged || !self.key_has_failure_history(ip_key).await;
         let verify = self.account_verify_lock(account_key).await;
 
         if !bypass_waiter_cap {
@@ -92,6 +97,19 @@ impl LoginRateLimiter {
             }
             *n += 1;
         }
+
+        let soft = if privileged {
+            Duration::ZERO
+        } else {
+            let soft = {
+                let _slot = verify.lock().await;
+                self.reserve_account_soft_delay(account_key).await
+            };
+            if soft > Duration::ZERO {
+                tokio::time::sleep(soft.min(MAX_SOFT_PACE)).await;
+            }
+            soft
+        };
 
         let lock_result = tokio::time::timeout(MAX_ACCOUNT_QUEUE_WAIT, verify.lock()).await;
 
@@ -110,11 +128,21 @@ impl LoginRateLimiter {
             Ok(guard) => guard,
         };
 
-        let soft = self.reserve_account_soft_delay(account_key).await;
-        if soft > Duration::ZERO {
-            tokio::time::sleep(soft.min(MAX_SOFT_PACE)).await;
-        }
+        let _ = soft;
         Ok(attempt().await)
+    }
+
+    async fn is_privileged_login_ip(
+        &self,
+        account_key: &str,
+        ip_key: &str,
+        session_prior_ip_key: Option<&str>,
+    ) -> bool {
+        if session_prior_ip_key == Some(ip_key) {
+            return true;
+        }
+        let map = self.last_success_ip.lock().await;
+        map.get(account_key).is_some_and(|last| last == ip_key)
     }
 
     async fn account_verify_lock(&self, account_key: &str) -> Arc<Mutex<()>> {
@@ -173,6 +201,9 @@ impl LoginRateLimiter {
         let mut map = self.by_key.lock().await;
         map.remove(account_key);
         map.remove(ip_key);
+        drop(map);
+        let mut last = self.last_success_ip.lock().await;
+        last.insert(account_key.to_string(), ip_key.to_string());
     }
 
     async fn bump(&self, key: &str, cap: Duration) {
@@ -294,7 +325,7 @@ mod tests {
         ));
         let started = Instant::now();
         limiter
-            .enter_account_login("acct:admin", "ip:mitch-home", || async { "ok" })
+            .enter_account_login("acct:admin", "ip:mitch-home", None, || async { "ok" })
             .await
             .expect("clean IP enters account slot");
         assert!(started.elapsed() <= Duration::from_secs(3));
@@ -307,17 +338,21 @@ mod tests {
             Duration::from_secs(30),
             Duration::from_secs(300),
         ));
-        limiter.record_failure("acct:admin", "ip:dirty").await;
+        for i in 0..4 {
+            limiter
+                .record_failure("acct:admin", &format!("ip:dirty-{i}"))
+                .await;
+        }
         tokio::time::sleep(Duration::from_millis(250)).await;
         let barrier = Arc::new(tokio::sync::Barrier::new(4));
         let mut handles = Vec::new();
-        for _ in 0..4 {
+        for i in 0..4 {
             let limiter = Arc::clone(&limiter);
             let barrier = Arc::clone(&barrier);
             handles.push(tokio::spawn(async move {
                 barrier.wait().await;
                 limiter
-                    .enter_account_login("acct:admin", "ip:dirty", || async {
+                    .enter_account_login("acct:admin", &format!("ip:dirty-{i}"), None, || async {
                         tokio::time::sleep(Duration::from_millis(100)).await;
                     })
                     .await
@@ -344,17 +379,23 @@ mod tests {
             Duration::from_secs(30),
             Duration::from_secs(300),
         ));
-        limiter.record_failure("acct:admin", "ip:attacker").await;
+        limiter.on_success("acct:admin", "ip:admin-clean").await;
+        for i in 0..20 {
+            limiter
+                .record_failure("acct:admin", &format!("ip:attacker-{i}"))
+                .await;
+        }
         tokio::time::sleep(Duration::from_millis(250)).await;
         let n_attackers = 10;
         let barrier = Arc::new(tokio::sync::Barrier::new(n_attackers + 1));
-        for _ in 0..n_attackers {
+        for i in 0..n_attackers {
             let limiter = Arc::clone(&limiter);
             let barrier = Arc::clone(&barrier);
+            let ip = format!("ip:flood-{i}");
             tokio::spawn(async move {
                 barrier.wait().await;
                 let _ = limiter
-                    .enter_account_login("acct:admin", "ip:attacker", || async {
+                    .enter_account_login("acct:admin", &ip, None, || async {
                         tokio::time::sleep(Duration::from_millis(80)).await;
                         "bad"
                     })
@@ -364,7 +405,7 @@ mod tests {
         let started = Instant::now();
         barrier.wait().await;
         limiter
-            .enter_account_login("acct:admin", "ip:admin-clean", || async { "ok" })
+            .enter_account_login("acct:admin", "ip:admin-clean", None, || async { "ok" })
             .await
             .expect("admin login succeeds");
         assert!(
@@ -372,6 +413,44 @@ mod tests {
             "admin waited {:?}",
             started.elapsed()
         );
+    }
+
+    #[tokio::test]
+    async fn clean_admin_succeeds_under_account_backoff_cap_with_fresh_attacker_ips() {
+        let limiter = Arc::new(LoginRateLimiter::new(
+            Duration::from_millis(120),
+            Duration::from_secs(30),
+            Duration::from_secs(300),
+        ));
+        limiter.on_success("acct:admin", "ip:admin-home").await;
+        for i in 0..30 {
+            limiter
+                .record_failure("acct:admin", &format!("ip:seed-{i}"))
+                .await;
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        let n = 8;
+        let barrier = Arc::new(tokio::sync::Barrier::new(n + 1));
+        for i in 0..n {
+            let limiter = Arc::clone(&limiter);
+            let barrier = Arc::clone(&barrier);
+            let ip = format!("ip:burst-{i}");
+            tokio::spawn(async move {
+                barrier.wait().await;
+                let _ = limiter
+                    .enter_account_login("acct:admin", &ip, None, || async {
+                        tokio::time::sleep(Duration::from_millis(60)).await;
+                    })
+                    .await;
+            });
+        }
+        let started = Instant::now();
+        barrier.wait().await;
+        limiter
+            .enter_account_login("acct:admin", "ip:admin-home", None, || async { "ok" })
+            .await
+            .expect("privileged admin ip");
+        assert!(started.elapsed() < Duration::from_secs(3));
     }
 
     #[tokio::test]
@@ -393,7 +472,7 @@ mod tests {
             handles.push(tokio::spawn(async move {
                 barrier.wait().await;
                 limiter
-                    .enter_account_login("acct:admin", "ip:clean", || async {
+                    .enter_account_login("acct:admin", "ip:clean", None, || async {
                         order.fetch_add(1, Ordering::SeqCst)
                     })
                     .await

@@ -41,6 +41,11 @@ path = "tests/login_xff_rate_limit.rs"
 required-features = ["test-secret-skip"]
 
 [[test]]
+name = "serve_unix_xff"
+path = "tests/serve_unix_xff.rs"
+required-features = ["test-secret-skip"]
+
+[[test]]
 name = "run_a4_script"
 path = "tests/run_a4_script.rs"
 required-features = ["test-secret-skip"]
@@ -80,7 +85,7 @@ subtle.workspace = true
 time.workspace = true
 tokio.workspace = true
 tower.workspace = true
-nix = { version = "0.29", features = ["user", "socket"] }
+nix = { version = "0.29", features = ["user", "socket", "fs"] }
 tower-http = { workspace = true, features = ["set-header"] }
 tower-sessions.workspace = true
 tracing.workspace = true

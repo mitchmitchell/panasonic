@@ -64,7 +64,8 @@ JSON
 
 cat >"$etc_dir/gateway.toml" <<TOML
 bind = "127.0.0.1:8443"
-web_tailnet_bind = "127.0.0.1:8080"
+web_serve_socket = "$run_dir/web-serve.sock"
+serve_socket_group = ""
 mcp_tailnet_bind = "127.0.0.1:8081"
 mcp_tokens_path = "$secrets_dir/mcp-tokens.toml"
 gateway_bearer_path = "$secrets_dir/gateway-daemon.bearer"
@@ -77,6 +78,7 @@ tls_key_path = "$tls_dir/lan.key"
 trust_x_forwarded_for = true
 serve_peer_uid = $uid
 TOML
+# Local smoke hits the Serve Unix socket directly (no tailscaled required).
 
 chmod 600 "$data_dir/tokens.json" 2>/dev/null || true
 
@@ -122,14 +124,14 @@ if [[ "${1:-}" == "smoke" ]]; then
   "$bin_dir/kxprov-gw" --config "$etc_dir/gateway.toml" &
   echo $! >"$run_dir/kxprov-gw.pid"
   for _ in $(seq 1 100); do
-    if curl -sf -o /dev/null "http://127.0.0.1:8080/login"; then
+    if curl -sf --unix-socket "$run_dir/web-serve.sock" -H "Host: 127.0.0.1:80" -o /dev/null "http://127.0.0.1/login"; then
       break
     fi
     sleep 0.05
   done
-  curl -sf -o /dev/null "http://127.0.0.1:8080/login"
+  curl -sf --unix-socket "$run_dir/web-serve.sock" -H "Host: 127.0.0.1:80" -o /dev/null "http://127.0.0.1/login"
   curl -ksf -o /dev/null "https://127.0.0.1:8443/login"
-  status_code="$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:8080/status")"
+  status_code="$(curl -s --unix-socket "$run_dir/web-serve.sock" -H "Host: 127.0.0.1:80" -o /dev/null -w '%{http_code}' "http://127.0.0.1/status")"
   [[ "$status_code" == "303" || "$status_code" == "302" || "$status_code" == "307" ]]
   KXPROV_RUN_DIR="$run_dir" cargo test -p kxprovd --features test-util a4_smoke_busy_trigger -- --exact --nocapture
   echo "run-a4: smoke ok" >&2

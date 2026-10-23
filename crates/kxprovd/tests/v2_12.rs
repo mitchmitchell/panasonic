@@ -100,9 +100,6 @@ fn approver_with_plan_scope_rejected_at_mint() {
 #[tokio::test]
 async fn per_token_queue_depth_rate_limit_integration() {
     use kxprov_api::TOKEN_QUEUE_DEPTH_MAX;
-    use std::sync::Arc;
-    use tokio::sync::Barrier;
-
     let tmp = tempfile::tempdir().unwrap();
     let uid = nix::unistd::getuid().as_raw();
     let (_d, sock) = init_test_daemon(&tmp, uid, Profile::Sim);
@@ -115,13 +112,10 @@ async fn per_token_queue_depth_rate_limit_integration() {
     };
 
     let n = (TOKEN_QUEUE_DEPTH_MAX + 1) as usize;
-    let barrier = Arc::new(Barrier::new(n));
     let mut handles = Vec::new();
     for i in 0..n {
         let sock = sock.clone();
-        let barrier = barrier.clone();
         handles.push(tokio::spawn(async move {
-            barrier.wait().await;
             let mut c = ApiClient::connect(&sock).await.unwrap();
             c.call_auth(
                 RequestBody::PlanChange {

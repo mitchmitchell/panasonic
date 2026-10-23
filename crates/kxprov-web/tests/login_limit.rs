@@ -114,7 +114,7 @@ async fn account_soft_delay_capped_at_two_seconds() {
     }
     let started = std::time::Instant::now();
     limiter
-        .enter_account_login("acct:admin", "ip:clean", || async {})
+        .enter_account_login("acct:admin", "ip:clean", None, || async {})
         .await
         .expect("clean ip");
     assert!(started.elapsed() <= Duration::from_millis(2100));

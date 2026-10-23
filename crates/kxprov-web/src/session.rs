@@ -11,6 +11,8 @@ pub const WEB_SESSION_ABSOLUTE_SECS: u64 = 8 * 3600;
 
 pub const SESSION_AUTH_KEY: &str = "web_authenticated";
 pub const SESSION_STARTED_MS_KEY: &str = "web_session_started_ms";
+/// Last successful login IP key (`ip:…`) for pacing priority on the next attempt.
+pub const SESSION_LOGIN_IP_KEY: &str = "web_login_ip_key";
 
 pub fn is_public_web_path(path: &str) -> bool {
     path.starts_with("/static/") || path == "/login"

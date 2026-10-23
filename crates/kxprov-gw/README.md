@@ -6,11 +6,20 @@ One process hosting the web UI and MCP listeners.
 
 | Listener | Default |
 |----------|---------|
-| Web (tailnet / plain HTTP) | `127.0.0.1:8080` |
+| Web (Tailscale Serve / Unix HTTP) | `/run/kx-provision/web-serve.sock` (`0660`, group `tailscale`) |
 | Web (HTTPS, §5a) | `127.0.0.1:443`, plus `{lan_ip}:443` when configured |
 | MCP (tailnet / loopback) | `127.0.0.1:8081` |
 
-HTTPS never binds to `0.0.0.0`. `lan_ip` and `bind` / `--bind` / `KXPROV_BIND` are rejected at startup if the address is unspecified (`0.0.0.0` or `::`). Loopback is always included when using the §5a bind list.
+HTTPS and MCP use **TCP only** and never trust client `X-Forwarded-For`. Serve-fronted admin HTTP uses the Unix socket; XFF is honored only when SO_PEERCRED matches `[web_tailnet] serve_peer_uid` (default **0**, root, matching stock `tailscaled`).
+
+### Tailscale Serve
+
+```bash
+tailscale serve --bg --https=443 \
+  http://unix:/run/kx-provision/web-serve.sock
+```
+
+See `docs/design/tailscale-x-forwarded-for.md` for trust rules and config keys (`web_serve_socket`, `serve_socket_group`, `serve_peer_uid`).
 
 ### Site LAN IP (`lan_ip`)
 

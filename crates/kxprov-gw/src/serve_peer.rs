@@ -1,4 +1,4 @@
-//! Tailscale Serve loopback trust via SO_PEERCRED (Linux).
+//! Tailscale Serve trust via Unix socket SO_PEERCRED (Linux).
 
 use axum::extract::connect_info::Connected;
 use axum::extract::{ConnectInfo, Request};
@@ -7,10 +7,15 @@ use axum::response::Response;
 use axum::serve::IncomingStream;
 use kxprov_web::WebConnectInfo;
 use std::net::SocketAddr;
+use std::path::Path;
 use std::sync::OnceLock;
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::{UnixListener, UnixStream};
 
 static TAILNET_SERVE_TRUST: OnceLock<ServeTrustConfig> = OnceLock::new();
+
+/// Placeholder socket peer for Serve-fronted HTTP (real client IP comes from XFF when trusted).
+pub const SERVE_LOOPBACK_PEER: SocketAddr =
+    SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 0);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ServeTrustConfig {
@@ -19,54 +24,81 @@ pub struct ServeTrustConfig {
 }
 
 impl ServeTrustConfig {
-    pub fn evaluate(&self, peer_addr: SocketAddr, peer_uid: Option<u32>) -> bool {
-        self.trust_x_forwarded_for
-            && peer_addr.ip().is_loopback()
-            && peer_uid == Some(self.expected_peer_uid)
+    pub fn evaluate(&self, peer_uid: Option<u32>) -> bool {
+        self.trust_x_forwarded_for && peer_uid == Some(self.expected_peer_uid)
     }
 
-    pub fn web_connect_info(&self, stream: &TcpStream, peer_addr: SocketAddr) -> WebConnectInfo {
+    pub fn web_connect_info(&self, stream: &UnixStream) -> WebConnectInfo {
         let peer_uid = peer_connection_uid(stream);
-        let serve_proxy_trusted = self.evaluate(peer_addr, peer_uid);
-        WebConnectInfo::from_parts(peer_addr, serve_proxy_trusted)
+        let serve_proxy_trusted = self.evaluate(peer_uid);
+        WebConnectInfo::from_parts(SERVE_LOOPBACK_PEER, serve_proxy_trusted)
     }
 }
 
-/// Installed once before the tailnet accept loop starts (production gateway startup).
+/// Installed once before the Serve Unix accept loop starts (production gateway startup).
 pub fn install_tailnet_serve_trust(cfg: ServeTrustConfig) {
     let _ = TAILNET_SERVE_TRUST.set(cfg);
 }
 
-/// Per-connection info for the tailnet HTTP listener (SO_PEERCRED + socket peer).
+/// Per-connection info for the Serve Unix listener (SO_PEERCRED).
 #[derive(Clone, Debug)]
 pub struct TailnetConnect(pub WebConnectInfo);
 
-impl Connected<IncomingStream<'_, TcpListener>> for TailnetConnect {
-    fn connect_info(stream: IncomingStream<'_, TcpListener>) -> Self {
-        let peer = stream.remote_addr().to_owned();
-        let tcp = stream.io();
+impl Connected<IncomingStream<'_, UnixListener>> for TailnetConnect {
+    fn connect_info(stream: IncomingStream<'_, UnixListener>) -> Self {
+        let unix = stream.io();
         let info = TAILNET_SERVE_TRUST
             .get()
-            .map(|cfg| cfg.web_connect_info(tcp, peer))
-            .unwrap_or_else(|| WebConnectInfo::from_parts(peer, false));
+            .map(|cfg| cfg.web_connect_info(unix))
+            .unwrap_or_else(|| WebConnectInfo::from_parts(SERVE_LOOPBACK_PEER, false));
         TailnetConnect(info)
     }
 }
 
 #[cfg(unix)]
-pub fn peer_connection_uid(stream: &TcpStream) -> Option<u32> {
+pub fn peer_connection_uid(stream: &UnixStream) -> Option<u32> {
     use nix::sys::socket::{getsockopt, sockopt::PeerCredentials};
     let cred = getsockopt(stream, PeerCredentials).ok()?;
     Some(cred.uid())
 }
 
 #[cfg(not(unix))]
-pub fn peer_connection_uid(_stream: &TcpStream) -> Option<u32> {
+pub fn peer_connection_uid(_stream: &UnixStream) -> Option<u32> {
     None
 }
 
-/// Default Tailscale daemon user for Serve-fronted loopback HTTP.
-/// Copies [`TailnetConnect`] into [`WebConnectInfo`] and [`ConnectInfo<SocketAddr>`] for shared handlers.
+/// Creates parent dirs, removes stale socket, binds, mode `0660`, optional group for `chown`.
+pub async fn bind_web_serve_listener(
+    path: &Path,
+    group: Option<&str>,
+) -> std::io::Result<UnixListener> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    if path.exists() {
+        std::fs::remove_file(path)?;
+    }
+    let listener = UnixListener::bind(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o660))?;
+        if let Some(name) = group {
+            if let Ok(Some(g)) = nix::unistd::Group::from_name(name) {
+                use std::os::unix::io::AsRawFd;
+                if let Ok(file) = std::fs::File::open(path) {
+                    let _ = nix::unistd::fchown(
+                        file.as_raw_fd(),
+                        None,
+                        Some(nix::unistd::Gid::from_raw(g.gid.as_raw())),
+                    );
+                }
+            }
+        }
+    }
+    Ok(listener)
+}
+
 pub async fn inject_web_connect(
     ConnectInfo(TailnetConnect(info)): ConnectInfo<TailnetConnect>,
     mut req: Request,
@@ -76,53 +108,4 @@ pub async fn inject_web_connect(
     req.extensions_mut().insert(info);
     req.extensions_mut().insert(ConnectInfo(peer));
     next.run(req).await
-}
-
-pub fn resolve_tailscaled_uid() -> Option<u32> {
-    #[cfg(unix)]
-    {
-        if let Ok(user) = nix::unistd::User::from_name("tailscale") {
-            return user.map(|u| u.uid.as_raw());
-        }
-    }
-    None
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::net::{IpAddr, Ipv4Addr};
-
-    #[test]
-    fn evaluate_serve_proxy_trust_requires_matching_uid_on_loopback() {
-        let trust = ServeTrustConfig {
-            trust_x_forwarded_for: true,
-            expected_peer_uid: 42,
-        };
-        let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080);
-        assert!(!trust.evaluate(peer, None));
-        assert!(!trust.evaluate(peer, Some(41)));
-        assert!(trust.evaluate(peer, Some(42)));
-        let lan = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 8080);
-        assert!(!trust.evaluate(lan, Some(42)));
-    }
-
-    #[test]
-    fn tailnet_serve_trust_uses_config_not_test_helpers() {
-        let cfg = crate::config::GatewayConfig {
-            web_tailnet: crate::config::WebListenerSettings {
-                trust_x_forwarded_for: true,
-                serve_peer_uid: Some(999),
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        assert_eq!(
-            cfg.tailnet_serve_trust(),
-            ServeTrustConfig {
-                trust_x_forwarded_for: true,
-                expected_peer_uid: 999,
-            }
-        );
-    }
 }

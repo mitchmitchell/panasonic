@@ -26,7 +26,7 @@ async fn main() -> anyhow::Result<()> {
     })?;
     let handles = serve(config, backend).await?;
     tracing::info!(
-        web_tailnet = %handles.web_tailnet,
+        web_serve_socket = %handles.web_serve_socket.display(),
         web_lan = %handles.web_lan,
         mcp = %handles.mcp,
         "kxprov-gw listening"

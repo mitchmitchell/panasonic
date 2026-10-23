@@ -29,7 +29,7 @@ use crate::ratelimit::RateLimiter;
 use crate::serve_peer;
 use crate::web_stack::production_web_router;
 pub struct GatewayHandles {
-    pub web_tailnet: SocketAddr,
+    pub web_serve_socket: std::path::PathBuf,
     pub web_lan: SocketAddr,
     pub mcp: SocketAddr,
     pub shutdown: GatewayShutdown,
@@ -121,7 +121,6 @@ pub async fn serve(
         }),
     );
 
-    let web_tailnet_addr: SocketAddr = config.web_tailnet_bind.parse()?;
     let mcp_addr: SocketAddr = config.mcp_tailnet_bind.parse()?;
     let web_lan_addrs: Vec<SocketAddr> = config
         .web_lan_bind_addresses()
@@ -129,28 +128,29 @@ pub async fn serve(
         .map(|s| s.parse())
         .collect::<Result<Vec<_>, _>>()?;
 
-    warn_if_unspecified_bind(web_tailnet_addr);
     warn_if_unspecified_bind(mcp_addr);
     for addr in &web_lan_addrs {
         warn_if_unspecified_bind(*addr);
     }
 
-    let web_tailnet_listener = TcpListener::bind(web_tailnet_addr).await?;
+    let web_serve_socket = config.web_serve_socket.clone();
+    let web_serve_group = config.serve_socket_group.as_deref();
+    let web_serve_listener =
+        serve_peer::bind_web_serve_listener(&web_serve_socket, web_serve_group).await?;
     let mcp_listener = TcpListener::bind(mcp_addr).await?;
 
-    let bound_web_tailnet = web_tailnet_listener.local_addr()?;
     let bound_mcp = mcp_listener.local_addr()?;
 
     let tls = load_tls_config(&config.tls_cert_path, &config.tls_key_path).await?;
     let mut bound_web_lan: Option<SocketAddr> = None;
 
     let tailnet_serve_trust = config.tailnet_serve_trust();
-    if config.web_tailnet.trust_x_forwarded_for {
-        tracing::info!(
-            expected_peer_uid = tailnet_serve_trust.expected_peer_uid,
-            "tailnet login XFF trust requires Serve peer SO_PEERCRED uid"
-        );
-    }
+    tracing::info!(
+        path = %web_serve_socket.display(),
+        serve_peer_uid = tailnet_serve_trust.expected_peer_uid,
+        trust_x_forwarded_for = tailnet_serve_trust.trust_x_forwarded_for,
+        "web Serve Unix listener"
+    );
 
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
     let (shutdown_tx_mcp, shutdown_rx_mcp) = oneshot::channel::<()>();
@@ -158,7 +158,7 @@ pub async fn serve(
     serve_peer::install_tailnet_serve_trust(tailnet_serve_trust);
     tokio::spawn(async move {
         if let Err(e) = axum::serve(
-            web_tailnet_listener,
+            web_serve_listener,
             web_app_tailnet.into_make_service_with_connect_info::<serve_peer::TailnetConnect>(),
         )
         .with_graceful_shutdown(async {
@@ -206,7 +206,7 @@ pub async fn serve(
     });
 
     Ok(GatewayHandles {
-        web_tailnet: bound_web_tailnet,
+        web_serve_socket,
         web_lan: bound_web_lan.ok_or_else(|| anyhow::anyhow!("no web LAN HTTPS bind addresses"))?,
         mcp: bound_mcp,
         shutdown: GatewayShutdown {
