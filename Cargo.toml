@@ -1,0 +1,26 @@
+[workspace]
+resolver = "2"
+members = ["crates/kxtd1232", "crates/kxtd1232-sim", "crates/kxprov"]
+# Later phases (stubs only, not yet members): crates/kxprovd, crates/kxprov-api,
+# crates/kxprov-web, crates/kxprov-mcp, crates/kxprov-gw.
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "LicenseRef-Proprietary"
+publish = false
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
+unwrap_used = "warn"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = true
