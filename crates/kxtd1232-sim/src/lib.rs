@@ -716,7 +716,6 @@ impl SimTransport {
             self.schedule(at, BUSY_FRAME.to_vec());
         }
     }
-
 }
 
 impl Transport for SimTransport {
@@ -863,7 +862,10 @@ impl Transport for SimTransport {
         match self.queue.front() {
             Some(&(at, _)) if at <= self.now + timeout_ms => {
                 self.now = self.now.max(at);
-                self.sim.lock().expect("sim pbx lock").advance_lockup(self.now);
+                self.sim
+                    .lock()
+                    .expect("sim pbx lock")
+                    .advance_lockup(self.now);
                 let mut out = Vec::new();
                 while let Some((t, _)) = self.queue.front() {
                     if *t > self.now {
@@ -882,7 +884,10 @@ impl Transport for SimTransport {
             }
             _ => {
                 self.now += timeout_ms;
-                self.sim.lock().expect("sim pbx lock").advance_lockup(self.now);
+                self.sim
+                    .lock()
+                    .expect("sim pbx lock")
+                    .advance_lockup(self.now);
                 Err(TransportError::Timeout)
             }
         }

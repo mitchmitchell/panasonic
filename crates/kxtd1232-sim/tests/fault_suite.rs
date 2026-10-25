@@ -37,7 +37,9 @@ fn write_count(c: &Client<SimTransport>) -> usize {
 #[test]
 fn test_a2_busy_run_on_read() {
     let mut c = client();
-    c.transport_mut().sim_mut().inject(Fault::Busy { frames: 8 });
+    c.transport_mut()
+        .sim_mut()
+        .inject(Fault::Busy { frames: 8 });
     assert!(c.read(0x24, 0, 0, 3).is_ok());
 }
 
@@ -125,7 +127,9 @@ fn test_a2_silent_write() {
 #[test]
 fn test_a2_busy_past_bound_from_fixture() {
     let mut c = client();
-    c.transport_mut().sim_mut().inject(Fault::Busy { frames: 200 });
+    c.transport_mut()
+        .sim_mut()
+        .inject(Fault::Busy { frames: 200 });
     assert_eq!(c.read(0x24, 0, 0, 3), Err(Error::BusyTimeout));
 }
 
