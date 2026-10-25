@@ -167,7 +167,7 @@ sock_mode="$(sudo stat -c '%a' /run/kx-provision/kxprovd.sock)"
 
 sudo systemctl start kxprov-gw.service
 for _ in $(seq 1 50); do
-  if [[ -S /run/kx-provision-gw/web-serve.sock ]]; then break; fi
+  if sudo test -S /run/kx-provision-gw/web-serve.sock; then break; fi
   sleep 0.1
 done
 
@@ -204,8 +204,9 @@ sudo -u kxprov-gw test -r /run/kx-provision/kxprovd.sock -a -w /run/kx-provision
 
 sudo systemctl stop kxprov-gw.service
 sleep 0.5
-[[ -S /run/kx-provision/kxprovd.sock ]] || { log "daemon socket removed when gateway stopped"; exit 1; }
-if [[ -e /run/kx-provision-gw/web-serve.sock ]]; then
+sudo test -S /run/kx-provision/kxprovd.sock \
+  || { log "daemon socket removed when gateway stopped"; exit 1; }
+if sudo test -e /run/kx-provision-gw/web-serve.sock; then
   log "web-serve.sock still present after kxprov-gw stop"
   exit 1
 fi
