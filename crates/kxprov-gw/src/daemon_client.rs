@@ -47,7 +47,10 @@ impl DaemonClient {
             .await
         {
             Ok(r) => Ok(r),
-            Err(ApiError::Io(_)) => {
+            Err(e @ ApiError::Io(_)) => {
+                if request_is_mutating(&body) {
+                    return Err(map_api_error(e));
+                }
                 drop(guard);
                 let fresh = ApiClient::connect(&self.socket_path)
                     .await
@@ -62,6 +65,18 @@ impl DaemonClient {
             Err(e) => Err(map_api_error(e)),
         }
     }
+}
+
+/// Mutating RPCs must not be resent after I/O failure: the daemon may have already
+/// processed the request if the response was lost on the wire.
+fn request_is_mutating(body: &RequestBody) -> bool {
+    !matches!(
+        body,
+        RequestBody::Status
+            | RequestBody::ReadFields { .. }
+            | RequestBody::ListBackups
+            | RequestBody::Whoami
+    )
 }
 
 fn daemon_auth(caller: &CallerIdentity, gateway_bearer: &str) -> (RequestAuth, Option<String>) {
@@ -338,5 +353,39 @@ impl DaemonBackend for DaemonClient {
             }),
             _ => Err(BackendError::BadRequest("daemon")),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use kxprov_api::{ApplyPlanParams, DiffHash, PlanId, Profile};
+
+    #[test]
+    fn mutating_requests_are_classified() {
+        assert!(!request_is_mutating(&RequestBody::Status));
+        assert!(!request_is_mutating(&RequestBody::ListBackups));
+        assert!(!request_is_mutating(&RequestBody::Whoami));
+        assert!(request_is_mutating(&RequestBody::BackupNow));
+        assert!(request_is_mutating(&RequestBody::PlanChange {
+            params: kxprov_api::PlanChangeParams {
+                kind: FieldKindWire::CidName,
+                index: 0,
+                value: "x".into(),
+            },
+        }));
+        assert!(request_is_mutating(&RequestBody::ApplyPlan {
+            params: ApplyPlanParams {
+                plan_id: PlanId("p".into()),
+                diff_hash: DiffHash("h".into()),
+            },
+        }));
+        assert!(request_is_mutating(&RequestBody::SubmitApproval {
+            params: kxprov_api::SubmitApprovalParams {
+                plan_id: "p".into(),
+                diff_hash: DiffHash("h".into()),
+                profile: Profile::Sim,
+            },
+        }));
     }
 }

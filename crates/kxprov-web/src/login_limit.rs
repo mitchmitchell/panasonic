@@ -129,13 +129,13 @@ impl LoginRateLimiter {
             return Err(LoginGateError::IpRateLimited(ip_delay));
         }
 
-        drop(waiter_slot);
         let lock_result = tokio::time::timeout(MAX_ACCOUNT_QUEUE_WAIT, verify.lock()).await;
 
         let _verify_guard = match lock_result {
             Err(_) => return Err(LoginGateError::AccountQueueTimeout),
             Ok(guard) => guard,
         };
+        drop(waiter_slot);
 
         Ok(attempt().await)
     }
