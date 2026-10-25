@@ -18,7 +18,7 @@ workspace = true
 [features]
 default = ["inprocess-sim"]
 inprocess-sim = []
-sim-fault-triggers = ["kxprov-api/sim-fault-triggers"]
+sim-fault-triggers = ["kxprov-api/sim-fault-triggers", "kxtd1232-sim/faults"]
 test-util = [
     "inprocess-sim",
     "kxtd1232/test-transport-access",
