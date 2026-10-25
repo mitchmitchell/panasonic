@@ -194,19 +194,24 @@ pub fn write_counter(
     Ok(())
 }
 
-pub fn read_highest_epoch(provision_root: &Path) -> Result<u64, EpochError> {
+/// `None` when `highest.counter` is absent; `Err(Corrupt)` when present but unreadable.
+pub fn read_highest_epoch_file(provision_root: &Path) -> Result<Option<u64>, EpochError> {
     check_epoch_dir_if_present(provision_root)?;
     let path = highest_epoch_counter_path(provision_root);
     check_counter_secure(&path)?;
     if !path.exists() {
-        return Ok(0);
+        return Ok(None);
     }
     let s = std::fs::read_to_string(&path)?;
     let trimmed = s.trim();
     if trimmed.is_empty() {
-        return Ok(0);
+        return Err(EpochError::Corrupt);
     }
-    trimmed.parse().map_err(|_| EpochError::Corrupt)
+    trimmed.parse().map(Some).map_err(|_| EpochError::Corrupt)
+}
+
+pub fn read_highest_epoch(provision_root: &Path) -> Result<u64, EpochError> {
+    Ok(read_highest_epoch_file(provision_root)?.unwrap_or(0))
 }
 
 pub fn bump_highest_epoch(provision_root: &Path, counter: u64) -> Result<(), EpochError> {
@@ -221,12 +226,35 @@ pub fn bump_highest_epoch(provision_root: &Path, counter: u64) -> Result<(), Epo
     Ok(())
 }
 
+/// Highest epoch value implied by `highest.counter` and every per-profile counter file.
+pub fn effective_highest_epoch(provision_root: &Path) -> Result<u64, EpochError> {
+    let mut max = read_highest_epoch_file(provision_root)?.unwrap_or(0);
+    for profile in [Profile::Sim, Profile::Test, Profile::Prod] {
+        if let Some(n) = read_counter(provision_root, profile)? {
+            max = max.max(n);
+        }
+    }
+    Ok(max)
+}
+
 #[cfg(all(test, feature = "test-util"))]
 mod tests {
     #![allow(clippy::unwrap_used)]
 
     use super::*;
+    use crate::config::highest_epoch_counter_path;
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    #[test]
+    fn effective_highest_is_max_of_highest_file_and_profile_counters() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_counter(tmp.path(), Profile::Sim, 5).unwrap();
+        write_counter(tmp.path(), Profile::Test, 3).unwrap();
+        bump_highest_epoch(tmp.path(), 4).unwrap();
+        assert_eq!(effective_highest_epoch(tmp.path()).unwrap(), 5);
+        std::fs::write(highest_epoch_counter_path(tmp.path()), b"2\n").unwrap();
+        assert_eq!(effective_highest_epoch(tmp.path()).unwrap(), 5);
+    }
 
     #[test]
     fn read_treats_missing_epoch_dir_as_no_counter_yet() {

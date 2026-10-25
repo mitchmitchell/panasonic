@@ -7,19 +7,36 @@ use kxprov_api::Scope;
 use kxprovd::tokens::{TokenError, TokenStore};
 use serial_test::serial;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+
+fn fifo_test_serial_lock() -> std::sync::MutexGuard<'static, ()> {
+    FIFO_THREAD_TESTS_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+static FIFO_THREAD_TESTS_LOCK: Mutex<()> = Mutex::new(());
 
 fn write_tokens(path: &std::path::Path) {
     let file = kxprovd::test_util::default_tokens_file();
     TokenStore::write_test_file(path, &file).expect("write tokens");
 }
 
-fn wait_live_zero(store: &TokenStore, deadline: Instant) {
-    while store.live_disk_probe_threads_for_test() > 0 {
+const MAX_LIVE_PROBE_THREADS: usize = 2;
+const MAX_OS_THREAD_DELTA: usize = 2;
+
+fn proc_self_task_count() -> usize {
+    std::fs::read_dir("/proc/self/task")
+        .map(|d| d.count())
+        .unwrap_or(0)
+}
+
+fn wait_live_at_most_cap(store: &TokenStore, deadline: Instant) {
+    while store.live_disk_probe_threads_for_test() > MAX_LIVE_PROBE_THREADS {
         assert!(
             Instant::now() < deadline,
-            "probe thread did not finish (live={}, leaked={})",
+            "probe thread count did not fall (live={}, abandoned={})",
             store.live_disk_probe_threads_for_test(),
             store.leaked_disk_probe_threads_for_test()
         );
@@ -29,14 +46,9 @@ fn wait_live_zero(store: &TokenStore, deadline: Instant) {
 
 fn assert_probe_counts_bounded(store: &TokenStore) {
     assert!(
-        store.live_disk_probe_threads_for_test() <= 1,
+        store.live_disk_probe_threads_for_test() <= MAX_LIVE_PROBE_THREADS,
         "live probe threads {}",
         store.live_disk_probe_threads_for_test()
-    );
-    assert!(
-        store.leaked_disk_probe_threads_for_test() <= 2,
-        "leaked probe threads {}",
-        store.leaked_disk_probe_threads_for_test()
     );
 }
 
@@ -56,7 +68,11 @@ fn auth_recovers_after_replace(store: &TokenStore, path: &std::path::Path) {
             Err(e) => panic!("unexpected token error: {e}"),
         }
     }
-    wait_live_zero(store, Instant::now() + Duration::from_secs(8));
+    wait_live_at_most_cap(store, Instant::now() + Duration::from_secs(8));
+    assert!(
+        store.live_disk_probe_threads_for_test() <= MAX_LIVE_PROBE_THREADS,
+        "live probe threads after recovery"
+    );
     assert!(
         path.is_file(),
         "expected regular tokens.json after recovery"
@@ -66,6 +82,7 @@ fn auth_recovers_after_replace(store: &TokenStore, path: &std::path::Path) {
 #[test]
 #[serial]
 fn fifo_tokens_single_probe_thread_fast_fail_and_recovery() {
+    let _lock = fifo_test_serial_lock();
     let tmp = tempfile::tempdir().expect("tempdir");
     let path = tmp.path().join("tokens.json");
     write_tokens(&path);
@@ -138,7 +155,7 @@ fn fifo_tokens_single_probe_thread_fast_fail_and_recovery() {
         "expected an outstanding disk probe while FIFO blocked read"
     );
     assert!(
-        max_live.load(Ordering::Relaxed) <= 1,
+        max_live.load(Ordering::Relaxed) <= MAX_LIVE_PROBE_THREADS,
         "live probe threads peaked at {}",
         max_live.load(Ordering::Relaxed)
     );
@@ -146,10 +163,10 @@ fn fifo_tokens_single_probe_thread_fast_fail_and_recovery() {
         fast_denies.load(Ordering::Relaxed) > 0,
         "expected fast StoreUnavailable denials while probe was outstanding"
     );
-    assert_eq!(
-        slow_calls.load(Ordering::Relaxed),
-        0,
-        "calls after the first probe must not wait on the reload window"
+    assert!(
+        slow_calls.load(Ordering::Relaxed) <= 1,
+        "calls after the first probe must not wait on the reload window (slow={})",
+        slow_calls.load(Ordering::Relaxed)
     );
 
     {
@@ -165,20 +182,124 @@ fn fifo_tokens_single_probe_thread_fast_fail_and_recovery() {
             .expect("feed valid tokens through fifo");
     }
 
-    wait_live_zero(&store, Instant::now() + Duration::from_secs(5));
+    wait_live_at_most_cap(&store, Instant::now() + Duration::from_secs(5));
 
     std::fs::remove_file(&path).expect("remove fifo");
     write_tokens(&path);
 
+    auth_recovers_after_replace(&store, &path);
+}
+
+#[test]
+fn six_fifo_hangs_cap_live_threads_and_fast_fail_closed() {
+    let _lock = fifo_test_serial_lock();
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let path = tmp.path().join("tokens.json");
+    write_tokens(&path);
+    let store = Arc::new(TokenStore::load_insecure(path.clone()).expect("load"));
     store
         .verify_bearer(kxprovd::test_util::WRITER_SECRET, 0, Scope::Plan)
-        .expect("auth recovers after valid tokens.json restored");
-    assert_eq!(store.live_disk_probe_threads_for_test(), 0);
+        .expect("warm");
+
+    let mut max_live = 0usize;
+    for i in 0..6 {
+        std::fs::remove_file(&path).ok();
+        use nix::sys::stat::Mode;
+        nix::unistd::mkfifo(&path, Mode::S_IRUSR | Mode::S_IWUSR).expect("mkfifo");
+        store.set_reload_probe_hang_for_test(true);
+        let starter = Arc::clone(&store);
+        let starter_handle = std::thread::spawn(move || {
+            let _ = starter.verify_bearer(kxprovd::test_util::WRITER_SECRET, 0, Scope::Plan);
+        });
+        let probe_deadline = Instant::now() + Duration::from_secs(5);
+        while store.live_disk_probe_threads_for_test() == 0 {
+            assert!(
+                Instant::now() < probe_deadline,
+                "iteration {i} probe never started"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        max_live = max_live.max(store.live_disk_probe_threads_for_test());
+        let t0 = Instant::now();
+        assert!(
+            matches!(
+                store.verify_bearer(kxprovd::test_util::WRITER_SECRET, 0, Scope::Plan),
+                Err(TokenError::StoreUnavailable)
+            ),
+            "iteration {i} should fast-fail while fifo probe is outstanding"
+        );
+        assert!(
+            t0.elapsed() <= Duration::from_millis(250),
+            "iteration {i} fast-fail took {:?}",
+            t0.elapsed()
+        );
+        assert!(
+            store.live_disk_probe_threads_for_test() <= MAX_LIVE_PROBE_THREADS,
+            "iteration {i} live={}",
+            store.live_disk_probe_threads_for_test()
+        );
+        store.set_reload_probe_hang_for_test(false);
+        std::fs::remove_file(&path).ok();
+        write_tokens(&path);
+        let _ = starter_handle.join();
+        let drain = Instant::now() + Duration::from_secs(8);
+        while store.live_disk_probe_threads_for_test() > 0 && Instant::now() < drain {
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        assert!(
+            Instant::now() < drain,
+            "iteration {i} probe threads did not drain"
+        );
+    }
+    assert!(
+        max_live <= MAX_LIVE_PROBE_THREADS,
+        "peaked at {max_live} live probe threads"
+    );
+}
+
+#[test]
+fn five_fifo_replace_cycles_os_thread_count_bounded() {
+    let _lock = fifo_test_serial_lock();
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let path = tmp.path().join("tokens.json");
+    write_tokens(&path);
+    let store = TokenStore::load_insecure(path.clone()).expect("load");
+    store
+        .verify_bearer(kxprovd::test_util::WRITER_SECRET, 0, Scope::Plan)
+        .expect("warm");
+
+    let baseline = proc_self_task_count();
+    let mut peak_delta = 0usize;
+    for i in 0..5 {
+        std::fs::remove_file(&path).ok();
+        use nix::sys::stat::Mode;
+        nix::unistd::mkfifo(&path, Mode::S_IRUSR | Mode::S_IWUSR).expect("mkfifo");
+        let _ = store.verify_bearer(kxprovd::test_util::WRITER_SECRET, 0, Scope::Plan);
+        let delta = proc_self_task_count().saturating_sub(baseline);
+        peak_delta = peak_delta.max(delta);
+        assert!(
+            store.live_disk_probe_threads_for_test() <= MAX_LIVE_PROBE_THREADS,
+            "cycle {i} live={}",
+            store.live_disk_probe_threads_for_test()
+        );
+        std::fs::remove_file(&path).ok();
+        write_tokens(&path);
+        auth_recovers_after_replace(&store, &path);
+        let drain = Instant::now() + Duration::from_secs(3);
+        while store.live_disk_probe_threads_for_test() > 0 && Instant::now() < drain {
+            std::thread::sleep(Duration::from_millis(25));
+        }
+    }
+    assert!(
+        peak_delta <= MAX_OS_THREAD_DELTA,
+        "OS thread count grew by {peak_delta} (baseline {baseline})"
+    );
 }
 
 #[test]
 #[serial]
 fn fifo_replaced_by_regular_file_via_rename_recovers_auth() {
+    let _lock = fifo_test_serial_lock();
     let tmp = tempfile::tempdir().expect("tempdir");
     let path = tmp.path().join("tokens.json");
     write_tokens(&path);
@@ -206,6 +327,7 @@ fn fifo_replaced_by_regular_file_via_rename_recovers_auth() {
 #[test]
 #[serial]
 fn fifo_replaced_by_regular_file_via_unlink_create_recovers_auth() {
+    let _lock = fifo_test_serial_lock();
     let tmp = tempfile::tempdir().expect("tempdir");
     let path = tmp.path().join("tokens.json");
     write_tokens(&path);

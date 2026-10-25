@@ -47,7 +47,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace --exclude kxprovd --exclude kxprov-gw --locked
-      - run: cargo test -p kxprovd --features test-util --locked
+      - run: cargo test -p kxprovd --features test-util --locked -- --test-threads=1
       - run: cargo test -p kxtd1232-sim --features faults --locked
       - run: cargo test -p kxprov-gw --features test-secret-skip --locked
       - name: A4 local stack smoke (debug sim build)
@@ -137,13 +137,13 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: rustup target add aarch64-unknown-linux-gnu
       - run: pip install cargo-zigbuild ziglang
-      - run: cargo zigbuild --release --locked --target aarch64-unknown-linux-gnu.2.36 -p kxprov -p kxprov-gw
+      - run: cargo zigbuild --release --locked --target aarch64-unknown-linux-gnu.2.36 -p kxprov -p kxprovd -p kxprov-gw
       - name: Binary sizes vs 15 MB budget
         run: |
           budget=$((15*1024*1024)); fail=0
           echo "| binary | bytes | MiB | budget 15 MiB |" >> "$GITHUB_STEP_SUMMARY"
           echo "|---|---|---|---|" >> "$GITHUB_STEP_SUMMARY"
-          for b in target/aarch64-unknown-linux-gnu/release/kxprov target/aarch64-unknown-linux-gnu/release/kxprov-gw; do
+          for b in target/aarch64-unknown-linux-gnu/release/kxprov target/aarch64-unknown-linux-gnu/release/kxprovd target/aarch64-unknown-linux-gnu/release/kxprov-gw; do
             s=$(stat -c %s "$b"); ok=ok; [ "$s" -gt "$budget" ] && ok=OVER && fail=1
             line="| $(basename $b) | $s | $(awk "BEGIN{printf \"%.2f\", $s/1048576}") | $ok |"
             echo "$line"; echo "$line" >> "$GITHUB_STEP_SUMMARY"
@@ -152,4 +152,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: kxprov-aarch64
-          path: target/aarch64-unknown-linux-gnu/release/kxprov
+          path: |
+            target/aarch64-unknown-linux-gnu/release/kxprov
+            target/aarch64-unknown-linux-gnu/release/kxprovd
+            target/aarch64-unknown-linux-gnu/release/kxprov-gw

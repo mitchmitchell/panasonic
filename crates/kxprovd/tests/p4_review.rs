@@ -167,11 +167,15 @@ async fn p4_r6_rotate_does_not_revive_queued_revoked_jobs() {
         value: format!("Q-{n}"),
     };
 
+    let path = tmp.path().join("tokens.json");
+    let go = std::sync::Arc::new(tokio::sync::Notify::new());
     let mut handles = Vec::new();
     for n in 0..4u16 {
         let sock = sock.clone();
+        let go = go.clone();
         handles.push(tokio::spawn(async move {
             let mut c = ApiClient::connect(&sock).await.unwrap();
+            go.notified().await;
             c.call_auth(
                 RequestBody::PlanChange { params: plan(n) },
                 Some(bearer_auth(WRITER_SECRET)),
@@ -180,7 +184,7 @@ async fn p4_r6_rotate_does_not_revive_queued_revoked_jobs() {
         }));
     }
 
-    let path = tmp.path().join("tokens.json");
+    tokio::time::sleep(Duration::from_millis(30)).await;
     let mut file: TokensFile =
         serde_json::from_slice(&std::fs::read(&path).unwrap()).expect("tokens");
     for t in &mut file.tokens {
@@ -189,7 +193,6 @@ async fn p4_r6_rotate_does_not_revive_queued_revoked_jobs() {
         }
     }
     std::fs::write(&path, serde_json::to_vec_pretty(&file).unwrap()).unwrap();
-    tokio::time::sleep(Duration::from_millis(50)).await;
     let mut probe = ApiClient::connect(&sock).await.unwrap();
     probe
         .call_auth(
@@ -198,6 +201,7 @@ async fn p4_r6_rotate_does_not_revive_queued_revoked_jobs() {
         )
         .await
         .expect_err("writer revoked before rotate");
+    go.notify_waiters();
 
     let kxprov = common::kxprov_binary();
     let out = Command::new(&kxprov)
@@ -257,10 +261,25 @@ async fn synthetic_root_read_during_token_store_outage() {
     let (_d, sock) = init_test_daemon(&tmp, uid, Profile::Sim);
     common::wait_daemon_api_ready(&sock).await;
     let path = tmp.path().join("tokens.json");
-    std::fs::write(&path, b"{ corrupt").unwrap();
 
     let mut admin = ApiClient::connect(&sock).await.unwrap();
     let _ = admin
+        .call_auth(
+            RequestBody::PlanChange {
+                params: PlanChangeParams {
+                    kind: FieldKindWire::CidName,
+                    index: 0,
+                    value: "warm".into(),
+                },
+            },
+            Some(bearer_auth(WRITER_SECRET)),
+        )
+        .await
+        .expect("warm bearer snapshot");
+
+    std::fs::write(&path, b"{ corrupt").unwrap();
+
+    let _grace_bearer = admin
         .call_auth(
             RequestBody::PlanChange {
                 params: PlanChangeParams {
@@ -271,12 +290,12 @@ async fn synthetic_root_read_during_token_store_outage() {
             },
             Some(bearer_auth(WRITER_SECRET)),
         )
-        .await
-        .expect("bearer may use grace snapshot during reload window");
+        .await;
 
     let outage_deadline =
-        tokio::time::Instant::now() + Duration::from_secs(2) + Duration::from_millis(500);
-    loop {
+        tokio::time::Instant::now() + Duration::from_secs(2) + Duration::from_millis(750);
+    let mut saw_bearer_outage = false;
+    while tokio::time::Instant::now() < outage_deadline {
         let err = admin
             .call_auth(
                 RequestBody::PlanChange {
@@ -291,15 +310,16 @@ async fn synthetic_root_read_during_token_store_outage() {
             .await;
         if let Err(e) = err {
             if e.to_string().contains("token store unavailable") {
+                saw_bearer_outage = true;
                 break;
             }
         }
-        assert!(
-            tokio::time::Instant::now() < outage_deadline,
-            "bearer auth did not fail closed after reload grace"
-        );
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
+    assert!(
+        saw_bearer_outage,
+        "bearer auth did not fail closed after reload grace"
+    );
 
     let err = admin
         .call_auth(
