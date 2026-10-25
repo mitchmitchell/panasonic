@@ -40,6 +40,12 @@ struct SubmitRecord {
     at_ms: u64,
 }
 
+/// Handle returned by [`ApprovalBook::consume`]; rollback must target this row only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConsumedApproval {
+    item_index: usize,
+}
+
 pub struct ApprovalBook {
     path: PathBuf,
     /// Serializes consume / rollback so concurrent `apply_plan` cannot double-consume.
@@ -139,7 +145,7 @@ impl ApprovalBook {
         diff_hash: &DiffHash,
         profile: Profile,
         now_ms: u64,
-    ) -> Result<(), ApprovalError> {
+    ) -> Result<ConsumedApproval, ApprovalError> {
         let _guard = self.lock.lock().expect("approval book lock");
         let mut store = self.load()?;
         let idx = store
@@ -158,24 +164,21 @@ impl ApprovalBook {
         }
         a.consumed = true;
         self.save(&store)?;
-        Ok(())
+        Ok(ConsumedApproval { item_index: idx })
     }
 
     /// Undo [`Self::consume`] when an apply job never entered the queue (enqueue failure).
-    pub fn release_consumed(
-        &self,
-        plan_id: &PlanId,
-        diff_hash: &DiffHash,
-        profile: Profile,
-    ) -> Result<(), ApprovalError> {
+    pub fn release_consumed(&self, lease: ConsumedApproval) -> Result<(), ApprovalError> {
         let _guard = self.lock.lock().expect("approval book lock");
         let mut store = self.load()?;
-        let idx = store
+        let a = store
             .items
-            .iter()
-            .position(|a| a.matches(plan_id, diff_hash, profile) && a.consumed)
+            .get_mut(lease.item_index)
             .ok_or(ApprovalError::NotFound)?;
-        store.items[idx].consumed = false;
+        if !a.consumed {
+            return Err(ApprovalError::NotFound);
+        }
+        a.consumed = false;
         self.save(&store)?;
         Ok(())
     }
@@ -229,11 +232,49 @@ mod tests {
             0,
         )
         .unwrap();
-        book.consume(&plan_id, &diff, Profile::Prod, 0).unwrap();
+        let lease = book.consume(&plan_id, &diff, Profile::Prod, 0).unwrap();
         assert!(!book.has_active(&plan_id, &diff, Profile::Prod, 0));
-        book.release_consumed(&plan_id, &diff, Profile::Prod)
-            .unwrap();
+        book.release_consumed(lease).unwrap();
         assert!(book.has_active(&plan_id, &diff, Profile::Prod, 0));
+    }
+
+    #[test]
+    fn release_restores_only_the_leased_row_when_older_consumed_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let book = ApprovalBook::new(dir.path());
+        let plan_id = PlanId("p".into());
+        let diff = DiffHash("d".into());
+        book.submit(
+            plan_id.clone(),
+            diff.clone(),
+            Profile::Prod,
+            &TokenId("writer".into()),
+            TokenId("approver".into()),
+            0,
+        )
+        .unwrap();
+        // Spent approval left consumed (e.g. worker apply failed without rollback).
+        book.consume(&plan_id, &diff, Profile::Prod, 0).unwrap();
+        book.submit(
+            plan_id.clone(),
+            diff.clone(),
+            Profile::Prod,
+            &TokenId("writer".into()),
+            TokenId("approver".into()),
+            1,
+        )
+        .unwrap();
+        let lease = book.consume(&plan_id, &diff, Profile::Prod, 1).unwrap();
+        book.release_consumed(lease).unwrap();
+        assert!(
+            book.has_active(&plan_id, &diff, Profile::Prod, 1),
+            "fresh approval must be active after enqueue rollback"
+        );
+        let lease_retry = book.consume(&plan_id, &diff, Profile::Prod, 2).unwrap();
+        assert_eq!(
+            lease_retry.item_index, 1,
+            "rollback must not re-open the older spent approval row"
+        );
     }
 
     #[test]
