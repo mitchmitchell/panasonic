@@ -506,11 +506,14 @@ async fn apply_plan(
         ));
     }
 
+    let mut approval_lease = None;
     if needs_approval {
-        state
-            .approvals
-            .consume(&params.plan_id, &params.diff_hash, profile, now)
-            .map_err(|e| api_err("approval", &e.to_string()))?;
+        approval_lease = Some(
+            state
+                .approvals
+                .consume(&params.plan_id, &params.diff_hash, profile, now)
+                .map_err(|e| api_err("approval", &e.to_string()))?,
+        );
     }
 
     let enqueue_result = state
@@ -526,13 +529,9 @@ async fn apply_plan(
         )
         .await;
 
-    if needs_approval {
-        if let Err(e) = enqueue_result {
-            let _ = state
-                .approvals
-                .release_consumed(&params.plan_id, &params.diff_hash, profile);
-            return Err(queue_err(e));
-        }
+    if let (Some(lease), Err(e)) = (approval_lease, &enqueue_result) {
+        let _ = state.approvals.release_consumed(lease);
+        return Err(queue_err(*e));
     }
 
     let (job_id, _rx) = enqueue_result.map_err(queue_err)?;
