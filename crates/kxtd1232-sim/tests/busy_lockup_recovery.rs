@@ -124,17 +124,17 @@ fn test_bad_checksum_write_nak_link_stays_up() {
 
 #[test]
 fn test_junk_after_bad_read_header_byte_0x00() {
-    recover_after_bad_header_and_junk(&mut client_read(), &vec![0x00; 200]);
+    recover_after_bad_header_and_junk(&mut client_read(), &[0x00; 200]);
 }
 
 #[test]
 fn test_junk_after_bad_read_header_byte_0x55() {
-    recover_after_bad_header_and_junk(&mut client_read(), &vec![0x55; 200]);
+    recover_after_bad_header_and_junk(&mut client_read(), &[0x55; 200]);
 }
 
 #[test]
 fn test_junk_after_bad_read_header_byte_0xff() {
-    recover_after_bad_header_and_junk(&mut client_read(), &vec![0xFF; 200]);
+    recover_after_bad_header_and_junk(&mut client_read(), &[0xFF; 200]);
 }
 
 #[test]

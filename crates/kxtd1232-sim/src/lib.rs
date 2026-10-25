@@ -501,13 +501,12 @@ impl SimPbx {
             if fault == Some(Fault::BusyAfterReply) {
                 out.push((t + 10, BUSY_FRAME.to_vec()));
             }
-            return out;
         }
         #[cfg(not(feature = "faults"))]
         {
             out.push((lat, self.frame_reply(cmd, body, false)));
-            out
         }
+        out
     }
 
     fn frame_reply(&mut self, cmd: u8, body: &[u8], silent: bool) -> Vec<u8> {
