@@ -653,7 +653,10 @@ impl<T: Transport> Client<T> {
                         return Err(Error::LineNotQuiet);
                     }
                 }
-                Err(Error::Timeout) => return Ok(()),
+                Err(Error::Timeout) => {
+                    self.needs_drain = false;
+                    return Ok(());
+                }
                 Err(e @ Error::LinkDown(_)) => {
                     // Save any pending verify/rollback as resume before Disconnected.
                     // Already Disconnected: keep the resume saved then.

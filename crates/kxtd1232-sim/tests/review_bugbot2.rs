@@ -146,6 +146,24 @@ fn test_second_drain_while_disconnected_keeps_resume() {
     assert_eq!(c.end_binary(), Err(Error::EndBinaryHeld));
 }
 
+/// After verify clears the line, `needs_drain` must not stay set: a later link loss on
+/// read must still move the session to `Disconnected` (Bugbot: sticky drain flag).
+#[test]
+fn test_post_verify_read_link_loss_disconnects() {
+    let mut c = client();
+    let (base, new) = pending(&mut c, 8);
+    assert_eq!(
+        c.verify_block(0x25, 8, 0, &new, &base),
+        Ok(VerifyOutcome::Applied)
+    );
+    assert_eq!(c.state(), &SessionState::Binary);
+    c.transport_mut().drop_link_now();
+    assert!(matches!(c.read(0x24, 0, 0, 3), Err(Error::PreSend(_))));
+    assert_eq!(c.state(), &SessionState::Disconnected);
+    relogin(&mut c);
+    assert_eq!(c.state(), &SessionState::Binary);
+}
+
 #[test]
 fn test_sim_plays_default_signon_placeholders() {
     let c = client();
