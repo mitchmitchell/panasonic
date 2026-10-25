@@ -530,8 +530,11 @@ async fn apply_plan(
         .await;
 
     if let (Some(lease), Err(e)) = (approval_lease, &enqueue_result) {
-        let _ = state.approvals.release_consumed(lease);
-        return Err(queue_err(*e));
+        return Err(rollback_apply_approval_after_enqueue_fail(
+            &state.approvals,
+            lease,
+            *e,
+        ));
     }
 
     let (job_id, _rx) = enqueue_result.map_err(queue_err)?;
@@ -559,11 +562,39 @@ async fn unlock(
     Ok(ResponseResult::Unlock(UnlockResult { unlocked: true }))
 }
 
-fn queue_err(e: QueueError) -> ApiErrorBody {
+fn queue_err_message(e: QueueError) -> &'static str {
     match e {
-        QueueError::RateLimit => api_err("rate_limit", "per-token queue or rate cap exceeded"),
-        QueueError::Shutdown => api_err("queue", "daemon shutting down"),
+        QueueError::RateLimit => "per-token queue or rate cap exceeded",
+        QueueError::Shutdown => "daemon shutting down",
     }
+}
+
+fn queue_err(e: QueueError) -> ApiErrorBody {
+    api_err(
+        match e {
+            QueueError::RateLimit => "rate_limit",
+            QueueError::Shutdown => "queue",
+        },
+        queue_err_message(e),
+    )
+}
+
+fn rollback_apply_approval_after_enqueue_fail(
+    approvals: &ApprovalBook,
+    lease: crate::approval::ConsumedApproval,
+    queue: QueueError,
+) -> ApiErrorBody {
+    if let Err(e) = approvals.release_consumed(lease) {
+        tracing::error!(error = %e, "approval rollback failed after enqueue failure");
+        return api_err(
+            "queue",
+            &format!(
+                "{}; approval rollback failed: {e}",
+                queue_err_message(queue)
+            ),
+        );
+    }
+    queue_err(queue)
 }
 
 async fn run_job(
@@ -635,6 +666,37 @@ mod apply_plan_tests {
             mode: ModeStore::new(&data, Profile::Prod),
             transition: crate::transition::TransitionBlockStore::new(&data),
         }
+    }
+
+    #[test]
+    fn rollback_enqueue_fail_surfaces_release_failure() {
+        let tmp = tempfile::tempdir().unwrap();
+        let book = ApprovalBook::new(tmp.path());
+        let plan_id = kxprov_api::PlanId("p".into());
+        let diff = kxprov_api::DiffHash("d".into());
+        book.submit(
+            plan_id.clone(),
+            diff.clone(),
+            Profile::Prod,
+            &TokenId("writer".into()),
+            TokenId("approver".into()),
+            0,
+        )
+        .unwrap();
+        let lease = book.consume(&plan_id, &diff, Profile::Prod, 0).unwrap();
+        std::fs::write(tmp.path().join("approvals.json"), b"{\"items\":[]}").unwrap();
+        let err = rollback_apply_approval_after_enqueue_fail(&book, lease, QueueError::Shutdown);
+        assert_eq!(err.code, "queue");
+        assert!(
+            err.message.contains("daemon shutting down"),
+            "{}",
+            err.message
+        );
+        assert!(
+            err.message.contains("approval rollback failed"),
+            "{}",
+            err.message
+        );
     }
 
     #[tokio::test]
