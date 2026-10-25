@@ -5,7 +5,7 @@ use kxprov_api::{
     TokensFile,
 };
 use sha2::{Digest, Sha256};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 #[cfg(feature = "test-util")]
 use std::sync::atomic::AtomicU64;
@@ -113,7 +113,7 @@ pub struct TokenStore {
     /// Path identity the in-flight recv opened (dev/ino).
     probe_path_identity: Arc<Mutex<Option<PathIdentity>>>,
     /// Inodes abandoned probes still hold open; block respawn until thread exits.
-    abandoned_probe_identities: Arc<Mutex<HashSet<PathIdentity>>>,
+    abandoned_probe_refcounts: Arc<Mutex<HashMap<PathIdentity, usize>>>,
     /// When set, the live probe's guard must not decrement `disk_probe_live`.
     active_probe_abandon: Arc<Mutex<Option<Arc<AtomicBool>>>>,
     /// After a bounded probe times out, deny reload briefly without spawning.
@@ -140,7 +140,7 @@ impl Clone for TokenStore {
             disk_probe_live: Arc::clone(&self.disk_probe_live),
             probe_threads_alive: Arc::clone(&self.probe_threads_alive),
             probe_path_identity: Arc::clone(&self.probe_path_identity),
-            abandoned_probe_identities: Arc::clone(&self.abandoned_probe_identities),
+            abandoned_probe_refcounts: Arc::clone(&self.abandoned_probe_refcounts),
             active_probe_abandon: Arc::clone(&self.active_probe_abandon),
             probe_fast_fail_until: Arc::clone(&self.probe_fast_fail_until),
             #[cfg(feature = "test-util")]
@@ -168,24 +168,16 @@ impl TransientReloadFlight {
 struct TransientProbeLeaderGuard<'a> {
     flight: &'a TransientReloadFlight,
     on_drop: DiskProbe,
-    released: bool,
 }
 
 impl<'a> TransientProbeLeaderGuard<'a> {
     fn new(flight: &'a TransientReloadFlight, on_drop: DiskProbe) -> Self {
-        Self {
-            flight,
-            on_drop,
-            released: false,
-        }
+        Self { flight, on_drop }
     }
 }
 
 impl Drop for TransientProbeLeaderGuard<'_> {
     fn drop(&mut self) {
-        if self.released {
-            return;
-        }
         let mut guard = self.flight.inner.lock().expect("transient flight lock");
         if matches!(*guard, TransientFlightState::Running) {
             *guard = TransientFlightState::Done(self.on_drop.clone());
@@ -200,20 +192,34 @@ struct PathIdentity {
     ino: u64,
 }
 
-struct ProbeThreadAliveGuard {
+struct ProbeThreadSlotGuard {
     alive: Arc<AtomicUsize>,
+}
+
+impl Drop for ProbeThreadSlotGuard {
+    fn drop(&mut self) {
+        self.alive.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+struct ProbeThreadAliveGuard {
     identity: Option<PathIdentity>,
-    abandoned: Arc<Mutex<HashSet<PathIdentity>>>,
+    abandoned_refcounts: Arc<Mutex<HashMap<PathIdentity, usize>>>,
 }
 
 impl Drop for ProbeThreadAliveGuard {
     fn drop(&mut self) {
-        self.alive.fetch_sub(1, Ordering::AcqRel);
         if let Some(id) = self.identity {
-            self.abandoned
+            let mut map = self
+                .abandoned_refcounts
                 .lock()
-                .expect("abandoned probe lock")
-                .remove(&id);
+                .expect("abandoned probe lock");
+            if let Some(n) = map.get_mut(&id) {
+                *n = n.saturating_sub(1);
+                if *n == 0 {
+                    map.remove(&id);
+                }
+            }
         }
     }
 }
@@ -241,10 +247,12 @@ struct DiskProbeLiveGuard {
 
 impl Drop for DiskProbeLiveGuard {
     fn drop(&mut self) {
-        if self.abandoned.load(Ordering::Acquire) {
+        if self.abandoned.swap(true, Ordering::AcqRel) {
             return;
         }
-        self.live.fetch_sub(1, Ordering::AcqRel);
+        let _ = self
+            .live
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_sub(1));
         if self.live.load(Ordering::Acquire) == 0 {
             *self.fast_fail_until.lock().expect("probe fast-fail lock") = None;
         }
@@ -303,13 +311,17 @@ impl TokenStore {
 
     #[cfg(feature = "test-util")]
     pub fn leaked_disk_probe_threads_for_test(&self) -> usize {
-        self.abandoned_probe_identities
+        self.abandoned_probe_refcounts
             .lock()
             .expect("abandoned probe lock")
-            .len()
+            .values()
+            .sum()
     }
 
     pub(crate) const MAX_PROBE_THREADS_ALIVE: usize = 2;
+
+    #[cfg(feature = "test-util")]
+    pub const MAX_LIVE_DISK_PROBE_THREADS: usize = Self::MAX_PROBE_THREADS_ALIVE;
 
     fn wrap_state(state: TokenState) -> Self {
         Self {
@@ -319,7 +331,7 @@ impl TokenStore {
             disk_probe_live: Arc::new(AtomicUsize::new(0)),
             probe_threads_alive: Arc::new(AtomicUsize::new(0)),
             probe_path_identity: Arc::new(Mutex::new(None)),
-            abandoned_probe_identities: Arc::new(Mutex::new(HashSet::new())),
+            abandoned_probe_refcounts: Arc::new(Mutex::new(HashMap::new())),
             active_probe_abandon: Arc::new(Mutex::new(None)),
             probe_fast_fail_until: Arc::new(Mutex::new(None)),
             #[cfg(feature = "test-util")]
@@ -364,30 +376,31 @@ impl TokenStore {
         if self.disk_probe_live.load(Ordering::Acquire) == 0 {
             return;
         }
+        let mut owned_abandon = false;
         if let Some(flag) = self
             .active_probe_abandon
             .lock()
             .expect("active probe abandon lock")
             .take()
         {
-            flag.store(true, Ordering::Release);
+            owned_abandon = !flag.swap(true, Ordering::AcqRel);
         }
-        self.disk_probe_live.fetch_sub(1, Ordering::AcqRel);
-        if self.disk_probe_live.load(Ordering::Acquire) == 0 {
-            *self
-                .probe_fast_fail_until
-                .lock()
-                .expect("probe fast-fail lock") = None;
+        if owned_abandon {
+            let _ = self
+                .disk_probe_live
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_sub(1));
         }
         let stuck_id = *self
             .probe_path_identity
             .lock()
             .expect("probe path identity lock");
         if let Some(id) = stuck_id {
-            self.abandoned_probe_identities
+            self.abandoned_probe_refcounts
                 .lock()
                 .expect("abandoned probe lock")
-                .insert(id);
+                .entry(id)
+                .and_modify(|n| *n += 1)
+                .or_insert(1);
         }
         *self
             .probe_path_identity
@@ -396,21 +409,16 @@ impl TokenStore {
     }
 
     fn disk_probe_spawn_denied(&self, path: &Path) -> bool {
-        if self.probe_threads_alive.load(Ordering::Acquire) == 0 {
-            self.abandoned_probe_identities
-                .lock()
-                .expect("abandoned probe lock")
-                .clear();
-        }
         if self.probe_threads_alive.load(Ordering::Acquire) >= Self::MAX_PROBE_THREADS_ALIVE {
             return true;
         }
         if let Some(id) = path_identity(path) {
             if self
-                .abandoned_probe_identities
+                .abandoned_probe_refcounts
                 .lock()
                 .expect("abandoned probe lock")
-                .contains(&id)
+                .get(&id)
+                .is_some_and(|n| *n > 0)
             {
                 return true;
             }
@@ -699,24 +707,35 @@ impl TokenStore {
         let deadline = Instant::now() + Self::reload_grace_duration();
         let (tx, rx) = std::sync::mpsc::sync_channel(1);
         let probe_alive = Arc::clone(&self.probe_threads_alive);
-        let abandoned_inodes = Arc::clone(&self.abandoned_probe_identities);
+        let probe_alive_err = Arc::clone(&probe_alive);
+        let abandoned_refcounts = Arc::clone(&self.abandoned_probe_refcounts);
         let thread_identity = path_identity(&plan.path);
+        let prev = probe_alive.fetch_add(1, Ordering::AcqRel);
+        if prev >= Self::MAX_PROBE_THREADS_ALIVE {
+            probe_alive.fetch_sub(1, Ordering::AcqRel);
+            self.latch_probe_fast_fail();
+            return Err(TokenError::StoreUnavailable);
+        }
         let mut probe_plan = plan;
         probe_plan.probe_cancel = Arc::clone(&abandoned);
         let spawn_ok = std::thread::Builder::new()
             .name("token-reload-probe".into())
             .spawn(move || {
-                probe_alive.fetch_add(1, Ordering::AcqRel);
+                let _slot = ProbeThreadSlotGuard {
+                    alive: probe_alive,
+                };
                 let _thread_guard = ProbeThreadAliveGuard {
-                    alive: Arc::clone(&probe_alive),
                     identity: thread_identity,
-                    abandoned: Arc::clone(&abandoned_inodes),
+                    abandoned_refcounts,
                 };
                 let _live = live_guard;
                 let _ = tx.send(Self::execute_disk_probe(&probe_plan));
             });
-        if spawn_ok.is_err() {
-            return Ok(Self::timed_out_disk_probe());
+        if let Err(e) = spawn_ok {
+            probe_alive_err.fetch_sub(1, Ordering::AcqRel);
+            tracing::error!("token-reload-probe spawn failed: {e}");
+            self.latch_probe_fast_fail();
+            return Err(TokenError::StoreUnavailable);
         }
         let timeout = deadline
             .saturating_duration_since(Instant::now())

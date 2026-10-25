@@ -165,21 +165,8 @@ impl ModeStore {
             Profile::Prod => [Profile::Prod].as_slice(),
             Profile::Sim | Profile::Test => &[Profile::Sim, Profile::Test][..],
         };
-        let mut profile_max = 0u64;
-        for &profile in profiles {
-            if let Some(n) = epoch_store::read_counter(&self.provision_root, profile)? {
-                profile_max = profile_max.max(n);
-            }
-        }
-        match epoch_store::read_highest_epoch_file(&self.provision_root)? {
-            None => Ok(profile_max),
-            Some(h) => {
-                if profile_max > 0 && h < profile_max {
-                    return Err(ModeError::CounterCorrupt);
-                }
-                Ok(h.max(profile_max))
-            }
-        }
+        epoch_store::effective_highest_for_profiles(&self.provision_root, profiles)
+            .map_err(ModeError::from)
     }
 
     /// Fail closed when profile counters exist but `highest.counter` was removed (post-bump tamper).
@@ -234,31 +221,31 @@ impl ModeStore {
         }
     }
 
-    fn stored_epoch_claim_for_profile(&self, profile: Profile) -> u64 {
+    fn stored_epoch_claim_for_profile(&self, profile: Profile) -> Result<u64, ModeError> {
+        let mode_c = Self::file_counter(&self.mode_path).unwrap_or(0);
         match std::fs::read_to_string(&self.profile_path) {
             Ok(raw) => match serde_json::from_str::<ProfileFileBody>(&raw) {
-                Ok(body) if body.profile == profile => {
-                    let mode_c = Self::file_counter(&self.mode_path).unwrap_or(0);
-                    body.counter.max(mode_c)
-                }
-                Ok(_) => 0,
-                Err(_) => 0,
+                Ok(body) if body.profile == profile => Ok(body.counter.max(mode_c)),
+                Ok(_) => Ok(0),
+                Err(_) if mode_c > 0 => Err(ModeError::CounterCorrupt),
+                Err(_) => Ok(0),
             },
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 if profile == self.boot_profile {
-                    Self::file_counter(&self.mode_path).unwrap_or(0)
+                    Ok(mode_c)
                 } else {
-                    0
+                    Ok(0)
                 }
             }
-            Err(_) => 0,
+            Err(_) if mode_c > 0 => Err(ModeError::CounterCorrupt),
+            Err(_) => Ok(0),
         }
     }
 
     fn last_counter(&self, profile: Profile) -> Result<u64, ModeError> {
         match epoch_store::read_counter(&self.provision_root, profile)? {
             None => {
-                if self.stored_epoch_claim_for_profile(profile) > 0 {
+                if self.stored_epoch_claim_for_profile(profile)? > 0 {
                     return Err(ModeError::CounterCorrupt);
                 }
                 Ok(0)
@@ -589,7 +576,7 @@ mod tests {
 
     #[test]
     fn test_daemon_restart_stays_test_when_sim_epoch_counter_lower() {
-        use crate::config::profile_epoch_counter_path;
+        use crate::config::{highest_epoch_counter_path, profile_epoch_counter_path};
         let root = tempfile::tempdir().unwrap();
         let data = root.path().join("test");
         std::fs::create_dir_all(&data).unwrap();
@@ -607,6 +594,27 @@ mod tests {
         assert_eq!(
             restarted.effective(Profile::Test).operational,
             OperationalMode::Testing
+        );
+        std::fs::write(highest_epoch_counter_path(root.path()), b"999\n").unwrap();
+        let tampered = ModeStore::new_with_epoch_root(&data, root.path(), Profile::Test);
+        assert_eq!(tampered.load_profile(), Profile::Prod);
+    }
+
+    #[test]
+    fn effective_highest_is_max_of_highest_file_and_scoped_profile_counters() {
+        let root = tempfile::tempdir().unwrap();
+        let data = root.path().join("sim");
+        std::fs::create_dir_all(&data).unwrap();
+        epoch_store::write_counter(root.path(), Profile::Sim, 5).unwrap();
+        epoch_store::write_counter(root.path(), Profile::Test, 3).unwrap();
+        epoch_store::bump_highest_epoch(root.path(), 4).unwrap();
+        assert_eq!(
+            epoch_store::effective_highest_for_profiles(
+                root.path(),
+                &[Profile::Sim, Profile::Test]
+            )
+            .unwrap(),
+            5
         );
     }
 
