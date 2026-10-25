@@ -192,11 +192,11 @@ esac
 sudo -u kxprov-gw test -r "${CRED_DIR}/lan.key" \
   || { log "gateway cannot read LoadCredential lan.key"; exit 1; }
 
-serve_sock_group="$(stat -c '%G' /run/kx-provision-gw/web-serve.sock)"
+serve_sock_group="$(sudo stat -c '%G' /run/kx-provision-gw/web-serve.sock)"
 [[ "$serve_sock_group" == "kxprov-gw" ]] \
   || { log "web-serve.sock group=$serve_sock_group want kxprov-gw"; exit 1; }
 
-run_dir_mode="$(stat -c '%a' /run/kx-provision-gw)"
+run_dir_mode="$(sudo stat -c '%a' /run/kx-provision-gw)"
 [[ "$run_dir_mode" == "750" ]] || { log "gateway runtime mode=$run_dir_mode want 750"; exit 1; }
 
 # Gateway user must reach the daemon socket (supplementary group + peer policy uid).

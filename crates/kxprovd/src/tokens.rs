@@ -1425,6 +1425,14 @@ mod tests {
         store
             .verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan)
             .expect("reload recovers after hung probe");
+        let post_reload = Instant::now() + Duration::from_secs(5);
+        while store.live_disk_probe_threads_for_test() > 0 {
+            assert!(
+                Instant::now() < post_reload,
+                "probe thread did not finish after reload"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
         assert_eq!(store.live_disk_probe_threads_for_test(), 0);
     }
 
