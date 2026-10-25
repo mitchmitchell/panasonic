@@ -758,7 +758,11 @@ impl Transport for SimTransport {
             if n > 0 {
                 self.sent.extend_from_slice(&data[..n]);
                 let rx_done = self.now + tline.tx_ms(n);
-                let emits = self.sim.lock().expect("sim pbx lock").feed(&data[..n], self.now);
+                let emits = self
+                    .sim
+                    .lock()
+                    .expect("sim pbx lock")
+                    .feed(&data[..n], self.now);
                 for (delay, bytes) in emits {
                     let at = rx_done + delay + tline.tx_ms(bytes.len());
                     self.schedule(at, bytes);

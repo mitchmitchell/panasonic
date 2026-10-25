@@ -44,8 +44,9 @@ fn test_late_ack_drained_before_verify_reread() {
     let (base, new) = block(&mut c);
     // Ack arrives 2.3 s after the write: after the 2 s ack timeout, inside the 0.5 s
     // quiet window that drain uses.
-    c.transport_mut().sim_mut()
-                .inject(Fault::LateAck { delay_ms: 2_300 });
+    c.transport_mut()
+        .sim_mut()
+        .inject(Fault::LateAck { delay_ms: 2_300 });
     let t0 = c.transport().now();
     assert!(matches!(c.write(0x24, 0, 0, &new), Err(Error::Unacked(_))));
     assert_eq!(

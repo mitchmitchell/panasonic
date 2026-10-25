@@ -26,8 +26,9 @@ fn cid_block(c: &mut Client<SimTransport>) -> (Vec<u8>, Vec<u8>) {
 }
 
 fn write_count(c: &Client<SimTransport>) -> usize {
-    c.transport().sim()
-                .commands
+    c.transport()
+        .sim()
+        .commands
         .iter()
         .filter(|&&b| b == 0x00)
         .count()
@@ -36,7 +37,9 @@ fn write_count(c: &Client<SimTransport>) -> usize {
 #[test]
 fn test_a2_busy_run_on_read() {
     let mut c = client();
-    c.transport_mut().sim_mut().inject(Fault::Busy { frames: 8 });
+    c.transport_mut()
+        .sim_mut()
+        .inject(Fault::Busy { frames: 8 });
     assert!(c.read(0x24, 0, 0, 3).is_ok());
 }
 
@@ -73,8 +76,9 @@ fn test_a2_unacked_applied_and_dropped() {
 fn test_a2_late_ack_garbled_stale() {
     let mut c = client();
     let (base, new) = cid_block(&mut c);
-    c.transport_mut().sim_mut()
-                .inject(Fault::LateAck { delay_ms: 2_300 });
+    c.transport_mut()
+        .sim_mut()
+        .inject(Fault::LateAck { delay_ms: 2_300 });
     assert!(matches!(c.write(0x24, 0, 0, &new), Err(Error::Unacked(_))));
     assert_eq!(
         c.verify_block(0x24, 0, 0, &new, &base),
@@ -123,7 +127,9 @@ fn test_a2_silent_write() {
 #[test]
 fn test_a2_busy_past_bound_from_fixture() {
     let mut c = client();
-    c.transport_mut().sim_mut().inject(Fault::Busy { frames: 200 });
+    c.transport_mut()
+        .sim_mut()
+        .inject(Fault::Busy { frames: 200 });
     assert_eq!(c.read(0x24, 0, 0, 3), Err(Error::BusyTimeout));
 }
 
@@ -131,8 +137,9 @@ fn test_a2_busy_past_bound_from_fixture() {
 fn test_a2_unacked_then_busy_before_verify() {
     let mut c = client();
     let (base, new) = cid_block(&mut c);
-    c.transport_mut().sim_mut()
-                .inject(Fault::NoAckThenBusy { busy_frames: 12 });
+    c.transport_mut()
+        .sim_mut()
+        .inject(Fault::NoAckThenBusy { busy_frames: 12 });
     assert!(matches!(c.write(0x24, 0, 0, &new), Err(Error::Unacked(_))));
     assert_eq!(
         c.verify_block(0x24, 0, 0, &new, &base),
@@ -170,8 +177,9 @@ fn test_a2_another_terminal_login_fault() {
         Access::ReadOnly,
         Timing::default(),
     );
-    c.transport_mut().sim_mut()
-                .inject(Fault::AnotherTerminal(SignOn::default().in_use.clone()));
+    c.transport_mut()
+        .sim_mut()
+        .inject(Fault::AnotherTerminal(SignOn::default().in_use.clone()));
     assert!(matches!(
         c.login(PLACEHOLDER_PASSWORD),
         Err(Error::Login(kxtd1232::error::LoginFailure::AnotherTerminal))
