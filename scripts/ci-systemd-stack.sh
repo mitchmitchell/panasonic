@@ -155,9 +155,8 @@ fi
 run_prov_group="$(stat -c '%G' /run/kx-provision)"
 run_prov_mode="$(stat -c '%a' /run/kx-provision)"
 [[ "$run_prov_group" == "kxprovision" ]] || { log "/run/kx-provision group=$run_prov_group want kxprovision"; exit 1; }
-# Some systemd builds apply 0755 despite `:0750` in RuntimeDirectory=; group must still be kxprovision.
-[[ "$run_prov_mode" == "750" || "$run_prov_mode" == "755" ]] \
-  || { log "/run/kx-provision mode=$run_prov_mode want 750 (or 755)"; exit 1; }
+[[ "$run_prov_mode" == "750" ]] \
+  || { log "/run/kx-provision mode=$run_prov_mode want 750"; exit 1; }
 sudo -u kxprov-gw test -x /run/kx-provision \
   || { log "gateway cannot traverse /run/kx-provision"; exit 1; }
 
@@ -206,7 +205,10 @@ sudo -u kxprov-gw test -r /run/kx-provision/kxprovd.sock -a -w /run/kx-provision
 sudo systemctl stop kxprov-gw.service
 sleep 0.5
 [[ -S /run/kx-provision/kxprovd.sock ]] || { log "daemon socket removed when gateway stopped"; exit 1; }
-[[ ! -e /run/kx-provision-gw/web-serve.sock ]] || [[ ! -S /run/kx-provision-gw/web-serve.sock ]] || true
+if [[ -e /run/kx-provision-gw/web-serve.sock ]]; then
+  log "web-serve.sock still present after kxprov-gw stop"
+  exit 1
+fi
 
 sudo systemctl stop kxprovd.service
 log "ok (security summary in /tmp/systemd-security.txt)"

@@ -38,14 +38,22 @@ fn open_validated_secret_resolved(path: &Path, label: &str) -> anyhow::Result<Fi
         use nix::fcntl::OFlag;
         use std::os::unix::fs::OpenOptionsExt;
 
+        use std::os::unix::fs::FileTypeExt;
+
         let file = OpenOptions::new()
             .read(true)
-            .custom_flags(OFlag::O_NOFOLLOW.bits())
+            .custom_flags(OFlag::O_NOFOLLOW.bits() | OFlag::O_NONBLOCK.bits())
             .open(path)
             .map_err(|e| anyhow::anyhow!("{label}: open: {e}"))?;
         let meta = file
             .metadata()
             .map_err(|e| anyhow::anyhow!("{label}: fstat: {e}"))?;
+        if meta.file_type().is_fifo() {
+            anyhow::bail!("{label}: refusing FIFO special file");
+        }
+        if !meta.is_file() {
+            anyhow::bail!("{label}: must be a regular file");
+        }
         validate_secret_metadata(&meta, path, label, Some(GATEWAY_SECRET_GROUP))?;
         Ok(file)
     }
@@ -63,15 +71,6 @@ pub fn read_secret_file(path: &Path, label: &str) -> anyhow::Result<String> {
     file.read_to_string(&mut buf)
         .map_err(|e| anyhow::anyhow!("{label}: read: {e}"))?;
     Ok(buf)
-}
-
-pub fn validate_secret_file_with_group(
-    path: &Path,
-    label: &str,
-    group_for_root_owned: Option<&str>,
-) -> anyhow::Result<()> {
-    let _ = group_for_root_owned;
-    validate_secret_file(path, label)
 }
 
 fn validate_secret_metadata(
@@ -181,6 +180,7 @@ pub(crate) fn skip_secret_file_checks() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
     use std::os::unix::fs::PermissionsExt;
 
     fn write_secret(path: &Path, body: &str, mode: u32) {
@@ -225,6 +225,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn accepts_credential_mode_0440_root_owned() {
         std::env::remove_var("KXPROV_SKIP_SECRET_FILE_CHECKS");
         let dir = tempfile::tempdir().unwrap();
@@ -238,6 +239,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn resolve_prefers_credentials_directory() {
         let dir = tempfile::tempdir().unwrap();
         let cred = dir.path().join("creds");

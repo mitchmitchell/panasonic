@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -33,7 +34,7 @@ pub struct LoginRateLimiter {
     max_ip_backoff: Duration,
     by_key: Arc<Mutex<HashMap<String, Entry>>>,
     account_verify: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
-    account_waiters: Arc<Mutex<HashMap<String, u32>>>,
+    account_waiters: Arc<std::sync::Mutex<HashMap<String, u32>>>,
     /// In-process only (never written to disk): last successful login IP per account.
     last_success_ip: Arc<Mutex<HashMap<String, String>>>,
 }
@@ -56,7 +57,7 @@ impl LoginRateLimiter {
             max_ip_backoff,
             by_key: Arc::new(Mutex::new(HashMap::new())),
             account_verify: Arc::new(Mutex::new(HashMap::new())),
-            account_waiters: Arc::new(Mutex::new(HashMap::new())),
+            account_waiters: Arc::new(std::sync::Mutex::new(HashMap::new())),
             last_success_ip: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -89,65 +90,56 @@ impl LoginRateLimiter {
         let privileged = self
             .is_privileged_login_ip(account_key, ip_key, session_prior_ip_key)
             .await;
-        let bypass_waiter_cap = privileged || !self.key_has_failure_history(ip_key).await;
+        let bypass_waiter_cap = privileged
+            || (!shared_loopback_ip_key(ip_key) && !self.key_has_failure_history(ip_key).await);
         let verify = self.account_verify_lock(account_key).await;
 
-        if !bypass_waiter_cap {
-            let mut waiters = self.account_waiters.lock().await;
+        let waiter_slot = if bypass_waiter_cap {
+            None
+        } else {
+            let mut waiters = self
+                .account_waiters
+                .lock()
+                .expect("account waiters lock");
             let n = waiters.entry(account_key.to_string()).or_insert(0);
             if *n >= MAX_ACCOUNT_WAITERS {
                 return Err(LoginGateError::AccountQueueFull);
             }
             *n += 1;
-        }
+            Some(AccountWaiterSlot {
+                account_key: account_key.to_string(),
+                waiters: Arc::clone(&self.account_waiters),
+            })
+        };
 
-        let soft = if privileged {
-            Duration::ZERO
-        } else {
+        if !privileged {
             let reserve = {
                 let _slot = verify.lock().await;
                 self.reserve_account_soft_delay(account_key).await
             };
             match reserve {
-                Err(()) => {
-                    if !bypass_waiter_cap {
-                        let mut waiters = self.account_waiters.lock().await;
-                        if let Some(n) = waiters.get_mut(account_key) {
-                            *n = n.saturating_sub(1);
-                            if *n == 0 {
-                                waiters.remove(account_key);
-                            }
-                        }
-                    }
-                    return Err(LoginGateError::AccountPaceRejected);
-                }
-                Ok(wait) => {
+                SoftPace::Rejected => return Err(LoginGateError::AccountPaceRejected),
+                SoftPace::Ready(wait) => {
                     if wait > Duration::ZERO {
                         tokio::time::sleep(wait).await;
                     }
-                    wait
-                }
-            }
-        };
-
-        let lock_result = tokio::time::timeout(MAX_ACCOUNT_QUEUE_WAIT, verify.lock()).await;
-
-        if !bypass_waiter_cap {
-            let mut waiters = self.account_waiters.lock().await;
-            if let Some(n) = waiters.get_mut(account_key) {
-                *n = n.saturating_sub(1);
-                if *n == 0 {
-                    waiters.remove(account_key);
                 }
             }
         }
+
+        let ip_delay = self.delay_for_key(ip_key).await;
+        if ip_delay > Duration::ZERO {
+            return Err(LoginGateError::IpRateLimited(ip_delay));
+        }
+
+        drop(waiter_slot);
+        let lock_result = tokio::time::timeout(MAX_ACCOUNT_QUEUE_WAIT, verify.lock()).await;
 
         let _verify_guard = match lock_result {
             Err(_) => return Err(LoginGateError::AccountQueueTimeout),
             Ok(guard) => guard,
         };
 
-        let _ = soft;
         Ok(attempt().await)
     }
 
@@ -171,7 +163,7 @@ impl LoginRateLimiter {
             .clone()
     }
 
-    async fn reserve_account_soft_delay(&self, account_key: &str) -> Result<Duration, ()> {
+    async fn reserve_account_soft_delay(&self, account_key: &str) -> SoftPace {
         let pace_key = format!("pace:{account_key}");
         let mut map = self.by_key.lock().await;
         let now = Instant::now();
@@ -182,10 +174,10 @@ impl LoginRateLimiter {
         let scheduled = now.max(entry.next_allowed);
         let wait = scheduled.saturating_duration_since(now);
         if wait > MAX_SOFT_PACE {
-            return Err(());
+            return SoftPace::Rejected;
         }
         entry.next_allowed = scheduled + MAX_SOFT_PACE;
-        Ok(wait)
+        SoftPace::Ready(wait)
     }
 
     pub async fn delay_before_attempt(&self, account_key: &str, ip_key: &str) -> Duration {
@@ -197,7 +189,7 @@ impl LoginRateLimiter {
     }
 
     async fn delay_for_key(&self, key: &str) -> Duration {
-        let cap = if key.starts_with("ip:") {
+        let cap = if key.starts_with("ip:") || key.starts_with("ts-login:") {
             self.max_ip_backoff
         } else {
             self.max_account_backoff
@@ -240,6 +232,38 @@ impl LoginRateLimiter {
         }
         entry.next_allowed = now + backoff;
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SoftPace {
+    Ready(Duration),
+    Rejected,
+}
+
+struct AccountWaiterSlot {
+    account_key: String,
+    waiters: Arc<std::sync::Mutex<HashMap<String, u32>>>,
+}
+
+impl Drop for AccountWaiterSlot {
+    fn drop(&mut self) {
+        let mut waiters = self.waiters.lock().expect("account waiters lock");
+        if let Some(n) = waiters.get_mut(&self.account_key) {
+            *n = n.saturating_sub(1);
+            if *n == 0 {
+                waiters.remove(&self.account_key);
+            }
+        }
+    }
+}
+
+fn shared_loopback_ip_key(ip_key: &str) -> bool {
+    let Some(rest) = ip_key.strip_prefix("ip:") else {
+        return false;
+    };
+    rest.parse::<IpAddr>()
+        .ok()
+        .is_some_and(|ip| ip.is_loopback())
 }
 
 fn wait_for_key(entry: Option<&Entry>, now: Instant, cap: Duration) -> Duration {

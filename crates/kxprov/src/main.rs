@@ -5,149 +5,20 @@
 //! (bad arguments, out-of-range records, invalid field values). Errors print one line,
 //! `kxprov: error: ...`, with no backtrace.
 
-use clap::{Parser, Subcommand, ValueEnum};
-use kxprov_api::{sim_passed_path, DAEMON_SOCKET, DATA_DIR, TOKENS_JSON};
-use kxprov_api::{OperationalMode, Profile, SetModeParams};
+use clap::Parser;
+use kxprov::cli::{
+    Cli, Command, ModeCommand, SimMarkCommand, TokenCommand, TransportKind,
+};
+use kxprov_api::sim_passed_path;
+use kxprov_api::SetModeParams;
 use kxtd1232::error::NotAllowed;
-use kxtd1232::{build_plan, field_patch, Client, Error, FieldKind, Granularity};
+use kxtd1232::{build_plan, field_patch, Client, Error, Granularity};
 use kxtd1232_sim::{SimPbx, SimTransport, PLACEHOLDER_PASSWORD};
 mod token_atomic;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
 use token_atomic::atomic_write_tokens;
-
-#[derive(Parser, Debug)]
-#[command(
-    name = "kxprov",
-    version,
-    about = "kx-provision CLI (A1: simulator only)"
-)]
-struct Cli {
-    /// Transport. Only the in-process simulator exists in Phase A.
-    #[arg(long, value_enum, default_value_t = TransportKind::Sim)]
-    transport: TransportKind,
-    /// Daemon Unix socket (admin commands only).
-    #[arg(long, default_value = DAEMON_SOCKET)]
-    socket: std::path::PathBuf,
-    #[command(subcommand)]
-    cmd: Command,
-}
-
-#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
-enum TransportKind {
-    Sim,
-}
-
-#[derive(Subcommand, Debug)]
-enum Command {
-    /// Print the CLI version and the PBX version probe.
-    Version,
-    /// Read typed fields.
-    Read {
-        /// cid_name, cid_number or ext_name
-        kind: FieldKind,
-        #[arg(long, default_value_t = 0)]
-        first: u16,
-        #[arg(long, default_value_t = 5, value_parser = clap::value_parser!(u16).range(1..))]
-        count: u16,
-    },
-    /// Dry-run a typed field edit (no write is ever sent).
-    Plan {
-        kind: FieldKind,
-        index: u16,
-        value: String,
-    },
-    /// Clear persisted LOCKED state (root admin, after verified backup).
-    Unlock {
-        #[arg(long)]
-        job: String,
-        #[arg(long)]
-        reason: String,
-    },
-    /// Operational mode and profile (v2.7 F1, root socket only).
-    Mode {
-        #[command(subcommand)]
-        cmd: ModeCommand,
-    },
-    /// Record simulator test pass for this build hash (v2.7 F1).
-    SimMark {
-        #[command(subcommand)]
-        cmd: SimMarkCommand,
-    },
-    /// Daemon bearer token admin (root; tokens file 0600).
-    Token {
-        #[command(subcommand)]
-        cmd: TokenCommand,
-    },
-}
-
-#[derive(Subcommand, Debug)]
-enum TokenCommand {
-    /// Replace a token secret (prints new bearer once).
-    Rotate {
-        #[arg(long)]
-        id: String,
-        #[arg(long, default_value = TOKENS_JSON)]
-        tokens_path: PathBuf,
-    },
-}
-
-#[derive(Subcommand, Debug)]
-enum ModeCommand {
-    Set {
-        #[arg(long, value_enum)]
-        mode: OperationalModeCli,
-        #[arg(long, value_enum)]
-        profile: ProfileCli,
-    },
-}
-
-#[derive(Subcommand, Debug)]
-enum SimMarkCommand {
-    /// Run simulator crate tests and write sim-mark.json on success.
-    Write {
-        #[arg(long, default_value = DATA_DIR)]
-        data_dir: PathBuf,
-    },
-    /// Show whether the current build hash is marked.
-    Status {
-        #[arg(long, default_value = DATA_DIR)]
-        data_dir: PathBuf,
-    },
-}
-
-#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
-enum OperationalModeCli {
-    Testing,
-    Production,
-}
-
-#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
-enum ProfileCli {
-    Sim,
-    Test,
-    Prod,
-}
-
-impl From<OperationalModeCli> for OperationalMode {
-    fn from(v: OperationalModeCli) -> Self {
-        match v {
-            OperationalModeCli::Testing => OperationalMode::Testing,
-            OperationalModeCli::Production => OperationalMode::Production,
-        }
-    }
-}
-
-impl From<ProfileCli> for Profile {
-    fn from(v: ProfileCli) -> Self {
-        match v {
-            ProfileCli::Sim => Profile::Sim,
-            ProfileCli::Test => Profile::Test,
-            ProfileCli::Prod => Profile::Prod,
-        }
-    }
-}
 
 /// CLI failure, split by exit code.
 #[derive(Debug)]

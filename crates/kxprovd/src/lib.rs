@@ -84,6 +84,22 @@ fn set_daemon_socket_permissions(
     Ok(())
 }
 
+fn bind_daemon_listener(
+    socket_path: &std::path::Path,
+    group_name: &str,
+) -> Result<UnixListener, Box<dyn std::error::Error + Send + Sync>> {
+    if socket_path.exists() {
+        std::fs::remove_file(socket_path)?;
+    }
+    let listener = UnixListener::bind(socket_path)
+        .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
+    if let Err(e) = set_daemon_socket_permissions(socket_path, group_name) {
+        let _ = std::fs::remove_file(socket_path);
+        return Err(e);
+    }
+    Ok(listener)
+}
+
 pub struct Daemon {
     _process_lock: lock::ProcessLock,
     _thread: std::thread::JoinHandle<()>,
@@ -175,11 +191,7 @@ impl Daemon {
             transition,
         });
 
-        let socket_path = config.socket_path.clone();
-        let daemon_socket_group = config.daemon_socket_group.clone();
-        if socket_path.exists() {
-            let _ = std::fs::remove_file(&socket_path);
-        }
+        let listener = bind_daemon_listener(&config.socket_path, &config.daemon_socket_group)?;
 
         let thread = std::thread::spawn(move || {
             let runtime = tokio::runtime::Builder::new_current_thread()
@@ -187,17 +199,6 @@ impl Daemon {
                 .build()
                 .expect("runtime");
             runtime.block_on(async move {
-                let listener = match UnixListener::bind(&socket_path) {
-                    Ok(l) => l,
-                    Err(e) => {
-                        tracing::error!("bind {socket_path:?}: {e}");
-                        return;
-                    }
-                };
-                if let Err(e) = set_daemon_socket_permissions(&socket_path, &daemon_socket_group) {
-                    tracing::error!("daemon socket permissions {socket_path:?}: {e}");
-                    return;
-                }
                 let tokens_worker = api_state.tokens.clone();
                 let ((), serve_res) = tokio::join!(
                     worker::run_worker(job_rx, worker_ctx, q, tokens_worker),
@@ -368,11 +369,7 @@ impl Daemon {
             transition,
         });
 
-        let socket_path = config.socket_path.clone();
-        let daemon_socket_group = config.daemon_socket_group.clone();
-        if socket_path.exists() {
-            let _ = std::fs::remove_file(&socket_path);
-        }
+        let listener = bind_daemon_listener(&config.socket_path, &config.daemon_socket_group)?;
 
         let thread = std::thread::spawn(move || {
             let runtime = tokio::runtime::Builder::new_current_thread()
@@ -380,17 +377,6 @@ impl Daemon {
                 .build()
                 .expect("runtime");
             runtime.block_on(async move {
-                let listener = match UnixListener::bind(&socket_path) {
-                    Ok(l) => l,
-                    Err(e) => {
-                        tracing::error!("bind {socket_path:?}: {e}");
-                        return;
-                    }
-                };
-                if let Err(e) = set_daemon_socket_permissions(&socket_path, &daemon_socket_group) {
-                    tracing::error!("daemon socket permissions {socket_path:?}: {e}");
-                    return;
-                }
                 let tokens_worker = api_state.tokens.clone();
                 let ((), serve_res) = tokio::join!(
                     worker::run_worker(job_rx, worker_ctx, q, tokens_worker),

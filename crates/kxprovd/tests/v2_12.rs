@@ -5,7 +5,9 @@ mod common;
 use common::{bearer_auth, init_test_daemon, wait_daemon_api_ready, WRITER_SECRET};
 use kxprov_api::resolve_profile_data_dir;
 use kxprov_api::{ApiClient, PlanChangeParams, RequestBody, Scope};
-use kxprov_api::{OperationalMode, Profile, DAEMON_SOCKET, DATA_DIR, TOKENS_JSON};
+use kxprov_api::{
+    ApiError, OperationalMode, Profile, DAEMON_SOCKET, DATA_DIR, TOKENS_JSON, TOKEN_QUEUE_DEPTH_MAX,
+};
 use kxprovd::audit::AuditKind;
 use kxprovd::mode::{ModeFileBody, ModeStore, ProfileFileBody};
 use kxprovd::tokens::TokenStore;
@@ -107,23 +109,41 @@ async fn per_token_queue_depth_rate_limit_integration() {
     let (_d, sock) = init_test_daemon(&tmp, uid, Profile::Sim);
     wait_daemon_api_ready(&sock).await;
 
-    let mut client = ApiClient::connect(&sock).await.unwrap();
-    let result = client
-        .call_auth(
-            RequestBody::PlanChange {
-                params: PlanChangeParams {
-                    kind: kxprov_api::FieldKindWire::CidName,
-                    index: 1,
-                    value: "RL-smoke".into(),
-                },
-            },
-            Some(bearer_auth(WRITER_SECRET)),
-        )
-        .await;
-    assert!(
-        result.is_ok(),
-        "daemon should accept plan_change when not saturated"
-    );
+    let sock = std::sync::Arc::new(sock);
+    let n = usize::try_from(TOKEN_QUEUE_DEPTH_MAX).unwrap() + 1;
+    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(n));
+    let mut handles = Vec::with_capacity(n);
+    for i in 0..n {
+        let sock = std::sync::Arc::clone(&sock);
+        let barrier = std::sync::Arc::clone(&barrier);
+        handles.push(tokio::spawn(async move {
+            barrier.wait().await;
+            let mut client = ApiClient::connect(sock.as_path()).await.unwrap();
+            client
+                .call_auth(
+                    RequestBody::PlanChange {
+                        params: PlanChangeParams {
+                            kind: kxprov_api::FieldKindWire::CidName,
+                            index: 1,
+                            value: format!("RL-{i}"),
+                        },
+                    },
+                    Some(bearer_auth(WRITER_SECRET)),
+                )
+                .await
+        }));
+    }
+    let mut ok = 0u32;
+    let mut rate_limited = 0u32;
+    for h in handles {
+        match h.await.unwrap() {
+            Ok(_) => ok += 1,
+            Err(ApiError::Remote { code, .. }) if code == "rate_limit" => rate_limited += 1,
+            other => panic!("unexpected plan_change result: {other:?}"),
+        }
+    }
+    assert_eq!(ok, TOKEN_QUEUE_DEPTH_MAX, "expected {TOKEN_QUEUE_DEPTH_MAX} successes");
+    assert_eq!(rate_limited, 1, "expected exactly one rate_limit under burst");
 }
 
 #[test]

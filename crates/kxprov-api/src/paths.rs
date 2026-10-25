@@ -56,12 +56,9 @@ pub fn goliath_dir(profile: Profile) -> String {
     format!("{}/goliath", profile_data_dir(profile))
 }
 
-/// Whether `base` uses the production v2.12 layout (profile subdirs under [`DATA_DIR`]).
+/// Whether `base` is the production v2.12 repository root ([`DATA_DIR`]).
 pub fn production_layout(base: &Path) -> bool {
     base == Path::new(DATA_DIR)
-        && DAEMON_SOCKET.starts_with(DAEMON_RUNTIME_DIR)
-        && GATEWAY_WEB_SERVE_SOCKET.starts_with(GATEWAY_RUNTIME_DIR)
-        && DAEMON_RUNTIME_DIR != GATEWAY_RUNTIME_DIR
 }
 
 /// Profile-scoped data directory (plans, backups, mode.json, …): `{base}/<profile>/`.
@@ -144,5 +141,14 @@ mod tests {
             profile_epoch_counter_path(base, Profile::Prod),
             PathBuf::from("/opt/kx-data/.epoch/prod.counter")
         );
+    }
+
+    #[test]
+    fn production_runtime_paths_under_distinct_runtime_dirs() {
+        assert!(DAEMON_SOCKET.starts_with(DAEMON_RUNTIME_DIR));
+        assert!(GATEWAY_WEB_SERVE_SOCKET.starts_with(GATEWAY_RUNTIME_DIR));
+        assert_ne!(DAEMON_RUNTIME_DIR, GATEWAY_RUNTIME_DIR);
+        assert!(production_layout(Path::new(DATA_DIR)));
+        assert!(!production_layout(Path::new("/tmp/kx-data")));
     }
 }

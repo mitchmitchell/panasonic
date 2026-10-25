@@ -218,7 +218,9 @@ pub fn client_ip(
     trust_x_forwarded_for: bool,
     serve_proxy_trusted: bool,
 ) -> String {
-    let peer = peer.unwrap_or_else(|| "0.0.0.0:0".parse().unwrap());
+    const UNKNOWN_PEER: SocketAddr =
+        SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 0);
+    let peer = peer.unwrap_or(UNKNOWN_PEER);
     if trust_x_forwarded_for && serve_proxy_trusted {
         if let Some(ip) = login_client::x_forwarded_for_last(headers) {
             return ip.to_string();

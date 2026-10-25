@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -16,6 +16,7 @@ use time::OffsetDateTime;
 use tokio::sync::Mutex;
 
 pub struct DaemonClient {
+    socket_path: PathBuf,
     client: Mutex<ApiClient>,
     gateway_bearer: String,
 }
@@ -25,8 +26,10 @@ impl DaemonClient {
         path: impl AsRef<Path>,
         gateway_bearer: String,
     ) -> Result<Arc<Self>, ApiError> {
-        let client = ApiClient::connect(path).await?;
+        let socket_path = path.as_ref().to_path_buf();
+        let client = ApiClient::connect(&socket_path).await?;
         Ok(Arc::new(Self {
+            socket_path,
             client: Mutex::new(client),
             gateway_bearer,
         }))
@@ -39,10 +42,25 @@ impl DaemonClient {
     ) -> Result<ResponseResult, BackendError> {
         let (auth, audit) = daemon_auth(caller, &self.gateway_bearer);
         let mut guard = self.client.lock().await;
-        guard
-            .call_auth_audit(body, Some(auth), audit)
+        match guard
+            .call_auth_audit(body.clone(), Some(auth.clone()), audit.clone())
             .await
-            .map_err(map_api_error)
+        {
+            Ok(r) => Ok(r),
+            Err(ApiError::Io(_)) => {
+                drop(guard);
+                let fresh = ApiClient::connect(&self.socket_path)
+                    .await
+                    .map_err(map_api_error)?;
+                let mut guard = self.client.lock().await;
+                *guard = fresh;
+                guard
+                    .call_auth_audit(body, Some(auth), audit)
+                    .await
+                    .map_err(map_api_error)
+            }
+            Err(e) => Err(map_api_error(e)),
+        }
     }
 }
 

@@ -36,9 +36,18 @@ fn gateway_defaults_match_shared_paths() {
 
 #[test]
 fn cli_and_sim_mark_defaults_match_shared_paths() {
-    assert_eq!(kxprov::cli_defaults::daemon_socket(), DAEMON_SOCKET);
-    assert_eq!(kxprov::cli_defaults::tokens_json(), TOKENS_JSON);
-    assert_eq!(kxprov::cli_defaults::sim_mark_data_dir(), DATA_DIR);
+    assert_eq!(
+        kxprov::cli_defaults::daemon_socket(),
+        PathBuf::from(DAEMON_SOCKET)
+    );
+    assert_eq!(
+        kxprov::cli_defaults::tokens_json(),
+        PathBuf::from(TOKENS_JSON)
+    );
+    assert_eq!(
+        kxprov::cli_defaults::sim_mark_data_dir(),
+        PathBuf::from(DATA_DIR)
+    );
 }
 
 #[test]

@@ -1,18 +1,41 @@
-//! CLI defaults re-exported for integration tests (see `kxprov-api` path agreement test).
+//! Library surface for integration tests (path defaults derived from clap).
+
+pub mod cli;
 
 pub mod cli_defaults {
-    pub use kxprov_api::{sim_passed_path, DAEMON_SOCKET, DATA_DIR, SIM_PASSED_JSON, TOKENS_JSON};
+    use clap::Parser;
+    use kxprov_api::{sim_passed_path, DATA_DIR};
 
-    pub fn daemon_socket() -> &'static str {
-        DAEMON_SOCKET
+    use crate::cli::{Cli, Command, SimMarkCommand, TokenCommand};
+
+    pub fn daemon_socket() -> std::path::PathBuf {
+        Cli::try_parse_from(["kxprov", "version"])
+            .expect("probe parse")
+            .socket
     }
 
-    pub fn tokens_json() -> &'static str {
-        TOKENS_JSON
+    pub fn tokens_json() -> std::path::PathBuf {
+        match Cli::try_parse_from(["kxprov", "token", "rotate", "--id", "_probe"])
+            .expect("probe parse")
+            .cmd
+        {
+            Command::Token {
+                cmd: TokenCommand::Rotate { tokens_path, .. },
+            } => tokens_path,
+            _ => unreachable!("token rotate probe"),
+        }
     }
 
-    pub fn sim_mark_data_dir() -> &'static str {
-        DATA_DIR
+    pub fn sim_mark_data_dir() -> std::path::PathBuf {
+        match Cli::try_parse_from(["kxprov", "sim-mark", "status"])
+            .expect("probe parse")
+            .cmd
+        {
+            Command::SimMark {
+                cmd: SimMarkCommand::Status { data_dir },
+            } => data_dir,
+            _ => unreachable!("sim-mark status probe"),
+        }
     }
 
     pub fn sim_passed_file() -> std::path::PathBuf {
