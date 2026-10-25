@@ -142,8 +142,14 @@ async fn per_token_queue_depth_rate_limit_integration() {
             other => panic!("unexpected plan_change result: {other:?}"),
         }
     }
-    assert_eq!(ok, TOKEN_QUEUE_DEPTH_MAX, "expected {TOKEN_QUEUE_DEPTH_MAX} successes");
-    assert_eq!(rate_limited, 1, "expected exactly one rate_limit under burst");
+    assert_eq!(
+        ok, TOKEN_QUEUE_DEPTH_MAX,
+        "expected {TOKEN_QUEUE_DEPTH_MAX} successes"
+    );
+    assert_eq!(
+        rate_limited, 1,
+        "expected exactly one rate_limit under burst"
+    );
 }
 
 #[test]

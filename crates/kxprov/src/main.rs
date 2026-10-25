@@ -6,9 +6,7 @@
 //! `kxprov: error: ...`, with no backtrace.
 
 use clap::Parser;
-use kxprov::cli::{
-    Cli, Command, ModeCommand, SimMarkCommand, TokenCommand, TransportKind,
-};
+use kxprov::cli::{Cli, Command, ModeCommand, SimMarkCommand, TokenCommand, TransportKind};
 use kxprov_api::sim_passed_path;
 use kxprov_api::SetModeParams;
 use kxtd1232::error::NotAllowed;

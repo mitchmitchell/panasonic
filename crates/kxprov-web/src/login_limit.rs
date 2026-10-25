@@ -97,10 +97,7 @@ impl LoginRateLimiter {
         let waiter_slot = if bypass_waiter_cap {
             None
         } else {
-            let mut waiters = self
-                .account_waiters
-                .lock()
-                .expect("account waiters lock");
+            let mut waiters = self.account_waiters.lock().expect("account waiters lock");
             let n = waiters.entry(account_key.to_string()).or_insert(0);
             if *n >= MAX_ACCOUNT_WAITERS {
                 return Err(LoginGateError::AccountQueueFull);
