@@ -1,25 +1,46 @@
-name: ci
+name: CI
+
 on:
   push:
     branches: [main]
   pull_request:
+
 permissions:
   contents: read
+
 env:
   CARGO_TERM_COLOR: always
+
 jobs:
+  python:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ["3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: pip install -e '.[dev]'
+      - run: ruff check .
+      - run: ruff format --check .
+      - run: pytest -q
+
   fmt:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - run: rustup show active-toolchain || rustup toolchain install
       - run: cargo fmt --all --check
+
   clippy:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
   test:
     runs-on: ubuntu-latest
     steps:
@@ -28,6 +49,7 @@ jobs:
       - run: cargo test --workspace --exclude kxprovd --locked
       - run: cargo test -p kxprovd --features test-util --locked -- --test-threads=1
       - run: cargo test -p kxtd1232-sim --features faults --locked
+
   no-sim-faults-in-ship:
     runs-on: ubuntu-latest
     steps:
@@ -75,6 +97,7 @@ jobs:
           fi
       - run: cargo build -p kxprovd --release --locked
       - run: cargo test -p kxprovd --test release_no_transport_mut --locked
+
   build-aarch64:
     runs-on: ubuntu-latest
     steps:
