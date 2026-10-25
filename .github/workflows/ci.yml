@@ -1,12 +1,18 @@
 name: CI
+
 on:
   push:
     branches: [main]
   pull_request:
+
 permissions:
   contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
-  test:
+  python:
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -20,3 +26,48 @@ jobs:
       - run: ruff check .
       - run: ruff format --check .
       - run: pytest -q
+
+  fmt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup show active-toolchain || rustup toolchain install
+      - run: cargo fmt --all --check
+
+  clippy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace --locked
+
+  build-aarch64:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - run: rustup target add aarch64-unknown-linux-gnu
+      - run: pip install cargo-zigbuild ziglang
+      - run: cargo zigbuild --release --locked --target aarch64-unknown-linux-gnu.2.36 -p kxprov
+      - name: Binary sizes vs 15 MB budget
+        run: |
+          budget=$((15*1024*1024)); fail=0
+          echo "| binary | bytes | MiB | budget 15 MiB |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|---|---|---|---|" >> "$GITHUB_STEP_SUMMARY"
+          for b in target/aarch64-unknown-linux-gnu/release/kxprov; do
+            s=$(stat -c %s "$b"); ok=ok; [ "$s" -gt "$budget" ] && ok=OVER && fail=1
+            line="| $(basename $b) | $s | $(awk "BEGIN{printf \"%.2f\", $s/1048576}") | $ok |"
+            echo "$line"; echo "$line" >> "$GITHUB_STEP_SUMMARY"
+          done
+          exit $fail
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kxprov-aarch64
+          path: target/aarch64-unknown-linux-gnu/release/kxprov
