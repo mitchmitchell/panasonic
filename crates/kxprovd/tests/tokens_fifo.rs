@@ -23,7 +23,7 @@ fn write_tokens(path: &std::path::Path) {
     TokenStore::write_test_file(path, &file).expect("write tokens");
 }
 
-const MAX_LIVE_PROBE_THREADS: usize = 2;
+const MAX_LIVE_PROBE_THREADS: usize = TokenStore::MAX_LIVE_DISK_PROBE_THREADS;
 const MAX_OS_THREAD_DELTA: usize = 2;
 
 fn proc_self_task_count() -> usize {

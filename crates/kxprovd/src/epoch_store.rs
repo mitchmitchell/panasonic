@@ -226,15 +226,26 @@ pub fn bump_highest_epoch(provision_root: &Path, counter: u64) -> Result<(), Epo
     Ok(())
 }
 
-/// Highest epoch value implied by `highest.counter` and every per-profile counter file.
-pub fn effective_highest_epoch(provision_root: &Path) -> Result<u64, EpochError> {
-    let mut max = read_highest_epoch_file(provision_root)?.unwrap_or(0);
-    for profile in [Profile::Sim, Profile::Test, Profile::Prod] {
+/// Highest epoch implied by `highest.counter` and the given profile counter files.
+pub fn effective_highest_for_profiles(
+    provision_root: &Path,
+    profiles: &[Profile],
+) -> Result<u64, EpochError> {
+    let mut profile_max = 0u64;
+    for &profile in profiles {
         if let Some(n) = read_counter(provision_root, profile)? {
-            max = max.max(n);
+            profile_max = profile_max.max(n);
         }
     }
-    Ok(max)
+    match read_highest_epoch_file(provision_root)? {
+        None => Ok(profile_max),
+        Some(h) => {
+            if profile_max > 0 && h < profile_max {
+                return Err(EpochError::Corrupt);
+            }
+            Ok(h.max(profile_max))
+        }
+    }
 }
 
 #[cfg(all(test, feature = "test-util"))]
@@ -246,14 +257,21 @@ mod tests {
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
     #[test]
-    fn effective_highest_is_max_of_highest_file_and_profile_counters() {
+    fn effective_highest_for_profiles_is_max_of_highest_and_counters() {
         let tmp = tempfile::tempdir().unwrap();
         write_counter(tmp.path(), Profile::Sim, 5).unwrap();
         write_counter(tmp.path(), Profile::Test, 3).unwrap();
         bump_highest_epoch(tmp.path(), 4).unwrap();
-        assert_eq!(effective_highest_epoch(tmp.path()).unwrap(), 5);
+        let profiles = [Profile::Sim, Profile::Test];
+        assert_eq!(
+            effective_highest_for_profiles(tmp.path(), &profiles).unwrap(),
+            5
+        );
         std::fs::write(highest_epoch_counter_path(tmp.path()), b"2\n").unwrap();
-        assert_eq!(effective_highest_epoch(tmp.path()).unwrap(), 5);
+        assert!(matches!(
+            effective_highest_for_profiles(tmp.path(), &profiles),
+            Err(EpochError::Corrupt)
+        ));
     }
 
     #[test]
