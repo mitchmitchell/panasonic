@@ -1,9 +1,11 @@
 use crate::apply::{lock_on_apply_failure, run_apply};
+use crate::approval::ApprovalBook;
 use crate::backup::{wire_to_dbh, BackupStore};
 use crate::config::Config;
 use crate::gates::{prod_write_gate, GateState, ProdWriteGate};
 use crate::journal::{Journal, JournalEntry};
 use crate::locked::LockedStore;
+use crate::mode::write_approval_required;
 use crate::plan_store::{PlanSnapshot, PlanStore};
 use crate::queue::{field_kind_wire, JobKind, JobOutcome, JobRequest, JobState};
 use crate::time::now_ms;
@@ -26,6 +28,7 @@ pub struct WorkerCtx {
     pub locked: LockedStore,
     pub gates: Arc<RwLock<GateState>>,
     pub transition: TransitionBlockStore,
+    pub approvals: ApprovalBook,
 }
 
 pub async fn run_worker(
@@ -289,6 +292,27 @@ async fn run_backup(ctx: &WorkerCtx, operational_mode: OperationalMode) -> JobOu
     })
 }
 
+fn apply_job_approval_gate(
+    ctx: &WorkerCtx,
+    profile: Profile,
+    plan_id: &kxprov_api::PlanId,
+    diff_hash: &kxprov_api::DiffHash,
+) -> Option<JobOutcome> {
+    if !write_approval_required(profile, OperationalMode::Production) {
+        return None;
+    }
+    if ctx
+        .approvals
+        .is_consumed_for_apply(plan_id, diff_hash, profile)
+    {
+        return None;
+    }
+    Some(JobOutcome::Err {
+        code: "approval".into(),
+        message: "apply approval was not consumed before job ran".into(),
+    })
+}
+
 fn apply_job_prod_gate(ctx: &WorkerCtx, profile: Profile) -> Option<JobOutcome> {
     let locked = ctx.locked.load().map(|s| s.locked).unwrap_or(true);
     let live_writes = ctx
@@ -325,6 +349,9 @@ async fn run_apply_job(
 ) -> JobOutcome {
     let profile = *ctx.profile.read().await;
     if let Some(outcome) = apply_job_prod_gate(ctx, profile) {
+        return outcome;
+    }
+    if let Some(outcome) = apply_job_approval_gate(ctx, profile, &plan_id, &diff_hash) {
         return outcome;
     }
     let backup_id = match ctx.backups.list() {
@@ -462,7 +489,22 @@ mod prod_gate_tests {
                 },
             })),
             transition: TransitionBlockStore::new(&data),
+            approvals: ApprovalBook::new(&data),
         }
+    }
+
+    #[tokio::test]
+    async fn apply_job_approval_gate_blocks_without_consumed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = test_worker_ctx(&tmp, false);
+        let plan_id = kxprov_api::PlanId("p1".into());
+        let diff = kxprov_api::DiffHash("d".into());
+        let outcome =
+            apply_job_approval_gate(&ctx, Profile::Prod, &plan_id, &diff).expect("blocked");
+        assert!(
+            matches!(outcome, JobOutcome::Err { ref code, .. } if code == "approval"),
+            "{outcome:?}"
+        );
     }
 
     #[tokio::test]

@@ -4,6 +4,7 @@ use kxprov_api::{Approval, DiffHash, PlanId, Profile, TokenId};
 use kxprov_api::{APPROVAL_SUBMIT_LIMIT_DAY, APPROVAL_SUBMIT_LIMIT_HOUR, APPROVAL_TTL_SECS};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -41,12 +42,24 @@ struct SubmitRecord {
 
 pub struct ApprovalBook {
     path: PathBuf,
+    /// Serializes consume / rollback so concurrent `apply_plan` cannot double-consume.
+    lock: Mutex<()>,
+}
+
+impl Clone for ApprovalBook {
+    fn clone(&self) -> Self {
+        Self {
+            path: self.path.clone(),
+            lock: Mutex::new(()),
+        }
+    }
 }
 
 impl ApprovalBook {
     pub fn new(data_dir: &Path) -> Self {
         Self {
             path: data_dir.join("approvals.json"),
+            lock: Mutex::new(()),
         }
     }
 
@@ -127,6 +140,7 @@ impl ApprovalBook {
         profile: Profile,
         now_ms: u64,
     ) -> Result<(), ApprovalError> {
+        let _guard = self.lock.lock().expect("approval book lock");
         let mut store = self.load()?;
         let idx = store
             .items
@@ -145,6 +159,38 @@ impl ApprovalBook {
         a.consumed = true;
         self.save(&store)?;
         Ok(())
+    }
+
+    /// Undo [`Self::consume`] when an apply job never entered the queue (enqueue failure).
+    pub fn release_consumed(
+        &self,
+        plan_id: &PlanId,
+        diff_hash: &DiffHash,
+        profile: Profile,
+    ) -> Result<(), ApprovalError> {
+        let _guard = self.lock.lock().expect("approval book lock");
+        let mut store = self.load()?;
+        let idx = store
+            .items
+            .iter()
+            .position(|a| a.matches(plan_id, diff_hash, profile) && a.consumed)
+            .ok_or(ApprovalError::NotFound)?;
+        store.items[idx].consumed = false;
+        self.save(&store)?;
+        Ok(())
+    }
+
+    pub fn is_consumed_for_apply(
+        &self,
+        plan_id: &PlanId,
+        diff_hash: &DiffHash,
+        profile: Profile,
+    ) -> bool {
+        self.load().ok().is_some_and(|s| {
+            s.items
+                .iter()
+                .any(|a| a.matches(plan_id, diff_hash, profile) && a.consumed)
+        })
     }
 
     pub fn has_active(
@@ -167,6 +213,47 @@ impl ApprovalBook {
 mod tests {
     use super::*;
     use kxprov_api::{DiffHash, PlanId};
+
+    #[test]
+    fn consume_then_release_restores_active() {
+        let dir = tempfile::tempdir().unwrap();
+        let book = ApprovalBook::new(dir.path());
+        let plan_id = PlanId("p".into());
+        let diff = DiffHash("d".into());
+        book.submit(
+            plan_id.clone(),
+            diff.clone(),
+            Profile::Prod,
+            &TokenId("writer".into()),
+            TokenId("approver".into()),
+            0,
+        )
+        .unwrap();
+        book.consume(&plan_id, &diff, Profile::Prod, 0).unwrap();
+        assert!(!book.has_active(&plan_id, &diff, Profile::Prod, 0));
+        book.release_consumed(&plan_id, &diff, Profile::Prod)
+            .unwrap();
+        assert!(book.has_active(&plan_id, &diff, Profile::Prod, 0));
+    }
+
+    #[test]
+    fn double_consume_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let book = ApprovalBook::new(dir.path());
+        let plan_id = PlanId("p".into());
+        let diff = DiffHash("d".into());
+        book.submit(
+            plan_id.clone(),
+            diff.clone(),
+            Profile::Prod,
+            &TokenId("w".into()),
+            TokenId("a".into()),
+            0,
+        )
+        .unwrap();
+        book.consume(&plan_id, &diff, Profile::Prod, 0).unwrap();
+        assert!(book.consume(&plan_id, &diff, Profile::Prod, 0).is_err());
+    }
 
     #[test]
     fn same_approver_as_requester_rejected() {
