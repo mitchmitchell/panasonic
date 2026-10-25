@@ -81,6 +81,9 @@ impl ModeStore {
     }
 
     pub fn load_profile(&self) -> Profile {
+        if self.highest_counter_missing_fail_closed() {
+            return Profile::Prod;
+        }
         let stored = match std::fs::read_to_string(&self.profile_path) {
             Ok(raw) => match serde_json::from_str::<ProfileFileBody>(&raw) {
                 Ok(body) => Some(body),
@@ -158,17 +161,54 @@ impl ModeStore {
     }
 
     fn effective_highest_epoch(&self) -> Result<u64, ModeError> {
-        let mut max = epoch_store::read_highest_epoch(&self.provision_root)?;
+        let profiles = match self.boot_profile {
+            Profile::Prod => [Profile::Prod].as_slice(),
+            Profile::Sim | Profile::Test => &[Profile::Sim, Profile::Test][..],
+        };
+        let mut profile_max = 0u64;
+        for &profile in profiles {
+            if let Some(n) = epoch_store::read_counter(&self.provision_root, profile)? {
+                profile_max = profile_max.max(n);
+            }
+        }
+        match epoch_store::read_highest_epoch_file(&self.provision_root)? {
+            None => Ok(profile_max),
+            Some(h) => {
+                if profile_max > 0 && h < profile_max {
+                    return Err(ModeError::CounterCorrupt);
+                }
+                Ok(h.max(profile_max))
+            }
+        }
+    }
+
+    /// Fail closed when profile counters exist but `highest.counter` was removed (post-bump tamper).
+    fn highest_counter_missing_fail_closed(&self) -> bool {
+        let path = crate::config::highest_epoch_counter_path(&self.provision_root);
+        if path.exists() {
+            return false;
+        }
         let profiles = match self.boot_profile {
             Profile::Prod => [Profile::Prod].as_slice(),
             Profile::Sim | Profile::Test => &[Profile::Sim, Profile::Test][..],
         };
         for &profile in profiles {
-            if let Some(n) = epoch_store::read_counter(&self.provision_root, profile)? {
-                max = max.max(n);
+            match epoch_store::read_counter(&self.provision_root, profile) {
+                Ok(Some(_)) => {
+                    self.fail_closed(
+                        AuditKind::ModeCorrupt,
+                        "highest.counter missing while per-profile epoch counters exist",
+                    );
+                    return true;
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    self.fail_closed(AuditKind::ModeCorrupt, format!("epoch highest: {e}"));
+                    return true;
+                }
             }
         }
-        Ok(max)
+        false
     }
 
     /// Returns true when the caller should treat stored mode/profile as rejected (Prod).
@@ -246,6 +286,11 @@ impl ModeStore {
     }
 
     pub fn effective(&self, profile: Profile) -> EffectiveMode {
+        if self.highest_counter_missing_fail_closed() {
+            return EffectiveMode {
+                operational: OperationalMode::Production,
+            };
+        }
         let raw = match std::fs::read_to_string(&self.mode_path) {
             Ok(s) => s,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -583,6 +628,87 @@ mod tests {
             restarted.effective(Profile::Sim).operational,
             OperationalMode::Production
         );
+    }
+
+    fn sim_testing_snapshot_with_epoch_counters(root: &Path, data: &Path) -> ModeStore {
+        let store = ModeStore::new_with_epoch_root(data, root, Profile::Sim);
+        store
+            .set_operational(OperationalMode::Production, Profile::Sim, true)
+            .unwrap();
+        store
+            .set_operational(OperationalMode::Testing, Profile::Test, true)
+            .unwrap();
+        store
+    }
+
+    fn assert_highest_tamper_fail_closed(tamper: impl FnOnce(&Path)) {
+        use crate::config::profile_epoch_counter_path;
+        let root = tempfile::tempdir().unwrap();
+        let data = root.path().join("sim");
+        std::fs::create_dir_all(&data).unwrap();
+        sim_testing_snapshot_with_epoch_counters(root.path(), &data);
+        assert!(profile_epoch_counter_path(root.path(), Profile::Sim).exists());
+        tamper(root.path());
+        let restarted = ModeStore::new_with_epoch_root(&data, root.path(), Profile::Sim);
+        assert_eq!(restarted.load_profile(), Profile::Prod);
+        assert_eq!(
+            restarted.effective(Profile::Test).operational,
+            OperationalMode::Production
+        );
+    }
+
+    #[test]
+    fn rollback_snapshot_highest_deleted_fail_closed() {
+        use crate::config::highest_epoch_counter_path;
+        assert_highest_tamper_fail_closed(|root| {
+            std::fs::remove_file(highest_epoch_counter_path(root)).unwrap();
+        });
+    }
+
+    #[test]
+    fn rollback_snapshot_highest_corrupt_fail_closed() {
+        use crate::config::highest_epoch_counter_path;
+        assert_highest_tamper_fail_closed(|root| {
+            std::fs::write(highest_epoch_counter_path(root), b"not-a-number\n").unwrap();
+        });
+    }
+
+    #[test]
+    fn rollback_snapshot_highest_rolled_back_fail_closed() {
+        use crate::config::highest_epoch_counter_path;
+        assert_highest_tamper_fail_closed(|root| {
+            std::fs::write(highest_epoch_counter_path(root), b"1\n").unwrap();
+        });
+    }
+
+    #[test]
+    fn rollback_snapshot_highest_empty_fail_closed() {
+        use crate::config::highest_epoch_counter_path;
+        assert_highest_tamper_fail_closed(|root| {
+            std::fs::write(highest_epoch_counter_path(root), b"").unwrap();
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rollback_snapshot_highest_unreadable_fail_closed() {
+        use crate::config::highest_epoch_counter_path;
+        use std::os::unix::fs::PermissionsExt;
+        assert_highest_tamper_fail_closed(|root| {
+            let path = highest_epoch_counter_path(root);
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rollback_snapshot_highest_broken_symlink_fail_closed() {
+        use crate::config::highest_epoch_counter_path;
+        assert_highest_tamper_fail_closed(|root| {
+            let path = highest_epoch_counter_path(root);
+            std::fs::remove_file(&path).unwrap();
+            std::os::unix::fs::symlink("/no/such/highest", &path).unwrap();
+        });
     }
 
     #[test]

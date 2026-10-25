@@ -5,10 +5,12 @@
 Per-profile rollback detection uses monotonic epoch counters stored under
 `/var/lib/kx-provision/.epoch/<profile>.counter`, plus a root-only
 `.epoch/highest.counter`, separate from each profile’s `mode.json` and
-`profile.json` in `sim/`, `test/`, and `prod/`. At runtime the effective
-highest epoch is the maximum of `highest.counter` and every per-profile counter
-file, so lowering or deleting `highest.counter` alone cannot reopen a rolled-back
-snapshot while profile counters remain.
+`profile.json` in `sim/`, `test/`, and `prod/`. At runtime the effective highest epoch is the maximum of `highest.counter` (or
+zero when that file is absent) and every per-profile counter file. Removing
+`highest.counter` while per-profile counters remain fails closed to Production;
+corrupt, unreadable, symlink, or rolled-back `highest.counter` values (below
+the per-profile max) do the same. `set_operational` floors the next counter at
+`max(last(profile), effective_highest) + 1`.
 
 Restoring or deleting **only** a profile data directory together with its JSON
 files is detected when the on-disk JSON counters disagree with the external

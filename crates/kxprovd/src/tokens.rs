@@ -7,6 +7,8 @@ use kxprov_api::{
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+#[cfg(feature = "test-util")]
+use std::sync::atomic::AtomicU64;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, Weak};
 use std::time::{Duration, Instant};
@@ -74,6 +76,7 @@ struct ReloadPlan {
     outage_start: Option<Instant>,
     transient_done: bool,
     failed_fp: Option<DiskFingerprint>,
+    probe_cancel: Arc<AtomicBool>,
     #[cfg(feature = "test-util")]
     probe_hang: Arc<AtomicBool>,
 }
@@ -118,6 +121,9 @@ pub struct TokenStore {
     #[cfg(feature = "test-util")]
     reload_probe_hang: Arc<AtomicBool>,
 }
+
+#[cfg(feature = "test-util")]
+static RELOAD_GRACE_OVERRIDE_MS: AtomicU64 = AtomicU64::new(0);
 
 struct TokenRefreshDelta {
     newly_revoked: Vec<TokenId>,
@@ -281,6 +287,16 @@ impl TokenStore {
     }
 
     #[cfg(feature = "test-util")]
+    pub fn set_reload_grace_for_test(grace: Duration) {
+        RELOAD_GRACE_OVERRIDE_MS.store(grace.as_millis() as u64, Ordering::Relaxed);
+    }
+
+    #[cfg(feature = "test-util")]
+    pub fn clear_reload_grace_override_for_test() {
+        RELOAD_GRACE_OVERRIDE_MS.store(0, Ordering::Relaxed);
+    }
+
+    #[cfg(feature = "test-util")]
     pub fn live_disk_probe_threads_for_test(&self) -> usize {
         self.probe_threads_alive.load(Ordering::Acquire)
     }
@@ -380,6 +396,12 @@ impl TokenStore {
     }
 
     fn disk_probe_spawn_denied(&self, path: &Path) -> bool {
+        if self.probe_threads_alive.load(Ordering::Acquire) == 0 {
+            self.abandoned_probe_identities
+                .lock()
+                .expect("abandoned probe lock")
+                .clear();
+        }
         if self.probe_threads_alive.load(Ordering::Acquire) >= Self::MAX_PROBE_THREADS_ALIVE {
             return true;
         }
@@ -506,6 +528,21 @@ impl TokenStore {
     const RELOAD_GRACE: Duration = Duration::from_secs(2);
     const RELOAD_MAX_ATTEMPTS: usize = 3;
 
+    #[cfg(feature = "test-util")]
+    fn reload_grace_duration() -> Duration {
+        let ms = RELOAD_GRACE_OVERRIDE_MS.load(Ordering::Relaxed);
+        if ms > 0 {
+            Duration::from_millis(ms)
+        } else {
+            Self::RELOAD_GRACE
+        }
+    }
+
+    #[cfg(not(feature = "test-util"))]
+    fn reload_grace_duration() -> Duration {
+        Self::RELOAD_GRACE
+    }
+
     #[cfg(unix)]
     fn fifo_fingerprint(path: &Path) -> Option<DiskFingerprint> {
         use std::os::unix::fs::{FileTypeExt, MetadataExt};
@@ -535,8 +572,23 @@ impl TokenStore {
         }
     }
 
-    fn try_read_valid_tokens_bytes(path: &Path) -> Result<Vec<u8>, DiskFingerprint> {
+    fn try_read_valid_tokens_bytes(
+        path: &Path,
+        cancel: Option<&AtomicBool>,
+    ) -> Result<Vec<u8>, DiskFingerprint> {
         use std::io::ErrorKind;
+        if cancel.is_some_and(|c| c.load(Ordering::Acquire)) {
+            return Err(DiskFingerprint::Unreadable);
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::FileTypeExt;
+            if let Ok(meta) = std::fs::symlink_metadata(path) {
+                if meta.file_type().is_fifo() {
+                    return Self::try_read_fifo_tokens_bytes(path, cancel);
+                }
+            }
+        }
         match std::fs::read(path) {
             Ok(raw) if Self::tokens_file_parse_ok(&raw) => Ok(raw),
             Ok(raw) => Err(DiskFingerprint::InvalidDigest(Self::digest_bytes(&raw))),
@@ -545,14 +597,51 @@ impl TokenStore {
         }
     }
 
+    #[cfg(unix)]
+    fn try_read_fifo_tokens_bytes(
+        path: &Path,
+        cancel: Option<&AtomicBool>,
+    ) -> Result<Vec<u8>, DiskFingerprint> {
+        use nix::fcntl::{open, OFlag};
+        use nix::sys::stat::Mode;
+        use nix::unistd::read;
+        use std::os::unix::io::AsRawFd;
+        let fd = match open(path, OFlag::O_RDONLY | OFlag::O_NONBLOCK, Mode::empty()) {
+            Ok(fd) => fd,
+            Err(_) => return Err(DiskFingerprint::Unreadable),
+        };
+        let mut raw = Vec::new();
+        let mut buf = [0u8; 4096];
+        loop {
+            if cancel.is_some_and(|c| c.load(Ordering::Acquire)) {
+                return Err(DiskFingerprint::Unreadable);
+            }
+            match read(fd.as_raw_fd(), &mut buf) {
+                Ok(0) => std::thread::sleep(Duration::from_millis(5)),
+                Ok(n) => {
+                    raw.extend_from_slice(&buf[..n]);
+                    if Self::tokens_file_parse_ok(&raw) {
+                        return Ok(raw);
+                    }
+                    if raw.len() > 512 * 1024 {
+                        return Err(DiskFingerprint::InvalidDigest(Self::digest_bytes(&raw)));
+                    }
+                }
+                Err(nix::errno::Errno::EAGAIN) => std::thread::sleep(Duration::from_millis(5)),
+                Err(_) => return Err(DiskFingerprint::Unreadable),
+            }
+        }
+    }
+
     /// Up to [`Self::RELOAD_MAX_ATTEMPTS`] within `deadline` (about 2s from outage start).
     fn read_tokens_until_deadline(
         path: &Path,
         deadline: Instant,
+        cancel: Option<&AtomicBool>,
     ) -> Result<Vec<u8>, DiskFingerprint> {
         let mut last_fp = DiskFingerprint::Missing;
         for attempt in 0..Self::RELOAD_MAX_ATTEMPTS {
-            match Self::try_read_valid_tokens_bytes(path) {
+            match Self::try_read_valid_tokens_bytes(path, cancel) {
                 Ok(raw) => return Ok(raw),
                 Err(fp) => last_fp = fp,
             }
@@ -576,7 +665,7 @@ impl TokenStore {
 
     fn timed_out_disk_probe() -> DiskProbe {
         let outage_start = Instant::now()
-            .checked_sub(Self::RELOAD_GRACE)
+            .checked_sub(Self::reload_grace_duration())
             .unwrap_or_else(Instant::now);
         DiskProbe::StillBad {
             fp: DiskFingerprint::Unreadable,
@@ -607,11 +696,13 @@ impl TokenStore {
             }
             std::thread::sleep(Duration::from_millis(1));
         };
-        let deadline = Instant::now() + Self::RELOAD_GRACE;
+        let deadline = Instant::now() + Self::reload_grace_duration();
         let (tx, rx) = std::sync::mpsc::sync_channel(1);
         let probe_alive = Arc::clone(&self.probe_threads_alive);
         let abandoned_inodes = Arc::clone(&self.abandoned_probe_identities);
         let thread_identity = path_identity(&plan.path);
+        let mut probe_plan = plan;
+        probe_plan.probe_cancel = Arc::clone(&abandoned);
         let spawn_ok = std::thread::Builder::new()
             .name("token-reload-probe".into())
             .spawn(move || {
@@ -622,7 +713,7 @@ impl TokenStore {
                     abandoned: Arc::clone(&abandoned_inodes),
                 };
                 let _live = live_guard;
-                let _ = tx.send(Self::execute_disk_probe(&plan));
+                let _ = tx.send(Self::execute_disk_probe(&probe_plan));
             });
         if spawn_ok.is_err() {
             return Ok(Self::timed_out_disk_probe());
@@ -660,17 +751,22 @@ impl TokenStore {
         flight: &TransientReloadFlight,
         plan: ReloadPlan,
     ) -> Result<DiskProbe, TokenError> {
-        let wait_until = plan.outage_start.unwrap_or_else(Instant::now) + Self::RELOAD_GRACE;
+        let wait_until =
+            plan.outage_start.unwrap_or_else(Instant::now) + Self::reload_grace_duration();
         let mut guard = flight.inner.lock().expect("transient flight lock");
         loop {
             match &*guard {
                 TransientFlightState::Done(probe) => return Ok(probe.clone()),
                 TransientFlightState::Running => {
+                    if self.disk_probe_live.load(Ordering::Acquire) > 0
+                        && !self.probe_path_differs_from_live(&plan.path)
+                    {
+                        self.latch_probe_fast_fail();
+                        return Err(TokenError::StoreUnavailable);
+                    }
                     if Self::reload_plan_in_outage(&plan)
-                        && (self.probe_threads_alive.load(Ordering::Acquire)
+                        && self.probe_threads_alive.load(Ordering::Acquire)
                             >= Self::MAX_PROBE_THREADS_ALIVE
-                            || (self.disk_probe_live.load(Ordering::Acquire) > 0
-                                && !self.probe_path_differs_from_live(&plan.path)))
                     {
                         return Err(TokenError::StoreUnavailable);
                     }
@@ -733,11 +829,12 @@ impl TokenStore {
                     return DiskProbe::UnchangedBad;
                 }
             }
-            if let Ok(raw) = Self::try_read_valid_tokens_bytes(&plan.path) {
+            if let Ok(raw) = Self::try_read_valid_tokens_bytes(&plan.path, Some(&plan.probe_cancel))
+            {
                 return DiskProbe::Ok(raw);
             }
             if let Some(start) = plan.outage_start {
-                if start.elapsed() >= Self::RELOAD_GRACE {
+                if start.elapsed() >= Self::reload_grace_duration() {
                     let fp = Self::disk_fingerprint(&plan.path);
                     return DiskProbe::StillBad {
                         fp,
@@ -749,8 +846,8 @@ impl TokenStore {
         }
 
         let outage_start = plan.outage_start.unwrap_or_else(Instant::now);
-        let deadline = outage_start + Self::RELOAD_GRACE;
-        match Self::read_tokens_until_deadline(&plan.path, deadline) {
+        let deadline = outage_start + Self::reload_grace_duration();
+        match Self::read_tokens_until_deadline(&plan.path, deadline, Some(&plan.probe_cancel)) {
             Ok(raw) => DiskProbe::Ok(raw),
             Err(fp) => DiskProbe::StillBad { fp, outage_start },
         }
@@ -870,7 +967,7 @@ impl TokenStore {
                     return Err(TokenError::StoreUnavailable);
                 }
                 if let Some(since) = state.reload_failure_since {
-                    if since.elapsed() >= Self::RELOAD_GRACE {
+                    if since.elapsed() >= Self::reload_grace_duration() {
                         return Err(Self::latch_store_unavailable(state));
                     }
                 }
@@ -880,7 +977,9 @@ impl TokenStore {
                 state.reload_failure_since = Some(outage_start);
                 state.reload_transient_done = true;
                 state.reload_failed_disk_fingerprint = Some(fp);
-                if outage_start.elapsed() >= Self::RELOAD_GRACE || state.store_unavailable {
+                if outage_start.elapsed() >= Self::reload_grace_duration()
+                    || state.store_unavailable
+                {
                     Err(Self::latch_store_unavailable(state))
                 } else {
                     Ok(Self::empty_refresh_delta())
@@ -903,6 +1002,7 @@ impl TokenStore {
                 outage_start: state.reload_failure_since,
                 transient_done: state.reload_transient_done,
                 failed_fp: state.reload_failed_disk_fingerprint,
+                probe_cancel: Arc::new(AtomicBool::new(false)),
                 #[cfg(feature = "test-util")]
                 probe_hang: Arc::clone(&self.reload_probe_hang),
             }
