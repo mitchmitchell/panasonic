@@ -18,7 +18,11 @@ workspace = true
 [features]
 default = []
 inprocess-sim = ["dep:kxtd1232-sim"]
-test-util = ["inprocess-sim", "kxtd1232/test-transport-access"]
+test-util = [
+    "inprocess-sim",
+    "kxtd1232/test-transport-access",
+    "kxtd1232-sim/faults",
+]
 
 [dependencies]
 kxtd1232 = { path = "../kxtd1232" }

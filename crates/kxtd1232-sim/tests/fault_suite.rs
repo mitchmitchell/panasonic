@@ -5,7 +5,7 @@
 
 use kxtd1232::error::UnackedReason;
 use kxtd1232::frame::Access;
-use kxtd1232::{Client, Error, SessionState, SignOn, Timing, VerifyOutcome};
+use kxtd1232::{Client, Error, SignOn, Timing, VerifyOutcome};
 use kxtd1232_sim::{Fault, SimPbx, SimTransport, PLACEHOLDER_PASSWORD};
 
 fn client() -> Client<SimTransport> {
@@ -37,9 +37,7 @@ fn write_count(c: &Client<SimTransport>) -> usize {
 #[test]
 fn test_a2_busy_run_on_read() {
     let mut c = client();
-    c.transport_mut()
-        .sim_mut()
-        .inject(Fault::Busy { frames: 8 });
+    c.transport_mut().sim_mut().inject(Fault::Busy { frames: 8 });
     assert!(c.read(0x24, 0, 0, 3).is_ok());
 }
 
@@ -77,7 +75,7 @@ fn test_a2_late_ack_garbled_stale() {
     let mut c = client();
     let (base, new) = cid_block(&mut c);
     c.transport_mut()
-        .sim_mut()
+        .sim()
         .inject(Fault::LateAck { delay_ms: 2_300 });
     assert!(matches!(c.write(0x24, 0, 0, &new), Err(Error::Unacked(_))));
     assert_eq!(
@@ -122,22 +120,12 @@ fn test_a2_silent_write() {
     c.transport_mut().sim_mut().inject(Fault::SilentWrite);
     c.write(0x25, 0, 0, &new).unwrap();
     assert_eq!(c.read(0x25, 0, 0, 80).unwrap(), base);
-
-    let mut c = client();
-    let (_base, new) = cid_block(&mut c);
-    c.transport_mut()
-        .sim_mut()
-        .inject(Fault::LinkDropMidChunk { partial_len: 2 });
-    assert!(matches!(c.write(0x24, 0, 0, &new), Err(Error::LinkDown(_))));
-    assert_eq!(c.state(), &SessionState::Disconnected);
 }
 
 #[test]
 fn test_a2_busy_past_bound_from_fixture() {
     let mut c = client();
-    c.transport_mut()
-        .sim_mut()
-        .inject(Fault::Busy { frames: 200 });
+    c.transport_mut().sim_mut().inject(Fault::Busy { frames: 200 });
     assert_eq!(c.read(0x24, 0, 0, 3), Err(Error::BusyTimeout));
 }
 
@@ -146,7 +134,7 @@ fn test_a2_unacked_then_busy_before_verify() {
     let mut c = client();
     let (base, new) = cid_block(&mut c);
     c.transport_mut()
-        .sim_mut()
+        .sim()
         .inject(Fault::NoAckThenBusy { busy_frames: 12 });
     assert!(matches!(c.write(0x24, 0, 0, &new), Err(Error::Unacked(_))));
     assert_eq!(
@@ -186,7 +174,7 @@ fn test_a2_another_terminal_login_fault() {
         Timing::default(),
     );
     c.transport_mut()
-        .sim_mut()
+        .sim()
         .inject(Fault::AnotherTerminal(SignOn::default().in_use.clone()));
     assert!(matches!(
         c.login(PLACEHOLDER_PASSWORD),

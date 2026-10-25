@@ -1,6 +1,6 @@
 //! Malformed LEN / junk busy lockup, checksum NAK + junk recovery (protocol facts).
 
-#![allow(clippy::unwrap_used, clippy::useless_vec)]
+#![allow(clippy::unwrap_used)]
 
 use kxtd1232::frame::{Access, Encoder, BUSY_FRAME};
 use kxtd1232::{Client, Timing, Transport};
@@ -74,7 +74,6 @@ fn recover_after_bad_header_and_junk(c: &mut Client<SimTransport>, junk: &[u8]) 
     assert!(c.read(0x24, 0, 0, 3).is_ok(), "read after recovery");
 }
 
-#[ignore = "busy lockup train sim port tracked separately from A3"]
 #[test]
 fn test_bad_checksum_read_nak_then_lockup_on_trailing_junk() {
     let mut c = client_read();
@@ -90,7 +89,6 @@ fn test_bad_checksum_read_nak_then_lockup_on_trailing_junk() {
     assert!(c.read(0x24, 0, 0, 3).is_ok());
 }
 
-#[ignore = "busy lockup train sim port tracked separately from A3"]
 #[test]
 fn test_lone_bad_checksum_read_nak_only_no_lockup() {
     let mut c = client_read();
@@ -104,7 +102,6 @@ fn test_lone_bad_checksum_read_nak_only_no_lockup() {
     assert!(c.read(0x24, 0, 0, 3).is_ok(), "link stays up after NAK");
 }
 
-#[ignore = "busy lockup train sim port tracked separately from A3"]
 #[test]
 fn test_bad_checksum_write_nak_link_stays_up() {
     let mut c = client_write();
@@ -125,31 +122,26 @@ fn test_bad_checksum_write_nak_link_stays_up() {
     assert!(c.write(0x25, 0, 0, &new).is_ok());
 }
 
-#[ignore = "busy lockup train sim port tracked separately from A3"]
 #[test]
 fn test_junk_after_bad_read_header_byte_0x00() {
-    recover_after_bad_header_and_junk(&mut client_read(), &vec![0x00; 200]);
+    recover_after_bad_header_and_junk(&mut client_read(), &[0x00; 200]);
 }
 
-#[ignore = "busy lockup train sim port tracked separately from A3"]
 #[test]
 fn test_junk_after_bad_read_header_byte_0x55() {
-    recover_after_bad_header_and_junk(&mut client_read(), &vec![0x55; 200]);
+    recover_after_bad_header_and_junk(&mut client_read(), &[0x55; 200]);
 }
 
-#[ignore = "busy lockup train sim port tracked separately from A3"]
 #[test]
 fn test_junk_after_bad_read_header_byte_0xff() {
-    recover_after_bad_header_and_junk(&mut client_read(), &vec![0xFF; 200]);
+    recover_after_bad_header_and_junk(&mut client_read(), &[0xFF; 200]);
 }
 
-#[ignore = "busy lockup train sim port tracked separately from A3"]
 #[test]
 fn test_junk_after_bad_read_header_prng() {
     recover_after_bad_header_and_junk(&mut client_read(), &prng_junk(0xA2_00_01, 200));
 }
 
-#[ignore = "busy lockup train sim port tracked separately from A3"]
 #[test]
 fn test_busy_lockup_recovery_bad_len() {
     let mut c = client_read();

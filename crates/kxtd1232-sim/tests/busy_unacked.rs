@@ -44,9 +44,7 @@ fn frames_over_busy_limit() -> u32 {
 #[test]
 fn test_busy_past_bound_raises() {
     let mut c = client();
-    c.transport_mut()
-        .sim_mut()
-        .inject(Fault::Busy { frames: 200 });
+    c.transport_mut().sim_mut().inject(Fault::Busy { frames: 200 });
     assert_eq!(c.read(0x24, 0, 0, 3), Err(Error::BusyTimeout));
 }
 
@@ -124,9 +122,7 @@ fn test_busy_forever_then_verify_block_starts_clean() {
 fn test_busy_never_ends_locks_on_verify() {
     let mut c = client();
     let (base, new) = block(&mut c);
-    c.transport_mut()
-        .sim_mut()
-        .inject(Fault::Busy { frames: 400 });
+    c.transport_mut().sim_mut().inject(Fault::Busy { frames: 400 });
     assert!(matches!(c.write(0x25, 10, 0, &new), Err(Error::Unacked(_))));
     assert_eq!(
         c.verify_block(0x25, 10, 0, &new, &base),
@@ -180,7 +176,7 @@ fn test_stray_write_ack_is_not_a_read_reply() {
     let mut c = client();
     let (_base, new) = block(&mut c);
     c.transport_mut()
-        .sim_mut()
+        .sim()
         .inject(Fault::LateAck { delay_ms: 2_300 });
     assert!(matches!(c.write(0x25, 10, 0, &new), Err(Error::Unacked(_))));
     assert!(c
