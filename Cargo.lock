@@ -79,6 +79,7 @@ name = "kxtd1232-sim"
 version = "0.1.0"
 dependencies = [
  "kxtd1232",
+ "serde_json",
 ]
 
 [[package]]

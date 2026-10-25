@@ -31,7 +31,7 @@ fn fail_after(n: usize) -> (Client<SimTransport>, Vec<u8>, Vec<u8>) {
     let mut c = client();
     let base = db(&c, 3);
     let new = vec![0x6Au8; 16];
-    c.transport_mut().fail_write_send_after = Some(n);
+    c.transport_mut().fail_send_after = Some(n);
     assert!(matches!(c.write(0x25, 3, 0, &new), Err(Error::LinkDown(_))));
     assert_eq!(c.state(), &SessionState::Disconnected);
     relogin(&mut c);
@@ -76,4 +76,53 @@ fn test_nothing_written_is_presend_and_needs_no_verify() {
     assert!(matches!(e, Error::PreSend(_)), "{e:?}");
     relogin(&mut c);
     assert_eq!(c.state(), &SessionState::Binary);
+}
+
+fn client_read() -> Client<SimTransport> {
+    let mut c = Client::with(
+        SimTransport::new(SimPbx::default()),
+        kxtd1232::frame::Access::ReadOnly,
+        Timing::default(),
+    );
+    c.login(PLACEHOLDER_PASSWORD).unwrap();
+    c
+}
+
+#[test]
+fn test_read_partial_send_marks_disconnected() {
+    let mut c = client_read();
+    c.transport_mut().fail_send_after = Some(5);
+    assert!(matches!(c.read(0x24, 0, 0, 3), Err(Error::LinkDown(_))));
+    assert_eq!(c.state(), &SessionState::Disconnected);
+    relogin(&mut c);
+    assert!(c.read(0x24, 0, 0, 3).is_ok());
+}
+
+#[test]
+fn test_read_zero_byte_send_marks_disconnected() {
+    let mut c = client_read();
+    c.transport_mut().fail_send_after = Some(0);
+    assert!(matches!(c.read(0x24, 0, 0, 3), Err(Error::PreSend(_))));
+    assert_eq!(c.state(), &SessionState::Disconnected);
+    relogin(&mut c);
+    assert!(c.read(0x24, 0, 0, 3).is_ok());
+}
+
+#[test]
+fn test_send_timeout_on_read() {
+    let mut c = client_read();
+    c.transport_mut().send_timeout_next = true;
+    assert!(matches!(c.read(0x24, 0, 0, 3), Err(Error::Timeout)));
+    assert_eq!(c.state(), &SessionState::Binary);
+}
+
+#[test]
+fn test_send_timeout_on_write() {
+    let mut c = client();
+    c.transport_mut().send_timeout_next = true;
+    assert!(matches!(
+        c.write(0x25, 3, 0, &[0x6A; 16]),
+        Err(Error::Unacked(_))
+    ));
+    assert!(matches!(c.state(), SessionState::AwaitingVerify(_)));
 }

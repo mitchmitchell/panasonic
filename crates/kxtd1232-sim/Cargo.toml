@@ -10,5 +10,56 @@ publish.workspace = true
 [lints]
 workspace = true
 
+[features]
+default = []
+faults = []
+
 [dependencies]
 kxtd1232 = { path = "../kxtd1232" }
+
+[dev-dependencies]
+serde_json = "1"
+
+[[test]]
+name = "busy_unacked"
+required-features = ["faults"]
+
+[[test]]
+name = "busy_lockup_recovery"
+required-features = ["faults"]
+
+[[test]]
+name = "fault_suite"
+required-features = ["faults"]
+
+[[test]]
+name = "fixtures"
+required-features = ["faults"]
+
+[[test]]
+name = "link_drop"
+required-features = ["faults"]
+
+[[test]]
+name = "mandatory"
+required-features = ["faults"]
+
+[[test]]
+name = "sim_client"
+required-features = ["faults"]
+
+[[test]]
+name = "review_bugbot2"
+required-features = ["faults"]
+
+[[test]]
+name = "review_p1"
+required-features = ["faults"]
+
+[[test]]
+name = "stale_resync"
+required-features = ["faults"]
+
+[[test]]
+name = "transmit_cutoff"
+required-features = ["faults"]

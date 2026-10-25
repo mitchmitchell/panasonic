@@ -39,15 +39,30 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
-
+      - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
   test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace --locked
-
+      - run: cargo test -p kxtd1232-sim --features faults --locked
+  no-sim-faults-in-ship:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup show active-toolchain || rustup toolchain install
+      - run: |
+          set -eo pipefail
+          tree_out=$(cargo tree -p kxprov -e features -i kxtd1232-sim)
+          if echo "$tree_out" | grep -q 'faults'; then
+            echo 'kxprov must not enable kxtd1232-sim/faults' >&2
+            exit 1
+          fi
+          if ! echo "$tree_out" | grep -q 'kxtd1232-sim'; then
+            echo 'expected kxprov to depend on kxtd1232-sim' >&2
+            exit 1
+          fi
   build-aarch64:
     runs-on: ubuntu-latest
     steps:
