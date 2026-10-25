@@ -1,12 +1,14 @@
 use crate::apply::{lock_on_apply_failure, run_apply};
 use crate::backup::{wire_to_dbh, BackupStore};
 use crate::config::Config;
+use crate::gates::{prod_write_gate, GateState, ProdWriteGate};
 use crate::journal::{Journal, JournalEntry};
 use crate::locked::LockedStore;
 use crate::plan_store::{PlanSnapshot, PlanStore};
 use crate::queue::{field_kind_wire, JobKind, JobOutcome, JobRequest, JobState};
 use crate::time::now_ms;
 use crate::tokens::TokenStore;
+use crate::transition::TransitionBlockStore;
 use crate::transport::{open, AnyTransport};
 use kxprov_api::{BackupInfo, FieldRow, OperationalMode, PlanChangeResult, Profile, TokenId};
 use kxtd1232::frame::Access;
@@ -22,6 +24,8 @@ pub struct WorkerCtx {
     pub journal: Journal,
     pub goliath: crate::goliath::GoliathQueue,
     pub locked: LockedStore,
+    pub gates: Arc<RwLock<GateState>>,
+    pub transition: TransitionBlockStore,
 }
 
 pub async fn run_worker(
@@ -285,6 +289,33 @@ async fn run_backup(ctx: &WorkerCtx, operational_mode: OperationalMode) -> JobOu
     })
 }
 
+fn apply_job_prod_gate(ctx: &WorkerCtx, profile: Profile) -> Option<JobOutcome> {
+    let locked = ctx.locked.load().map(|s| s.locked).unwrap_or(true);
+    let live_writes = ctx
+        .gates
+        .try_read()
+        .map(|g| g.config.live_writes_approved)
+        .unwrap_or(false);
+    let gate = prod_write_gate(
+        profile,
+        locked,
+        live_writes,
+        ctx.transition.writes_blocked(),
+    )?;
+    let (code, message) = match gate {
+        ProdWriteGate::LiveWrites => ("gate", "live_writes_approved is false"),
+        ProdWriteGate::Locked => ("locked", "daemon is LOCKED"),
+        ProdWriteGate::TransitionMismatch => (
+            "transition_blocked",
+            "writes blocked after testing→production mismatch",
+        ),
+    };
+    Some(JobOutcome::Err {
+        code: code.into(),
+        message: message.into(),
+    })
+}
+
 async fn run_apply_job(
     ctx: &WorkerCtx,
     job_id: &str,
@@ -292,6 +323,10 @@ async fn run_apply_job(
     diff_hash: kxprov_api::DiffHash,
     token_id: kxprov_api::TokenId,
 ) -> JobOutcome {
+    let profile = *ctx.profile.read().await;
+    if let Some(outcome) = apply_job_prod_gate(ctx, profile) {
+        return outcome;
+    }
     let backup_id = match ctx.backups.list() {
         Ok(list) => list.first().map(|b| b.id.clone()).unwrap_or_default(),
         Err(e) => {
@@ -312,7 +347,6 @@ async fn run_apply_job(
             message: format!("ApplyStart not persisted: {e}"),
         };
     }
-    let profile = *ctx.profile.read().await;
     match run_apply(
         &ctx.config,
         profile,
@@ -388,5 +422,64 @@ pub fn backup_info(
         bytes: meta.bytes,
         sha256: meta.sha256.clone(),
         goliath: crate::backup::goliath_status(meta, goliath),
+    }
+}
+
+#[cfg(all(test, feature = "test-util"))]
+mod prod_gate_tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::*;
+    use crate::backup::BackupStore;
+    use crate::config::Config;
+    use crate::gates::GateConfig;
+    use crate::goliath::GoliathQueue;
+    use crate::journal::Journal;
+    use crate::plan_store::PlanStore;
+
+    fn test_worker_ctx(tmp: &tempfile::TempDir, locked: bool) -> WorkerCtx {
+        let data = tmp.path().to_path_buf();
+        std::fs::create_dir_all(data.join("plans")).unwrap();
+        std::fs::create_dir_all(data.join("backups")).unwrap();
+        let locked_store = LockedStore::new(&data);
+        if locked {
+            locked_store
+                .set_locked("test", Some("j1"), 1)
+                .expect("set locked");
+        }
+        let cfg = Config::sim_test(data.clone(), data.join("kxprovd.sock"), 1000);
+        WorkerCtx {
+            config: cfg,
+            profile: Arc::new(RwLock::new(Profile::Prod)),
+            plans: PlanStore::new(data.join("plans")).expect("plans"),
+            backups: BackupStore::new(data.join("backups")).expect("backups"),
+            journal: Journal::new(&data),
+            goliath: GoliathQueue::new(data.join("goliath")).expect("goliath"),
+            locked: locked_store,
+            gates: Arc::new(RwLock::new(GateState {
+                config: GateConfig {
+                    live_writes_approved: true,
+                },
+            })),
+            transition: TransitionBlockStore::new(&data),
+        }
+    }
+
+    #[tokio::test]
+    async fn apply_job_prod_gate_blocks_locked_at_execution() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = test_worker_ctx(&tmp, true);
+        let outcome = apply_job_prod_gate(&ctx, Profile::Prod).expect("blocked");
+        assert!(
+            matches!(outcome, JobOutcome::Err { ref code, .. } if code == "locked"),
+            "{outcome:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_job_prod_gate_skipped_for_non_prod_profile() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = test_worker_ctx(&tmp, true);
+        assert!(apply_job_prod_gate(&ctx, Profile::Sim).is_none());
     }
 }

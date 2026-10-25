@@ -128,6 +128,8 @@ impl Daemon {
             journal: Journal::new(&config.data_dir),
             goliath: goliath.clone(),
             locked: LockedStore::new(&config.data_dir),
+            gates: Arc::clone(&gates),
+            transition: transition::TransitionBlockStore::new(&config.data_dir),
         });
 
         let q = Arc::clone(&queue);
@@ -265,6 +267,8 @@ impl Daemon {
             journal: Journal::new(&config.data_dir),
             goliath: goliath.clone(),
             locked: LockedStore::new(&config.data_dir),
+            gates: Arc::clone(&gates),
+            transition: transition::TransitionBlockStore::new(&config.data_dir),
         });
 
         let q = Arc::clone(&queue);
