@@ -4,7 +4,7 @@ use kxprov_api::{Approval, DiffHash, PlanId, Profile, TokenId};
 use kxprov_api::{APPROVAL_SUBMIT_LIMIT_DAY, APPROVAL_SUBMIT_LIMIT_HOUR, APPROVAL_TTL_SECS};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -48,15 +48,15 @@ pub struct ConsumedApproval {
 
 pub struct ApprovalBook {
     path: PathBuf,
-    /// Serializes consume / rollback so concurrent `apply_plan` cannot double-consume.
-    lock: Mutex<()>,
+    /// Serializes all load/save paths (submit, consume, rollback, reads).
+    lock: Arc<Mutex<()>>,
 }
 
 impl Clone for ApprovalBook {
     fn clone(&self) -> Self {
         Self {
             path: self.path.clone(),
-            lock: Mutex::new(()),
+            lock: Arc::clone(&self.lock),
         }
     }
 }
@@ -65,8 +65,13 @@ impl ApprovalBook {
     pub fn new(data_dir: &Path) -> Self {
         Self {
             path: data_dir.join("approvals.json"),
-            lock: Mutex::new(()),
+            lock: Arc::new(Mutex::new(())),
         }
+    }
+
+    #[cfg(test)]
+    fn lock_arc_ptr(&self) -> *const Mutex<()> {
+        Arc::as_ptr(&self.lock)
     }
 
     fn load(&self) -> Result<ApprovalStore, ApprovalError> {
@@ -120,6 +125,7 @@ impl ApprovalBook {
         if requester == &approver {
             return Err(ApprovalError::SameApprover);
         }
+        let _guard = self.lock.lock().expect("approval book lock");
         let mut store = self.load()?;
         Self::check_rate_limit(&store, &approver, now_ms)?;
         let approval = Approval {
@@ -189,6 +195,7 @@ impl ApprovalBook {
         diff_hash: &DiffHash,
         profile: Profile,
     ) -> bool {
+        let _guard = self.lock.lock().expect("approval book lock");
         self.load().ok().is_some_and(|s| {
             s.items
                 .iter()
@@ -203,6 +210,7 @@ impl ApprovalBook {
         profile: Profile,
         now_ms: u64,
     ) -> bool {
+        let _guard = self.lock.lock().expect("approval book lock");
         self.load().ok().is_some_and(|s| {
             s.items
                 .iter()
@@ -294,6 +302,74 @@ mod tests {
         .unwrap();
         book.consume(&plan_id, &diff, Profile::Prod, 0).unwrap();
         assert!(book.consume(&plan_id, &diff, Profile::Prod, 0).is_err());
+    }
+
+    #[test]
+    fn clone_shares_process_wide_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let book = ApprovalBook::new(dir.path());
+        let cloned = book.clone();
+        assert_eq!(
+            book.lock_arc_ptr(),
+            cloned.lock_arc_ptr(),
+            "worker/API clones must share one approval mutex"
+        );
+    }
+
+    #[test]
+    fn concurrent_submit_after_consume_keeps_first_row_consumed() {
+        use std::sync::{Arc, Barrier};
+        use std::thread;
+
+        let dir = tempfile::tempdir().unwrap();
+        let book = Arc::new(ApprovalBook::new(dir.path()));
+        let plan_id = PlanId("p".into());
+        let diff = DiffHash("d".into());
+        book.submit(
+            plan_id.clone(),
+            diff.clone(),
+            Profile::Prod,
+            &TokenId("writer".into()),
+            TokenId("approver".into()),
+            0,
+        )
+        .unwrap();
+        let barrier = Arc::new(Barrier::new(2));
+        let plan_a = plan_id.clone();
+        let diff_a = diff.clone();
+        let book_consume = Arc::clone(&book);
+        let b1 = Arc::clone(&barrier);
+        let consume = thread::spawn(move || {
+            b1.wait();
+            book_consume
+                .consume(&plan_a, &diff_a, Profile::Prod, 0)
+                .expect("consume")
+        });
+        let book_submit = Arc::clone(&book);
+        let b2 = Arc::clone(&barrier);
+        let submit = thread::spawn(move || {
+            b2.wait();
+            book_submit
+                .submit(
+                    plan_id,
+                    diff,
+                    Profile::Prod,
+                    &TokenId("writer".into()),
+                    TokenId("approver".into()),
+                    1,
+                )
+                .expect("submit")
+        });
+        consume.join().unwrap();
+        submit.join().unwrap();
+        let path = dir.path().join("approvals.json");
+        let store: ApprovalStore = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        assert!(store.items[0].consumed, "first approval row stays consumed");
+        assert!(
+            !store.items[0].active(1, Profile::Prod),
+            "submit must not resurrect the consumed row"
+        );
+        assert_eq!(store.items.len(), 2, "submit adds a new row");
     }
 
     #[test]
