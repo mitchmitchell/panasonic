@@ -205,10 +205,14 @@ impl Drop for ProbeThreadSlotGuard {
 struct ProbeThreadAliveGuard {
     identity: Option<PathIdentity>,
     abandoned_refcounts: Arc<Mutex<HashMap<PathIdentity, usize>>>,
+    was_abandoned: Arc<AtomicBool>,
 }
 
 impl Drop for ProbeThreadAliveGuard {
     fn drop(&mut self) {
+        if !self.was_abandoned.load(Ordering::Acquire) {
+            return;
+        }
         if let Some(id) = self.identity {
             let mut map = self
                 .abandoned_refcounts
@@ -394,13 +398,15 @@ impl TokenStore {
             .probe_path_identity
             .lock()
             .expect("probe path identity lock");
-        if let Some(id) = stuck_id {
-            self.abandoned_probe_refcounts
-                .lock()
-                .expect("abandoned probe lock")
-                .entry(id)
-                .and_modify(|n| *n += 1)
-                .or_insert(1);
+        if owned_abandon {
+            if let Some(id) = stuck_id {
+                self.abandoned_probe_refcounts
+                    .lock()
+                    .expect("abandoned probe lock")
+                    .entry(id)
+                    .and_modify(|n| *n += 1)
+                    .or_insert(1);
+            }
         }
         *self
             .probe_path_identity
@@ -725,6 +731,7 @@ impl TokenStore {
                 let _thread_guard = ProbeThreadAliveGuard {
                     identity: thread_identity,
                     abandoned_refcounts,
+                    was_abandoned: Arc::clone(&abandoned),
                 };
                 let _live = live_guard;
                 let _ = tx.send(Self::execute_disk_probe(&probe_plan));
@@ -1413,12 +1420,55 @@ mod tests {
             );
             std::thread::sleep(Duration::from_millis(10));
         }
-        assert!(store.leaked_disk_probe_threads_for_test() <= TokenStore::MAX_PROBE_THREADS_ALIVE);
+        assert_eq!(store.leaked_disk_probe_threads_for_test(), 0);
         write_tokens_revoking_writer(&path, false);
         store
             .verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan)
             .expect("reload recovers after hung probe");
         assert_eq!(store.live_disk_probe_threads_for_test(), 0);
+    }
+
+    #[test]
+    fn abandoned_probe_refcount_not_leaked_after_serial_timeouts() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("tokens.json");
+        write_tokens_revoking_writer(&path, false);
+        let store = TokenStore::load_insecure(path.clone()).expect("load");
+        store
+            .verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan)
+            .expect("warm");
+        std::fs::write(&path, b"{bad").unwrap();
+        let bound = Duration::from_secs(2) + Duration::from_millis(400);
+        for round in 0..2 {
+            {
+                let _hang = ReloadProbeHangGuard::enable(&store);
+                let wall = Instant::now();
+                assert!(
+                    matches!(
+                        store.verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan),
+                        Err(TokenError::StoreUnavailable)
+                    ),
+                    "round {round} must fail closed"
+                );
+                assert!(
+                    wall.elapsed() <= bound,
+                    "round {round} must finish within reload window"
+                );
+            }
+            let drain_deadline = Instant::now() + Duration::from_secs(5);
+            while store.live_disk_probe_threads_for_test() > 0 {
+                assert!(
+                    Instant::now() < drain_deadline,
+                    "round {round}: probe thread did not finish"
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            assert_eq!(
+                store.leaked_disk_probe_threads_for_test(),
+                0,
+                "round {round}: abandoned probe refcount leaked"
+            );
+        }
     }
 
     #[test]

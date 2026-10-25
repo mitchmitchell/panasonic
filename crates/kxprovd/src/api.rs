@@ -592,23 +592,18 @@ async fn apply_plan(
     .map_err(|_| api_err("diff", "live base diff hash mismatch"))?;
 
     let operational = state.mode.effective(profile).operational;
-    if write_approval_required(profile, operational) {
-        if !state
+    if write_approval_required(profile, operational)
+        && !state
             .approvals
             .has_active(&params.plan_id, &params.diff_hash, profile, now)
-        {
-            return Ok(ResponseResult::ApplyApprovalRequired(
-                kxprov_api::ApplyApprovalRequiredResult {
-                    plan_id: params.plan_id.clone(),
-                    diff_hash: params.diff_hash.clone(),
-                    status: kxprov_api::ApplyPlanAwaitingStatus::ApprovalRequired,
-                },
-            ));
-        }
-        state
-            .approvals
-            .consume(&params.plan_id, &params.diff_hash, profile, now)
-            .map_err(|e| api_err("approval", &e.to_string()))?;
+    {
+        return Ok(ResponseResult::ApplyApprovalRequired(
+            kxprov_api::ApplyApprovalRequiredResult {
+                plan_id: params.plan_id.clone(),
+                diff_hash: params.diff_hash.clone(),
+                status: kxprov_api::ApplyPlanAwaitingStatus::ApprovalRequired,
+            },
+        ));
     }
 
     let (job_id, _rx) = state
@@ -624,6 +619,14 @@ async fn apply_plan(
         )
         .await
         .map_err(queue_err)?;
+
+    if write_approval_required(profile, operational) {
+        state
+            .approvals
+            .consume(&params.plan_id, &params.diff_hash, profile, now)
+            .map_err(|e| api_err("approval", &e.to_string()))?;
+    }
+
     Ok(ResponseResult::Job(kxprov_api::JobRef { job_id }))
 }
 
@@ -672,5 +675,109 @@ fn map_outcome(outcome: JobOutcome) -> Result<ResponseResult, ApiErrorBody> {
         JobOutcome::BackupNow(r) => Ok(ResponseResult::BackupNow(r)),
         JobOutcome::ApplyPlan { .. } => Err(api_err("internal", "apply uses job_id response")),
         JobOutcome::Err { code, message } => Err(api_err(&code, &message)),
+    }
+}
+
+#[cfg(all(test, feature = "test-util"))]
+mod apply_plan_tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::*;
+    use crate::approval::ApprovalBook;
+    use crate::backup::BackupStore;
+    use crate::config::Config;
+    use crate::gates::GateState;
+    use crate::goliath::GoliathQueue;
+    use crate::mode::ModeStore;
+    use crate::peer::PeerPolicy;
+    use crate::plan_store::{PlanSnapshot, PlanStore};
+    use crate::test_util;
+    use crate::transport::open;
+    use kxprov_api::{ApplyPlanParams, Profile, TokenId};
+    use kxtd1232::frame::Access;
+    use kxtd1232::{build_plan, field_patch, Client, FieldKind, Granularity};
+    use std::sync::Arc;
+    use tokio::sync::{mpsc, RwLock};
+
+    fn test_api_state(tmp: &tempfile::TempDir, queue: Arc<JobQueue>) -> ApiState {
+        let data = tmp.path().to_path_buf();
+        std::fs::create_dir_all(data.join("plans")).unwrap();
+        std::fs::create_dir_all(data.join("backups")).unwrap();
+        test_util::write_integration_tokens(&data.join("tokens.json"));
+        let mut cfg = Config::sim_test(data.clone(), data.join("kxprovd.sock"), 1000);
+        cfg.profile = Profile::Prod;
+        cfg.gates.live_writes_approved = true;
+        ApiState {
+            config: cfg.clone(),
+            profile: Arc::new(RwLock::new(Profile::Prod)),
+            transport_label: "sim".into(),
+            gates: Arc::new(RwLock::new(GateState { config: cfg.gates })),
+            peer_policy: PeerPolicy::new(1001, 1000),
+            tokens: TokenStore::load_insecure(cfg.tokens_path.clone()).unwrap(),
+            queue,
+            backups: BackupStore::new(data.join("backups")).unwrap(),
+            plans: PlanStore::new(data.join("plans")).unwrap(),
+            approvals: ApprovalBook::new(&data),
+            locked: LockedStore::new(&data),
+            goliath: GoliathQueue::new(data.join("goliath")).unwrap(),
+            mode: ModeStore::new(&data, Profile::Prod),
+            transition: crate::transition::TransitionBlockStore::new(&data),
+        }
+    }
+
+    #[tokio::test]
+    async fn apply_plan_keeps_approval_when_enqueue_shuts_down() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (tx, rx) = mpsc::channel(4);
+        drop(rx);
+        let state = test_api_state(&tmp, Arc::new(JobQueue::new(tx)));
+        let token = TokenId("writer".into());
+        let kind = FieldKind::CidName;
+        let pwd = state.config.password.clone();
+        let rec = {
+            let transport = open(&state.config).unwrap();
+            let mut client = Client::with(transport, Access::ReadOnly, state.config.timing);
+            client.login(&pwd).unwrap();
+            let base = client.read_table(kind.table()).unwrap();
+            let patch = field_patch(kind, 4, "AP").unwrap();
+            let plan = build_plan(kind.table(), &base, &[patch], Granularity::Chunk).unwrap();
+            let _ = client.end_binary();
+            let snap = PlanSnapshot::from(&plan);
+            let now = now_ms();
+            state
+                .plans
+                .put(Profile::Prod, &token, &snap, now)
+                .expect("plan")
+        };
+        let now = now_ms();
+        state
+            .approvals
+            .submit(
+                rec.id.clone(),
+                rec.diff_hash.clone(),
+                Profile::Prod,
+                &token,
+                TokenId("approver".into()),
+                now,
+            )
+            .expect("approval");
+        let err = apply_plan(
+            &state,
+            &ApplyPlanParams {
+                plan_id: rec.id.clone(),
+                diff_hash: rec.diff_hash.clone(),
+            },
+            token,
+            false,
+        )
+        .await
+        .expect_err("enqueue must fail");
+        assert_eq!(err.code, "queue");
+        assert!(
+            state
+                .approvals
+                .has_active(&rec.id, &rec.diff_hash, Profile::Prod, now),
+            "approval must not be consumed when enqueue fails"
+        );
     }
 }
