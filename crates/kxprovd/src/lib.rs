@@ -173,6 +173,7 @@ impl Daemon {
             locked: LockedStore::new(&config.data_dir),
             gates: Arc::clone(&gates),
             transition: transition::TransitionBlockStore::new(&config.data_dir),
+            approvals: approvals.clone(),
         });
 
         let q = Arc::clone(&queue);
@@ -353,6 +354,7 @@ impl Daemon {
             locked: LockedStore::new(&config.data_dir),
             gates: Arc::clone(&gates),
             transition: transition::TransitionBlockStore::new(&config.data_dir),
+            approvals: approvals.clone(),
         });
 
         let q = Arc::clone(&queue);

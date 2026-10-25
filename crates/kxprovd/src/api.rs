@@ -592,7 +592,8 @@ async fn apply_plan(
     .map_err(|_| api_err("diff", "live base diff hash mismatch"))?;
 
     let operational = state.mode.effective(profile).operational;
-    if write_approval_required(profile, operational)
+    let needs_approval = write_approval_required(profile, operational);
+    if needs_approval
         && !state
             .approvals
             .has_active(&params.plan_id, &params.diff_hash, profile, now)
@@ -606,7 +607,14 @@ async fn apply_plan(
         ));
     }
 
-    let (job_id, _rx) = state
+    if needs_approval {
+        state
+            .approvals
+            .consume(&params.plan_id, &params.diff_hash, profile, now)
+            .map_err(|e| api_err("approval", &e.to_string()))?;
+    }
+
+    let enqueue_result = state
         .queue
         .enqueue(
             JobKind::ApplyPlan {
@@ -617,15 +625,18 @@ async fn apply_plan(
             Some(JobPrincipal::Token(token)),
             now,
         )
-        .await
-        .map_err(queue_err)?;
+        .await;
 
-    if write_approval_required(profile, operational) {
-        state
-            .approvals
-            .consume(&params.plan_id, &params.diff_hash, profile, now)
-            .map_err(|e| api_err("approval", &e.to_string()))?;
+    if needs_approval {
+        if let Err(e) = enqueue_result {
+            let _ = state
+                .approvals
+                .release_consumed(&params.plan_id, &params.diff_hash, profile);
+            return Err(queue_err(e));
+        }
     }
+
+    let (job_id, _rx) = enqueue_result.map_err(queue_err)?;
 
     Ok(ResponseResult::Job(kxprov_api::JobRef { job_id }))
 }
@@ -778,6 +789,116 @@ mod apply_plan_tests {
                 .approvals
                 .has_active(&rec.id, &rec.diff_hash, Profile::Prod, now),
             "approval must not be consumed when enqueue fails"
+        );
+    }
+
+    async fn prod_plan_with_approval(
+        state: &ApiState,
+    ) -> (kxprov_api::PlanId, kxprov_api::DiffHash, TokenId) {
+        let token = TokenId("writer".into());
+        let kind = FieldKind::CidName;
+        let pwd = state.config.password.clone();
+        let rec = {
+            let transport = open(&state.config).unwrap();
+            let mut client = Client::with(transport, Access::ReadOnly, state.config.timing);
+            client.login(&pwd).unwrap();
+            let base = client.read_table(kind.table()).unwrap();
+            let patch = field_patch(kind, 5, "C").unwrap();
+            let plan = build_plan(kind.table(), &base, &[patch], Granularity::Chunk).unwrap();
+            let _ = client.end_binary();
+            let snap = PlanSnapshot::from(&plan);
+            let now = now_ms();
+            state
+                .plans
+                .put(Profile::Prod, &token, &snap, now)
+                .expect("plan")
+        };
+        let now = now_ms();
+        state
+            .approvals
+            .submit(
+                rec.id.clone(),
+                rec.diff_hash.clone(),
+                Profile::Prod,
+                &token,
+                TokenId("approver".into()),
+                now,
+            )
+            .expect("approval");
+        (rec.id, rec.diff_hash, token)
+    }
+
+    #[tokio::test]
+    async fn apply_plan_second_submit_needs_fresh_approval() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (tx, _rx) = mpsc::channel(8);
+        let state = test_api_state(&tmp, Arc::new(JobQueue::new(tx)));
+        let (plan_id, diff_hash, token) = prod_plan_with_approval(&state).await;
+        let first = apply_plan(
+            &state,
+            &ApplyPlanParams {
+                plan_id: plan_id.clone(),
+                diff_hash: diff_hash.clone(),
+            },
+            token.clone(),
+            false,
+        )
+        .await
+        .expect("first apply");
+        assert!(matches!(first, ResponseResult::Job(_)));
+        let resp = apply_plan(
+            &state,
+            &ApplyPlanParams { plan_id, diff_hash },
+            token,
+            false,
+        )
+        .await
+        .expect("second apply response");
+        assert!(matches!(resp, ResponseResult::ApplyApprovalRequired(_)));
+    }
+
+    #[tokio::test]
+    async fn apply_plan_concurrent_single_approval() {
+        use std::sync::Arc;
+        use tokio::sync::Barrier;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let (tx, _rx) = mpsc::channel(8);
+        let state = Arc::new(test_api_state(&tmp, Arc::new(JobQueue::new(tx))));
+        let (plan_id, diff_hash, token) = prod_plan_with_approval(&state).await;
+        let barrier = Arc::new(Barrier::new(2));
+        let mut handles = Vec::new();
+        for _ in 0..2 {
+            let state = Arc::clone(&state);
+            let barrier = Arc::clone(&barrier);
+            let plan_id = plan_id.clone();
+            let diff_hash = diff_hash.clone();
+            let token = token.clone();
+            handles.push(tokio::spawn(async move {
+                barrier.wait().await;
+                apply_plan(
+                    &state,
+                    &ApplyPlanParams { plan_id, diff_hash },
+                    token,
+                    false,
+                )
+                .await
+            }));
+        }
+        let mut jobs = 0u32;
+        let mut approval_blocks = 0u32;
+        for h in handles {
+            match h.await.unwrap() {
+                Ok(ResponseResult::Job(_)) => jobs += 1,
+                Ok(ResponseResult::ApplyApprovalRequired(_)) => approval_blocks += 1,
+                Err(e) if e.code == "approval" => approval_blocks += 1,
+                other => panic!("unexpected: {other:?}"),
+            }
+        }
+        assert_eq!(jobs, 1, "exactly one apply may consume the approval");
+        assert_eq!(
+            approval_blocks, 1,
+            "second concurrent apply must not enqueue"
         );
     }
 }
