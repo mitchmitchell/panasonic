@@ -102,6 +102,8 @@ fn approver_with_plan_scope_rejected_at_mint() {
 #[tokio::test]
 #[serial]
 async fn per_token_queue_depth_rate_limit_integration() {
+    use kxprovd::test_util::PlanChangeHoldGuard;
+
     kxprovd::queue::assert_writer_token_queue_depth_cap().await;
 
     let tmp = tempfile::tempdir().unwrap();
@@ -109,15 +111,12 @@ async fn per_token_queue_depth_rate_limit_integration() {
     let (_d, sock) = init_test_daemon(&tmp, uid, Profile::Sim);
     wait_daemon_api_ready(&sock).await;
 
+    let _hold = PlanChangeHoldGuard::arm();
     let sock = std::sync::Arc::new(sock);
-    let n = usize::try_from(TOKEN_QUEUE_DEPTH_MAX).unwrap() + 1;
-    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(n));
-    let mut handles = Vec::with_capacity(n);
-    for i in 0..n {
+    let mut in_flight = Vec::with_capacity(usize::try_from(TOKEN_QUEUE_DEPTH_MAX).unwrap());
+    for i in 0..TOKEN_QUEUE_DEPTH_MAX {
         let sock = std::sync::Arc::clone(&sock);
-        let barrier = std::sync::Arc::clone(&barrier);
-        handles.push(tokio::spawn(async move {
-            barrier.wait().await;
+        in_flight.push(tokio::spawn(async move {
             let mut client = ApiClient::connect(sock.as_path()).await.unwrap();
             client
                 .call_auth(
@@ -133,23 +132,32 @@ async fn per_token_queue_depth_rate_limit_integration() {
                 .await
         }));
     }
-    let mut ok = 0u32;
-    let mut rate_limited = 0u32;
-    for h in handles {
-        match h.await.unwrap() {
-            Ok(_) => ok += 1,
-            Err(ApiError::Remote { code, .. }) if code == "rate_limit" => rate_limited += 1,
-            other => panic!("unexpected plan_change result: {other:?}"),
-        }
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    let mut client = ApiClient::connect(sock.as_path()).await.unwrap();
+    match client
+        .call_auth(
+            RequestBody::PlanChange {
+                params: PlanChangeParams {
+                    kind: kxprov_api::FieldKindWire::CidName,
+                    index: 1,
+                    value: "RL-over".into(),
+                },
+            },
+            Some(bearer_auth(WRITER_SECRET)),
+        )
+        .await
+    {
+        Err(ApiError::Remote { code, .. }) if code == "rate_limit" => {}
+        other => panic!("expected rate_limit at queue depth cap, got {other:?}"),
     }
-    assert_eq!(
-        ok, TOKEN_QUEUE_DEPTH_MAX,
-        "expected {TOKEN_QUEUE_DEPTH_MAX} successes"
-    );
-    assert_eq!(
-        rate_limited, 1,
-        "expected exactly one rate_limit under burst"
-    );
+
+    drop(_hold);
+    for h in in_flight {
+        h.await
+            .unwrap()
+            .expect("held plan_change should complete after guard release");
+    }
 }
 
 #[test]

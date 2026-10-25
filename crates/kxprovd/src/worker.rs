@@ -168,6 +168,8 @@ async fn run_plan(
     params: kxprov_api::PlanChangeParams,
     token_id: TokenId,
 ) -> JobOutcome {
+    #[cfg(feature = "test-util")]
+    crate::test_util::plan_change_hold_if_armed().await;
     let kind = field_kind_wire(params.kind);
     let patch = match field_patch(kind, params.index, &params.value) {
         Ok(p) => p,

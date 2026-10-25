@@ -1,11 +1,44 @@
 use kxprov_api::{hash_bearer_secret, Scope, TokenEntry, TokenId, TokensFile};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::OnceLock;
+use tokio::sync::Notify;
 
 pub const WRITER_SECRET: &str = "test-writer-secret";
 pub const APPROVER_SECRET: &str = "test-approver-secret";
 pub const READER_SECRET: &str = "test-reader-secret";
 pub const COMM_SECRET: &str = "test-comm-secret";
 pub const GATEWAY_SECRET: &str = "test-gateway-secret";
+
+static PLAN_CHANGE_HOLD: AtomicBool = AtomicBool::new(false);
+static PLAN_CHANGE_HOLD_NOTIFY: OnceLock<Notify> = OnceLock::new();
+
+fn plan_change_hold_notify() -> &'static Notify {
+    PLAN_CHANGE_HOLD_NOTIFY.get_or_init(Notify::new)
+}
+
+/// While held, the worker blocks at the start of each plan-change job (rate-limit integration tests).
+pub struct PlanChangeHoldGuard;
+
+impl PlanChangeHoldGuard {
+    pub fn arm() -> Self {
+        PLAN_CHANGE_HOLD.store(true, Ordering::Release);
+        Self
+    }
+}
+
+impl Drop for PlanChangeHoldGuard {
+    fn drop(&mut self) {
+        PLAN_CHANGE_HOLD.store(false, Ordering::Release);
+        plan_change_hold_notify().notify_waiters();
+    }
+}
+
+pub async fn plan_change_hold_if_armed() {
+    while PLAN_CHANGE_HOLD.load(Ordering::Acquire) {
+        plan_change_hold_notify().notified().await;
+    }
+}
 
 pub fn default_tokens_file() -> TokensFile {
     TokensFile {

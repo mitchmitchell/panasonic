@@ -114,6 +114,52 @@ fn tokio_listener_from_prepared(
         .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
 }
 
+const DAEMON_STARTUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+#[cfg(unix)]
+fn spawn_daemon_thread(
+    prepared_socket: std::os::unix::net::UnixListener,
+    job_rx: mpsc::Receiver<queue::JobRequest>,
+    worker_ctx: Arc<worker::WorkerCtx>,
+    q: Arc<queue::JobQueue>,
+    api_state: Arc<ApiState>,
+) -> Result<std::thread::JoinHandle<()>, Box<dyn std::error::Error + Send + Sync>> {
+    use std::sync::mpsc;
+    let (ready_tx, ready_rx) = mpsc::sync_channel::<Result<(), String>>(1);
+    let handle = std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async move {
+            let listener = match tokio_listener_from_prepared(prepared_socket) {
+                Ok(l) => l,
+                Err(e) => {
+                    let _ = ready_tx.send(Err(format!("tokio listener: {e}")));
+                    return;
+                }
+            };
+            if ready_tx.send(Ok(())).is_err() {
+                return;
+            }
+            let tokens_worker = api_state.tokens.clone();
+            let ((), serve_res) = tokio::join!(
+                worker::run_worker(job_rx, worker_ctx, q, tokens_worker),
+                api::serve(listener, api_state),
+            );
+            let _ = serve_res;
+        });
+    });
+    match ready_rx.recv_timeout(DAEMON_STARTUP_TIMEOUT) {
+        Ok(Ok(())) => Ok(handle),
+        Ok(Err(msg)) => Err(msg.into()),
+        Err(mpsc::RecvTimeoutError::Timeout) => Err("daemon worker did not become ready".into()),
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            Err("daemon worker exited before becoming ready".into())
+        }
+    }
+}
+
 pub struct Daemon {
     _process_lock: lock::ProcessLock,
     _thread: std::thread::JoinHandle<()>,
@@ -210,28 +256,14 @@ impl Daemon {
 
         let prepared_socket =
             prepare_daemon_unix_socket(&config.socket_path, &config.daemon_socket_group)?;
-
-        let thread = std::thread::spawn(move || {
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("runtime");
-            runtime.block_on(async move {
-                let listener = match tokio_listener_from_prepared(prepared_socket) {
-                    Ok(l) => l,
-                    Err(e) => {
-                        tracing::error!("daemon listener: {e}");
-                        return;
-                    }
-                };
-                let tokens_worker = api_state.tokens.clone();
-                let ((), serve_res) = tokio::join!(
-                    worker::run_worker(job_rx, worker_ctx, q, tokens_worker),
-                    api::serve(listener, api_state),
-                );
-                let _ = serve_res;
-            });
-        });
+        let socket_path = config.socket_path.clone();
+        let thread = match spawn_daemon_thread(prepared_socket, job_rx, worker_ctx, q, api_state) {
+            Ok(t) => t,
+            Err(e) => {
+                let _ = std::fs::remove_file(&socket_path);
+                return Err(e);
+            }
+        };
 
         Ok(Self {
             _process_lock: process_lock,
@@ -399,28 +431,14 @@ impl Daemon {
 
         let prepared_socket =
             prepare_daemon_unix_socket(&config.socket_path, &config.daemon_socket_group)?;
-
-        let thread = std::thread::spawn(move || {
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("runtime");
-            runtime.block_on(async move {
-                let listener = match tokio_listener_from_prepared(prepared_socket) {
-                    Ok(l) => l,
-                    Err(e) => {
-                        tracing::error!("daemon listener: {e}");
-                        return;
-                    }
-                };
-                let tokens_worker = api_state.tokens.clone();
-                let ((), serve_res) = tokio::join!(
-                    worker::run_worker(job_rx, worker_ctx, q, tokens_worker),
-                    api::serve(listener, api_state),
-                );
-                let _ = serve_res;
-            });
-        });
+        let socket_path = config.socket_path.clone();
+        let thread = match spawn_daemon_thread(prepared_socket, job_rx, worker_ctx, q, api_state) {
+            Ok(t) => t,
+            Err(e) => {
+                let _ = std::fs::remove_file(&socket_path);
+                return Err(e);
+            }
+        };
 
         Ok(Self {
             _process_lock: process_lock,

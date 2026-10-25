@@ -135,7 +135,7 @@ sudo rm -f /var/lib/kx-provision/sim/kxprovd.lock \
 
 sudo systemctl start kxprovd.service
 for _ in $(seq 1 300); do
-  if [[ -S /run/kx-provision/kxprovd.sock ]]; then break; fi
+  if sudo test -S /run/kx-provision/kxprovd.sock; then break; fi
   state=$(systemctl show -p ActiveState --value kxprovd.service)
   if [[ "$state" == "failed" || "$state" == "inactive" || "$state" == "dead" ]]; then
     log "kxprovd.service state=$state before socket bind"
@@ -145,23 +145,23 @@ for _ in $(seq 1 300); do
   fi
   sleep 0.1
 done
-if [[ ! -S /run/kx-provision/kxprovd.sock ]]; then
+if ! sudo test -S /run/kx-provision/kxprovd.sock; then
   log "kxprovd.sock missing (ActiveState=$(systemctl show -p ActiveState --value kxprovd.service))"
-  ls -la /run/kx-provision 2>&1 || true
+  sudo ls -la /run/kx-provision 2>&1 || true
   sudo journalctl -u kxprovd.service -n 80 --no-pager || true
   exit 1
 fi
 
-run_prov_group="$(stat -c '%G' /run/kx-provision)"
-run_prov_mode="$(stat -c '%a' /run/kx-provision)"
+run_prov_group="$(sudo stat -c '%G' /run/kx-provision)"
+run_prov_mode="$(sudo stat -c '%a' /run/kx-provision)"
 [[ "$run_prov_group" == "kxprovision" ]] || { log "/run/kx-provision group=$run_prov_group want kxprovision"; exit 1; }
 [[ "$run_prov_mode" == "750" ]] \
   || { log "/run/kx-provision mode=$run_prov_mode want 750"; exit 1; }
 sudo -u kxprov-gw test -x /run/kx-provision \
   || { log "gateway cannot traverse /run/kx-provision"; exit 1; }
 
-sock_group="$(stat -c '%G' /run/kx-provision/kxprovd.sock)"
-sock_mode="$(stat -c '%a' /run/kx-provision/kxprovd.sock)"
+sock_group="$(sudo stat -c '%G' /run/kx-provision/kxprovd.sock)"
+sock_mode="$(sudo stat -c '%a' /run/kx-provision/kxprovd.sock)"
 [[ "$sock_group" == "kxprovision" ]] || { log "socket group=$sock_group want kxprovision"; exit 1; }
 [[ "$sock_mode" == "660" ]] || { log "socket mode=$sock_mode want 660"; exit 1; }
 
