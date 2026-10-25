@@ -721,9 +721,7 @@ impl TokenStore {
         let spawn_ok = std::thread::Builder::new()
             .name("token-reload-probe".into())
             .spawn(move || {
-                let _slot = ProbeThreadSlotGuard {
-                    alive: probe_alive,
-                };
+                let _slot = ProbeThreadSlotGuard { alive: probe_alive };
                 let _thread_guard = ProbeThreadAliveGuard {
                     identity: thread_identity,
                     abandoned_refcounts,
