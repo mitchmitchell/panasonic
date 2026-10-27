@@ -215,6 +215,27 @@ pub enum RequestBody {
     SimTriggerGoliathCopyFail,
 }
 
+impl RequestBody {
+    /// Mutating RPCs must not be resent after I/O failure: the daemon may have already
+    /// processed the request if the response was lost on the wire.
+    pub fn is_mutating(&self) -> bool {
+        match self {
+            RequestBody::Status
+            | RequestBody::ReadFields { .. }
+            | RequestBody::ListBackups
+            | RequestBody::Whoami => false,
+            RequestBody::PlanChange { .. }
+            | RequestBody::SubmitApproval { .. }
+            | RequestBody::SetMode { .. }
+            | RequestBody::BackupNow
+            | RequestBody::ApplyPlan { .. }
+            | RequestBody::Unlock { .. } => true,
+            #[cfg(feature = "sim-fault-triggers")]
+            RequestBody::SimTriggerBusy { .. } | RequestBody::SimTriggerGoliathCopyFail => true,
+        }
+    }
+}
+
 #[cfg(feature = "sim-fault-triggers")]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SimTriggerBusyParams {

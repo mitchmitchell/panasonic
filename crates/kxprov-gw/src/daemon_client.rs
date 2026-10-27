@@ -49,7 +49,7 @@ impl DaemonClient {
             Ok(r) => Ok(r),
             Err(e @ ApiError::Io(_)) => {
                 drop(guard);
-                if request_is_mutating(&body) {
+                if body.is_mutating() {
                     if let Ok(fresh) = ApiClient::connect(&self.socket_path).await {
                         let mut guard = self.client.lock().await;
                         *guard = fresh;
@@ -68,25 +68,6 @@ impl DaemonClient {
             }
             Err(e) => Err(map_api_error(e)),
         }
-    }
-}
-
-/// Mutating RPCs must not be resent after I/O failure: the daemon may have already
-/// processed the request if the response was lost on the wire.
-fn request_is_mutating(body: &RequestBody) -> bool {
-    match body {
-        RequestBody::Status
-        | RequestBody::ReadFields { .. }
-        | RequestBody::ListBackups
-        | RequestBody::Whoami => false,
-        RequestBody::PlanChange { .. }
-        | RequestBody::SubmitApproval { .. }
-        | RequestBody::SetMode { .. }
-        | RequestBody::BackupNow
-        | RequestBody::ApplyPlan { .. }
-        | RequestBody::Unlock { .. } => true,
-        #[cfg(feature = "sim-fault-triggers")]
-        RequestBody::SimTriggerBusy { .. } | RequestBody::SimTriggerGoliathCopyFail => true,
     }
 }
 
@@ -355,36 +336,40 @@ mod tests {
 
     #[test]
     fn mutating_requests_are_classified() {
-        assert!(!request_is_mutating(&RequestBody::Status));
-        assert!(!request_is_mutating(&RequestBody::ListBackups));
-        assert!(!request_is_mutating(&RequestBody::Whoami));
-        assert!(request_is_mutating(&RequestBody::BackupNow));
-        assert!(request_is_mutating(&RequestBody::PlanChange {
+        assert!(!RequestBody::Status.is_mutating());
+        assert!(!RequestBody::ListBackups.is_mutating());
+        assert!(!RequestBody::Whoami.is_mutating());
+        assert!(RequestBody::BackupNow.is_mutating());
+        assert!(RequestBody::PlanChange {
             params: kxprov_api::PlanChangeParams {
                 kind: FieldKindWire::CidName,
                 index: 0,
                 value: "x".into(),
             },
-        }));
-        assert!(request_is_mutating(&RequestBody::ApplyPlan {
+        }
+        .is_mutating());
+        assert!(RequestBody::ApplyPlan {
             params: ApplyPlanParams {
                 plan_id: PlanId("p".into()),
                 diff_hash: DiffHash("h".into()),
             },
-        }));
-        assert!(request_is_mutating(&RequestBody::SubmitApproval {
+        }
+        .is_mutating());
+        assert!(RequestBody::SubmitApproval {
             params: kxprov_api::SubmitApprovalParams {
                 plan_id: "p".into(),
                 diff_hash: DiffHash("h".into()),
                 profile: Profile::Sim,
             },
-        }));
-        assert!(request_is_mutating(&RequestBody::Unlock {
+        }
+        .is_mutating());
+        assert!(RequestBody::Unlock {
             params: kxprov_api::UnlockParams {
                 job_id: "j".into(),
                 reason: "x".into(),
             },
-        }));
+        }
+        .is_mutating());
     }
 
     #[tokio::test]
