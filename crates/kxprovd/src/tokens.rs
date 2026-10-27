@@ -1192,6 +1192,35 @@ impl TokenStore {
         })
     }
 
+    /// Validate bearer credentials and return token identity without requiring a specific scope.
+    pub fn verify_bearer_identity(
+        &self,
+        bearer: &str,
+        now_ms: u64,
+    ) -> Result<VerifiedToken, TokenError> {
+        let delta = self.refresh_if_modified()?;
+        {
+            let state = self.inner.lock().expect("token store lock");
+            if state.store_unavailable {
+                return Err(TokenError::StoreUnavailable);
+            }
+        }
+        self.notify_token_revocation_changes(&delta);
+        let state = self.inner.lock().expect("token store lock");
+        let hash = hash_bearer_secret(bearer);
+        let entry = Self::find_entry(&state.entries, &hash).ok_or(TokenError::Unauthorized)?;
+        if entry.revoked {
+            return Err(TokenError::Revoked);
+        }
+        if now_ms >= entry.expires_at_ms {
+            return Err(TokenError::Expired);
+        }
+        Ok(VerifiedToken {
+            id: entry.id.clone(),
+            scopes: entry.scopes.clone(),
+        })
+    }
+
     #[cfg(all(test, feature = "test-util"))]
     pub fn from_entries_insecure(path: PathBuf, file: TokensFile) -> Self {
         let state = TokenState {
@@ -1656,18 +1685,38 @@ mod tests {
 
         let cancel_live = AtomicBool::new(false);
         let path_feed = path.clone();
-        let feeder = std::thread::spawn(move || {
-            use std::io::Write;
-            let file = crate::test_util::default_tokens_file();
-            let bytes = serde_json::to_vec_pretty(&file).expect("json");
-            let mut w = std::fs::OpenOptions::new()
-                .write(true)
-                .open(&path_feed)
-                .expect("open fifo for write");
-            w.write_all(&bytes).expect("write tokens");
+        let file = crate::test_util::default_tokens_file();
+        let bytes = serde_json::to_vec_pretty(&file).expect("json");
+        let bytes_feed = bytes.clone();
+        let (done_tx, done_rx) = std::sync::mpsc::sync_channel(0);
+        let reader_path = path.clone();
+        let reader = std::thread::spawn(move || {
+            let ok = TokenStore::try_read_fifo_tokens_bytes(&reader_path, Some(&cancel_live));
+            let _ = done_tx.send(ok);
         });
-        let ok = TokenStore::try_read_fifo_tokens_bytes(&path, Some(&cancel_live));
-        feeder.join().expect("join feeder");
+        std::thread::scope(|scope| {
+            use std::io::Write;
+            let path_read = path_feed.clone();
+            let path_write = path_feed;
+            scope.spawn(move || {
+                let _hold = std::fs::OpenOptions::new()
+                    .read(true)
+                    .open(path_read)
+                    .expect("fifo read end for paired open");
+                std::thread::sleep(Duration::from_secs(2));
+            });
+            scope.spawn(move || {
+                let mut w = std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(path_write)
+                    .expect("fifo write end");
+                w.write_all(&bytes_feed).expect("write tokens");
+            });
+        });
+        let ok = done_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("fifo read result");
+        reader.join().expect("join fifo reader");
         assert!(ok.is_ok(), "expected valid fifo read, got {ok:?}");
         let after_ok = open_fd_count();
         assert!(
