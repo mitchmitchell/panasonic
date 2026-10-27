@@ -84,9 +84,9 @@ fn request_is_mutating(body: &RequestBody) -> bool {
         | RequestBody::SetMode { .. }
         | RequestBody::BackupNow
         | RequestBody::ApplyPlan { .. }
-        | RequestBody::Unlock { .. }
-        | RequestBody::SimTriggerBusy { .. }
-        | RequestBody::SimTriggerGoliathCopyFail => true,
+        | RequestBody::Unlock { .. } => true,
+        #[cfg(feature = "sim-fault-triggers")]
+        RequestBody::SimTriggerBusy { .. } | RequestBody::SimTriggerGoliathCopyFail => true,
     }
 }
 

@@ -61,6 +61,7 @@ required-features = ["test-secret-skip"]
 
 [features]
 test-secret-skip = []
+sim-fault-triggers = ["kxprov-api/sim-fault-triggers"]
 
 [dependencies]
 anyhow.workspace = true
