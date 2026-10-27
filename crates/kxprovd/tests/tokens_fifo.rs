@@ -56,19 +56,26 @@ fn wait_live_probe_threads_drained(store: &TokenStore, deadline: Instant) {
     }
 }
 
-/// Open both FIFO ends concurrently so neither side blocks waiting for a peer.
+/// Pair FIFO ends without blocking `open()` deadlocks (reader/writer peer wait).
 fn write_bytes_through_fifo(path: &std::path::Path, bytes: &[u8]) {
+    use nix::fcntl::{open, OFlag};
+    use nix::sys::stat::Mode;
+    use nix::unistd::close;
     use std::io::Write;
+
     let path = path.to_path_buf();
     let bytes = bytes.to_vec();
     std::thread::scope(|scope| {
         let path_read = path.clone();
         scope.spawn(move || {
-            let _reader = std::fs::OpenOptions::new()
-                .read(true)
-                .open(&path_read)
-                .expect("fifo read end for paired open");
+            let fd = open(
+                path_read.as_path(),
+                OFlag::O_RDONLY | OFlag::O_NONBLOCK,
+                Mode::empty(),
+            )
+            .expect("fifo read end for paired open");
             std::thread::sleep(Duration::from_secs(2));
+            let _ = close(fd);
         });
         scope.spawn(move || {
             let mut writer = std::fs::OpenOptions::new()

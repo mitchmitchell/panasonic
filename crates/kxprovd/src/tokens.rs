@@ -1694,16 +1694,25 @@ mod tests {
             let ok = TokenStore::try_read_fifo_tokens_bytes(&reader_path, Some(&cancel_live));
             let _ = done_tx.send(ok);
         });
+        // Let the reader thread open its O_NONBLOCK read fd before pairing ends (avoid FIFO open deadlock).
+        std::thread::sleep(Duration::from_millis(50));
         std::thread::scope(|scope| {
+            use nix::fcntl::{open, OFlag};
+            use nix::sys::stat::Mode;
+            use nix::unistd::close;
             use std::io::Write;
+
             let path_read = path_feed.clone();
             let path_write = path_feed;
             scope.spawn(move || {
-                let _hold = std::fs::OpenOptions::new()
-                    .read(true)
-                    .open(path_read)
-                    .expect("fifo read end for paired open");
+                let fd = open(
+                    path_read.as_path(),
+                    OFlag::O_RDONLY | OFlag::O_NONBLOCK,
+                    Mode::empty(),
+                )
+                .expect("fifo read end for paired open");
                 std::thread::sleep(Duration::from_secs(2));
+                let _ = close(fd);
             });
             scope.spawn(move || {
                 let mut w = std::fs::OpenOptions::new()
