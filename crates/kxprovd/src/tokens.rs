@@ -619,9 +619,17 @@ impl TokenStore {
         use nix::fcntl::{open, OFlag};
         use nix::sys::stat::Mode;
         use nix::unistd::read;
-        use std::os::unix::io::AsRawFd;
+
+        struct FifoReadFd(nix::libc::c_int);
+
+        impl Drop for FifoReadFd {
+            fn drop(&mut self) {
+                let _ = nix::unistd::close(self.0);
+            }
+        }
+
         let fd = match open(path, OFlag::O_RDONLY | OFlag::O_NONBLOCK, Mode::empty()) {
-            Ok(fd) => fd,
+            Ok(fd) => FifoReadFd(fd),
             Err(_) => return Err(DiskFingerprint::Unreadable),
         };
         let mut raw = Vec::new();
@@ -630,7 +638,7 @@ impl TokenStore {
             if cancel.is_some_and(|c| c.load(Ordering::Acquire)) {
                 return Err(DiskFingerprint::Unreadable);
             }
-            match read(fd.as_raw_fd(), &mut buf) {
+            match read(fd.0, &mut buf) {
                 Ok(0) => std::thread::sleep(Duration::from_millis(5)),
                 Ok(n) => {
                     raw.extend_from_slice(&buf[..n]);
@@ -931,7 +939,7 @@ impl TokenStore {
         }
         let approve_ids: Vec<_> = entries
             .iter()
-            .filter(|t| !t.revoked && t.scopes.contains(&Scope::Approve))
+            .filter(|t| !t.revoked && t.scopes.iter().any(|s| *s == Scope::Approve))
             .map(|t| t.id.clone())
             .collect();
         if approve_ids.len() != 1 || approve_ids[0] != *approver_token_id {
@@ -1149,28 +1157,6 @@ impl TokenStore {
             .clone()
     }
 
-    pub fn verify_bearer_identity(
-        &self,
-        bearer: &str,
-        now_ms: u64,
-    ) -> Result<VerifiedToken, TokenError> {
-        let delta = self.refresh_if_modified()?;
-        self.notify_token_revocation_changes(&delta);
-        let state = self.inner.lock().expect("token store lock");
-        let hash = hash_bearer_secret(bearer);
-        let entry = Self::find_entry(&state.entries, &hash).ok_or(TokenError::Unauthorized)?;
-        if entry.revoked {
-            return Err(TokenError::Revoked);
-        }
-        if now_ms >= entry.expires_at_ms {
-            return Err(TokenError::Expired);
-        }
-        Ok(VerifiedToken {
-            id: entry.id.clone(),
-            scopes: entry.scopes.clone(),
-        })
-    }
-
     pub fn verify_bearer(
         &self,
         bearer: &str,
@@ -1197,7 +1183,7 @@ impl TokenStore {
         if need == Scope::Approve && entry.id != state.approver_token_id {
             return Err(TokenError::ScopeDenied);
         }
-        if !entry.scopes.contains(&need) {
+        if !entry.scopes.iter().any(|s| *s == need) {
             return Err(TokenError::ScopeDenied);
         }
         Ok(VerifiedToken {
@@ -1425,14 +1411,6 @@ mod tests {
         store
             .verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan)
             .expect("reload recovers after hung probe");
-        let post_reload = Instant::now() + Duration::from_secs(5);
-        while store.live_disk_probe_threads_for_test() > 0 {
-            assert!(
-                Instant::now() < post_reload,
-                "probe thread did not finish after reload"
-            );
-            std::thread::sleep(Duration::from_millis(10));
-        }
         assert_eq!(store.live_disk_probe_threads_for_test(), 0);
     }
 
@@ -1644,5 +1622,57 @@ mod tests {
             );
             write_tokens_revoking_writer(&path, false);
         }
+    }
+
+    #[cfg(unix)]
+    fn open_fd_count() -> usize {
+        std::fs::read_dir("/proc/self/fd")
+            .map(|d| d.count())
+            .unwrap_or(0)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fifo_read_closes_fd_on_every_exit_path() {
+        use nix::sys::stat::Mode;
+        use std::sync::atomic::AtomicBool;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("tokens.json");
+        nix::unistd::mkfifo(&path, Mode::S_IRUSR | Mode::S_IWUSR).expect("mkfifo");
+        let baseline = open_fd_count();
+        let cancel = AtomicBool::new(true);
+        for _ in 0..40 {
+            assert!(matches!(
+                TokenStore::try_read_fifo_tokens_bytes(&path, Some(&cancel)),
+                Err(DiskFingerprint::Unreadable)
+            ));
+        }
+        let after_cancel = open_fd_count();
+        assert!(
+            after_cancel <= baseline + 2,
+            "cancel exits must not leak FIFO fds (baseline={baseline}, after={after_cancel})"
+        );
+
+        let cancel_live = AtomicBool::new(false);
+        let path_feed = path.clone();
+        let feeder = std::thread::spawn(move || {
+            use std::io::Write;
+            let file = crate::test_util::default_tokens_file();
+            let bytes = serde_json::to_vec_pretty(&file).expect("json");
+            let mut w = std::fs::OpenOptions::new()
+                .write(true)
+                .open(&path_feed)
+                .expect("open fifo for write");
+            w.write_all(&bytes).expect("write tokens");
+        });
+        let ok = TokenStore::try_read_fifo_tokens_bytes(&path, Some(&cancel_live));
+        feeder.join().expect("join feeder");
+        assert!(ok.is_ok(), "expected valid fifo read, got {ok:?}");
+        let after_ok = open_fd_count();
+        assert!(
+            after_ok <= baseline + 2,
+            "successful fifo read must close fd (baseline={baseline}, after={after_ok})"
+        );
     }
 }
