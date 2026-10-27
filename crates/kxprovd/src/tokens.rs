@@ -619,9 +619,17 @@ impl TokenStore {
         use nix::fcntl::{open, OFlag};
         use nix::sys::stat::Mode;
         use nix::unistd::read;
-        use std::os::unix::io::AsRawFd;
+
+        struct FifoReadFd(nix::libc::c_int);
+
+        impl Drop for FifoReadFd {
+            fn drop(&mut self) {
+                let _ = nix::unistd::close(self.0);
+            }
+        }
+
         let fd = match open(path, OFlag::O_RDONLY | OFlag::O_NONBLOCK, Mode::empty()) {
-            Ok(fd) => fd,
+            Ok(fd) => FifoReadFd(fd),
             Err(_) => return Err(DiskFingerprint::Unreadable),
         };
         let mut raw = Vec::new();
@@ -630,7 +638,7 @@ impl TokenStore {
             if cancel.is_some_and(|c| c.load(Ordering::Acquire)) {
                 return Err(DiskFingerprint::Unreadable);
             }
-            match read(fd.as_raw_fd(), &mut buf) {
+            match read(fd.0, &mut buf) {
                 Ok(0) => std::thread::sleep(Duration::from_millis(5)),
                 Ok(n) => {
                     raw.extend_from_slice(&buf[..n]);
@@ -1614,5 +1622,57 @@ mod tests {
             );
             write_tokens_revoking_writer(&path, false);
         }
+    }
+
+    #[cfg(unix)]
+    fn open_fd_count() -> usize {
+        std::fs::read_dir("/proc/self/fd")
+            .map(|d| d.count())
+            .unwrap_or(0)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fifo_read_closes_fd_on_every_exit_path() {
+        use nix::sys::stat::Mode;
+        use std::sync::atomic::AtomicBool;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("tokens.json");
+        nix::unistd::mkfifo(&path, Mode::S_IRUSR | Mode::S_IWUSR).expect("mkfifo");
+        let baseline = open_fd_count();
+        let cancel = AtomicBool::new(true);
+        for _ in 0..40 {
+            assert!(matches!(
+                TokenStore::try_read_fifo_tokens_bytes(&path, Some(&cancel)),
+                Err(DiskFingerprint::Unreadable)
+            ));
+        }
+        let after_cancel = open_fd_count();
+        assert!(
+            after_cancel <= baseline + 2,
+            "cancel exits must not leak FIFO fds (baseline={baseline}, after={after_cancel})"
+        );
+
+        let cancel_live = AtomicBool::new(false);
+        let path_feed = path.clone();
+        let feeder = std::thread::spawn(move || {
+            use std::io::Write;
+            let file = crate::test_util::default_tokens_file();
+            let bytes = serde_json::to_vec_pretty(&file).expect("json");
+            let mut w = std::fs::OpenOptions::new()
+                .write(true)
+                .open(&path_feed)
+                .expect("open fifo for write");
+            w.write_all(&bytes).expect("write tokens");
+        });
+        let ok = TokenStore::try_read_fifo_tokens_bytes(&path, Some(&cancel_live));
+        feeder.join().expect("join feeder");
+        assert!(ok.is_ok(), "expected valid fifo read, got {ok:?}");
+        let after_ok = open_fd_count();
+        assert!(
+            after_ok <= baseline + 2,
+            "successful fifo read must close fd (baseline={baseline}, after={after_ok})"
+        );
     }
 }
