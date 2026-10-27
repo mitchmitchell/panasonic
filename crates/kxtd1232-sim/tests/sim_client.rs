@@ -48,14 +48,14 @@ fn test_wrong_password() {
 fn test_read_records_blocks_match_db() {
     let mut c = client(Access::ReadOnly);
     let img = c.read_table(0x25).unwrap();
-    assert_eq!(img, c.transport().sim.db[&0x25]);
+    assert_eq!(img, c.transport().sim().db[&0x25]);
     assert_eq!(&img[..16], encode_cid_name("TEST ONE").unwrap().as_slice());
     let part = c.read_records(0x24, 3, 30).unwrap();
-    assert_eq!(part, c.transport().sim.db[&0x24][18..198]);
+    assert_eq!(part, c.transport().sim().db[&0x24][18..198]);
     // 0x24 reads in 25-record (150-byte) frames, per the spec.
     let reads = c
         .transport()
-        .sim
+        .sim()
         .commands
         .iter()
         .filter(|&&b| b == 0x01)
@@ -77,7 +77,7 @@ fn test_refusal_past_end() {
 #[test]
 fn test_nak_fault_surfaces() {
     let mut c = client(Access::ReadOnly);
-    c.transport_mut().sim.inject(Fault::Nak);
+    c.transport_mut().sim_mut().inject(Fault::Nak);
     assert_eq!(
         c.read(0x24, 0, 0, 3),
         Err(Error::Nak {
@@ -91,7 +91,9 @@ fn test_nak_fault_surfaces() {
 #[test]
 fn test_busy_run_waited_out_without_resend() {
     let mut c = client(Access::ReadOnly);
-    c.transport_mut().sim.inject(Fault::Busy { frames: 10 });
+    c.transport_mut()
+        .sim_mut()
+        .inject(Fault::Busy { frames: 10 });
     let before = c.transport().sent.len();
     assert!(c.read(0x24, 0, 0, 3).is_ok());
     assert_eq!(
@@ -129,7 +131,7 @@ fn test_silent_write_detected_by_readback() {
     let base = c.read(0x25, 0, 0, 80).unwrap();
     let mut new = base.clone();
     new[0] = b'X';
-    c.transport_mut().sim.inject(Fault::SilentWrite);
+    c.transport_mut().sim_mut().inject(Fault::SilentWrite);
     c.write(0x25, 0, 0, &new).unwrap();
     assert_eq!(c.read(0x25, 0, 0, 80).unwrap(), base);
 }
@@ -139,14 +141,14 @@ fn test_end_binary_then_bye() {
     let mut c = client(Access::ReadOnly);
     c.end_binary().unwrap();
     assert_eq!(c.state(), &SessionState::Closed);
-    assert_eq!(c.transport().sim.commands.last(), Some(&0x0B));
+    assert_eq!(c.transport().sim().commands.last(), Some(&0x0B));
 }
 
 #[test]
 fn test_write_nak_counts_as_unacked() {
     let mut c = client(Access::ReadWrite);
     let base = c.read(0x24, 0, 0, 75).unwrap();
-    c.transport_mut().sim.inject(Fault::Nak);
+    c.transport_mut().sim_mut().inject(Fault::Nak);
     let e = c.write(0x24, 0, 0, &base).unwrap_err();
     assert!(matches!(e, Error::Unacked(ref u) if u.reason == UnackedReason::Nak(2)));
     assert!(matches!(c.state(), SessionState::AwaitingVerify(_)));

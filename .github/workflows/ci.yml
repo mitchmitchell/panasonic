@@ -39,14 +39,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
   test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --workspace --locked
+      - run: cargo test --workspace --exclude kxprovd --locked
+      - run: cargo test -p kxprovd --features test-util --locked -- --test-threads=1
       - run: cargo test -p kxtd1232-sim --features faults --locked
+
   no-sim-faults-in-ship:
     runs-on: ubuntu-latest
     steps:
@@ -63,6 +66,38 @@ jobs:
             echo 'expected kxprov to depend on kxtd1232-sim' >&2
             exit 1
           fi
+  no-test-transport-in-kxprovd-ship:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - run: |
+          set -eo pipefail
+          command -v cargo >/dev/null || { echo 'cargo not on PATH' >&2; exit 1; }
+          command -v grep >/dev/null || { echo 'grep not on PATH' >&2; exit 1; }
+          feat='test-transport-access'
+          edges='normal,build,features'
+          ship_tree=$(cargo tree -p kxprovd --locked -e "$edges" -i kxtd1232) || exit 1
+          if echo "$ship_tree" | grep -E "$feat" >/dev/null; then
+            echo 'kxprovd ship graph must not include kxtd1232/test-transport-access' >&2
+            echo "$ship_tree" | grep -E "$feat" >&2
+            exit 1
+          fi
+          forced=$(cargo tree -p kxprovd --locked -e "$edges" --features kxtd1232/test-transport-access -i kxtd1232) || exit 1
+          if ! echo "$forced" | grep -E "$feat" >/dev/null; then
+            echo 'positive control failed: forced kxtd1232/test-transport-access must appear in tree' >&2
+            echo "$forced" >&2
+            exit 1
+          fi
+          util_tree=$(cargo tree -p kxprovd --locked -e "$edges" --features test-util -i kxtd1232) || exit 1
+          if ! echo "$util_tree" | grep -E "$feat" >/dev/null; then
+            echo 'positive control failed: test-util build must include test-transport-access' >&2
+            echo "$util_tree" >&2
+            exit 1
+          fi
+      - run: cargo build -p kxprovd --release --locked
+      - run: cargo test -p kxprovd --test release_no_transport_mut --locked
+
   build-aarch64:
     runs-on: ubuntu-latest
     steps:
@@ -70,13 +105,13 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: rustup target add aarch64-unknown-linux-gnu
       - run: pip install cargo-zigbuild ziglang
-      - run: cargo zigbuild --release --locked --target aarch64-unknown-linux-gnu.2.36 -p kxprov
+      - run: cargo zigbuild --release --locked --target aarch64-unknown-linux-gnu.2.36 -p kxprov -p kxprovd
       - name: Binary sizes vs 15 MB budget
         run: |
           budget=$((15*1024*1024)); fail=0
           echo "| binary | bytes | MiB | budget 15 MiB |" >> "$GITHUB_STEP_SUMMARY"
           echo "|---|---|---|---|" >> "$GITHUB_STEP_SUMMARY"
-          for b in target/aarch64-unknown-linux-gnu/release/kxprov; do
+          for b in target/aarch64-unknown-linux-gnu/release/kxprov target/aarch64-unknown-linux-gnu/release/kxprovd; do
             s=$(stat -c %s "$b"); ok=ok; [ "$s" -gt "$budget" ] && ok=OVER && fail=1
             line="| $(basename $b) | $s | $(awk "BEGIN{printf \"%.2f\", $s/1048576}") | $ok |"
             echo "$line"; echo "$line" >> "$GITHUB_STEP_SUMMARY"
@@ -85,4 +120,6 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: kxprov-aarch64
-          path: target/aarch64-unknown-linux-gnu/release/kxprov
+          path: |
+            target/aarch64-unknown-linux-gnu/release/kxprov
+            target/aarch64-unknown-linux-gnu/release/kxprovd

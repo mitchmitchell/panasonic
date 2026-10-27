@@ -27,7 +27,7 @@ fn cid_block(c: &mut Client<SimTransport>) -> (Vec<u8>, Vec<u8>) {
 
 fn write_count(c: &Client<SimTransport>) -> usize {
     c.transport()
-        .sim
+        .sim()
         .commands
         .iter()
         .filter(|&&b| b == 0x00)
@@ -37,14 +37,16 @@ fn write_count(c: &Client<SimTransport>) -> usize {
 #[test]
 fn test_a2_busy_run_on_read() {
     let mut c = client();
-    c.transport_mut().sim.inject(Fault::Busy { frames: 8 });
+    c.transport_mut()
+        .sim_mut()
+        .inject(Fault::Busy { frames: 8 });
     assert!(c.read(0x24, 0, 0, 3).is_ok());
 }
 
 #[test]
 fn test_a2_nak_on_read() {
     let mut c = client();
-    c.transport_mut().sim.inject(Fault::Nak);
+    c.transport_mut().sim_mut().inject(Fault::Nak);
     assert!(matches!(
         c.read(0x24, 0, 0, 3),
         Err(Error::Nak { code: 0x02, .. })
@@ -59,7 +61,7 @@ fn test_a2_unacked_applied_and_dropped() {
     ] {
         let mut c = client();
         let (base, new) = cid_block(&mut c);
-        c.transport_mut().sim.inject(fault);
+        c.transport_mut().sim_mut().inject(fault);
         let e = c.write(0x24, 0, 0, &new).unwrap_err();
         assert!(matches!(
             e,
@@ -75,7 +77,7 @@ fn test_a2_late_ack_garbled_stale() {
     let mut c = client();
     let (base, new) = cid_block(&mut c);
     c.transport_mut()
-        .sim
+        .sim()
         .inject(Fault::LateAck { delay_ms: 2_300 });
     assert!(matches!(c.write(0x24, 0, 0, &new), Err(Error::Unacked(_))));
     assert_eq!(
@@ -85,7 +87,7 @@ fn test_a2_late_ack_garbled_stale() {
 
     let mut c = client();
     let (base, new) = cid_block(&mut c);
-    c.transport_mut().sim.inject(Fault::GarbledAck);
+    c.transport_mut().sim_mut().inject(Fault::GarbledAck);
     let e = c.write(0x24, 0, 0, &new).unwrap_err();
     assert!(matches!(
         e,
@@ -98,7 +100,7 @@ fn test_a2_late_ack_garbled_stale() {
 
     let mut c = client();
     let (base, new) = cid_block(&mut c);
-    c.transport_mut().sim.inject(Fault::StaleReply);
+    c.transport_mut().sim_mut().inject(Fault::StaleReply);
     let e = c.write(0x24, 0, 0, &new).unwrap_err();
     assert!(matches!(
         e,
@@ -117,7 +119,7 @@ fn test_a2_silent_write() {
     let base = c.read(0x25, 0, 0, 80).unwrap();
     let mut new = base.clone();
     new[0] = b'S';
-    c.transport_mut().sim.inject(Fault::SilentWrite);
+    c.transport_mut().sim_mut().inject(Fault::SilentWrite);
     c.write(0x25, 0, 0, &new).unwrap();
     assert_eq!(c.read(0x25, 0, 0, 80).unwrap(), base);
 }
@@ -125,7 +127,9 @@ fn test_a2_silent_write() {
 #[test]
 fn test_a2_busy_past_bound_from_fixture() {
     let mut c = client();
-    c.transport_mut().sim.inject(Fault::Busy { frames: 200 });
+    c.transport_mut()
+        .sim_mut()
+        .inject(Fault::Busy { frames: 200 });
     assert_eq!(c.read(0x24, 0, 0, 3), Err(Error::BusyTimeout));
 }
 
@@ -134,7 +138,7 @@ fn test_a2_unacked_then_busy_before_verify() {
     let mut c = client();
     let (base, new) = cid_block(&mut c);
     c.transport_mut()
-        .sim
+        .sim()
         .inject(Fault::NoAckThenBusy { busy_frames: 12 });
     assert!(matches!(c.write(0x24, 0, 0, &new), Err(Error::Unacked(_))));
     assert_eq!(
@@ -146,7 +150,7 @@ fn test_a2_unacked_then_busy_before_verify() {
 #[test]
 fn test_a2_read_refused_end_of_table() {
     let mut c = client();
-    c.transport_mut().sim.inject(Fault::ReadRefused);
+    c.transport_mut().sim_mut().inject(Fault::ReadRefused);
     assert_eq!(c.read(0x24, 0, 0, 3), Err(Error::Refused { cmd: 0x01 }));
 }
 
@@ -157,7 +161,7 @@ fn test_a2_wrong_password_login_fault() {
         Access::ReadOnly,
         Timing::default(),
     );
-    c.transport_mut().sim.inject(Fault::WrongPassword);
+    c.transport_mut().sim_mut().inject(Fault::WrongPassword);
     assert!(matches!(
         c.login("9999"),
         Err(Error::Login(
@@ -174,7 +178,7 @@ fn test_a2_another_terminal_login_fault() {
         Timing::default(),
     );
     c.transport_mut()
-        .sim
+        .sim()
         .inject(Fault::AnotherTerminal(SignOn::default().in_use.clone()));
     assert!(matches!(
         c.login(PLACEHOLDER_PASSWORD),

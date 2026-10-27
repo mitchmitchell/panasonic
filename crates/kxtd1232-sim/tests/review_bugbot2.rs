@@ -17,13 +17,13 @@ fn client() -> Client<SimTransport> {
 }
 
 fn db(c: &Client<SimTransport>, r: usize) -> Vec<u8> {
-    c.transport().sim.db[&0x25][r * 16..r * 16 + 16].to_vec()
+    c.transport().sim().db[&0x25][r * 16..r * 16 + 16].to_vec()
 }
 
 fn pending(c: &mut Client<SimTransport>, r: u16) -> (Vec<u8>, Vec<u8>) {
     let base = db(c, r as usize);
     let new = vec![0x50u8 + r as u8; 16];
-    c.transport_mut().sim.inject(Fault::NoAckApplied);
+    c.transport_mut().sim_mut().inject(Fault::NoAckApplied);
     assert!(matches!(c.write(0x25, r, 0, &new), Err(Error::Unacked(_))));
     (base, new)
 }
@@ -62,11 +62,11 @@ fn test_rollback_presend_failure_keeps_prior_state() {
         c.transport_mut()
             .inject_inbound_after(i * 80, BUSY_FRAME.to_vec());
     }
-    let writes = c.transport().sim.writes.len();
+    let writes = c.transport().sim().writes.len();
     let e = c.rollback_block(0x25, 4, 0, &base).unwrap_err();
     assert!(matches!(e, Error::PreSend(_)), "{e:?}");
     assert_eq!(c.state(), &before, "not Locked: nothing was sent");
-    assert_eq!(c.transport().sim.writes.len(), writes);
+    assert_eq!(c.transport().sim().writes.len(), writes);
 }
 
 #[test]
@@ -102,7 +102,7 @@ fn test_rollback_verify_link_down_keeps_disconnected_and_resume() {
 #[test]
 fn test_bye_pending_persists_and_retry_resends_bye() {
     let mut c = client();
-    c.transport_mut().sim.silent_bye = true;
+    c.transport_mut().sim_mut().silent_bye = true;
     assert_eq!(
         c.end_binary(),
         Err(Error::ByeNotConfirmed("no reply".into()))
@@ -117,7 +117,7 @@ fn test_bye_pending_persists_and_retry_resends_bye() {
             .count()
     };
     assert_eq!(byes(&c), 1);
-    c.transport_mut().sim.silent_bye = false;
+    c.transport_mut().sim_mut().silent_bye = false;
     assert_eq!(c.end_binary(), Ok(()));
     assert_eq!(byes(&c), 2, "retry re-sends BYE, not end-binary");
     assert_eq!(

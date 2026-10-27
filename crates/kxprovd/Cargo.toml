@@ -1,0 +1,84 @@
+[package]
+name = "kxprovd"
+description = "kx-provision daemon: single serial owner, job queue, backups, journal, gates"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+build = "build.rs"
+
+[[bin]]
+name = "kxprovd"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[features]
+default = []
+inprocess-sim = ["dep:kxtd1232-sim"]
+test-util = [
+    "inprocess-sim",
+    "kxtd1232/test-transport-access",
+    "kxtd1232-sim/faults",
+]
+
+[dependencies]
+kxtd1232 = { path = "../kxtd1232" }
+kxtd1232-sim = { path = "../kxtd1232-sim", optional = true, default-features = false }
+kxprov-api = { path = "../kxprov-api" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+hex = "0.4"
+getrandom = "0.3"
+thiserror = "2"
+fs2 = "0.4"
+nix = { version = "0.29", features = ["socket", "user", "term", "fs"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "io-util", "net", "fs", "time", "macros"] }
+tokio-serial = "5.4"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+chrono-tz = "0.10"
+
+[dev-dependencies]
+tempfile = "3"
+kxprov = { path = "../kxprov" }
+
+[[test]]
+name = "daemon"
+required-features = ["test-util"]
+
+[[test]]
+name = "f1_v27"
+required-features = ["test-util"]
+
+[[test]]
+name = "f1_v28_v29"
+required-features = ["test-util"]
+
+[[test]]
+name = "timing_and_readback"
+required-features = ["test-util"]
+
+[[test]]
+name = "security_b2_b3_b6"
+required-features = ["test-util"]
+
+[[test]]
+name = "v2_12"
+required-features = ["test-util"]
+
+[[test]]
+name = "release_no_transport_mut"
+required-features = []
+
+[[test]]
+name = "p4_review"
+required-features = ["test-util"]
+
+[[test]]
+name = "tokens_fifo"
+required-features = ["test-util"]

@@ -23,10 +23,14 @@ pub mod signon;
 pub mod tables;
 
 pub use client::{
-    Client, LinkDownError, SessionState, Timing, Transport, TransportError, VerifyOutcome,
+    Client, LinkDownError, SessionState, Timing, TimingConfigError, Transport, TransportError,
+    VerifyOutcome, MAX_LINK_BAUD, MIN_REPLY_GUARD_MS,
 };
 pub use error::Error;
 pub use fields::FieldKind;
 pub use frame::{Cmd, Encoder, Reply, ReplyKind};
 pub use plan::{build_plan, field_patch, ChunkWrite, Granularity, Patch, WritePlan};
 pub use signon::SignOn;
+
+/// `true` when this crate was built with the `test-transport-access` feature (release graphs should keep this `false`).
+pub const TEST_TRANSPORT_ACCESS: bool = cfg!(feature = "test-transport-access");

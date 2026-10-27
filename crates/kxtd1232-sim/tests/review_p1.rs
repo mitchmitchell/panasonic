@@ -21,14 +21,14 @@ fn client() -> Client<SimTransport> {
 }
 
 fn db(c: &Client<SimTransport>, t: u8, off: usize, n: usize) -> Vec<u8> {
-    c.transport().sim.db[&t][off..off + n].to_vec()
+    c.transport().sim().db[&t][off..off + n].to_vec()
 }
 
 /// Unacked (but applied) 16-byte write to 0x25 record `r`; returns (base, new).
 fn pending(c: &mut Client<SimTransport>, r: u16) -> (Vec<u8>, Vec<u8>) {
     let base = db(c, 0x25, r as usize * 16, 16);
     let new = vec![0x41u8 + r as u8; 16];
-    c.transport_mut().sim.inject(Fault::NoAckApplied);
+    c.transport_mut().sim_mut().inject(Fault::NoAckApplied);
     assert!(matches!(c.write(0x25, r, 0, &new), Err(Error::Unacked(_))));
     (base, new)
 }
@@ -61,7 +61,7 @@ fn test_verify_prefix_does_not_clear_awaiting_verify() {
 fn test_rollback_refuses_other_blocks() {
     let mut c = client();
     let (base, _new) = pending(&mut c, 2);
-    let writes = c.transport().sim.writes.len();
+    let writes = c.transport().sim().writes.len();
     let other = db(&c, 0x25, 3 * 16, 16);
     assert_eq!(
         c.rollback_block(0x25, 3, 0, &other),
@@ -75,7 +75,7 @@ fn test_rollback_refuses_other_blocks() {
         c.rollback_block(0x24, 2, 0, &base),
         Err(Error::NotPendingBlock)
     );
-    assert_eq!(c.transport().sim.writes.len(), writes, "nothing written");
+    assert_eq!(c.transport().sim().writes.len(), writes, "nothing written");
     assert!(matches!(c.state(), SessionState::AwaitingVerify(_)));
     assert_eq!(c.rollback_block(0x25, 2, 0, &base), Ok(()));
     assert_eq!(db(&c, 0x25, 32, 16), base);
@@ -86,7 +86,7 @@ fn test_rollback_refuses_other_block_from_needs_rollback() {
     let mut c = client();
     let (base, new) = pending(&mut c, 4);
     // Make the PBX hold something that is neither plan nor base.
-    c.transport_mut().sim.db.get_mut(&0x25).unwrap()[64] = 0x7E;
+    c.transport_mut().sim_mut().db.get_mut(&0x25).unwrap()[64] = 0x7E;
     assert_eq!(
         c.verify_block(0x25, 4, 0, &new, &base),
         Ok(VerifyOutcome::Neither)
@@ -120,7 +120,7 @@ fn test_end_binary_sends_bye_and_waits_for_ok() {
 #[test]
 fn test_end_binary_unconfirmed_bye_is_not_closed() {
     let mut c = client();
-    c.transport_mut().sim.silent_bye = true;
+    c.transport_mut().sim_mut().silent_bye = true;
     assert_eq!(
         c.end_binary(),
         Err(Error::ByeNotConfirmed("no reply".into()))

@@ -35,7 +35,7 @@ fn block(c: &mut Client<SimTransport>) -> (Vec<u8>, Vec<u8>) {
 }
 
 fn end_binary_sent(c: &Client<SimTransport>) -> bool {
-    c.transport().sim.commands.contains(&0x0B)
+    c.transport().sim().commands.contains(&0x0B)
 }
 
 #[test]
@@ -45,7 +45,7 @@ fn test_late_ack_drained_before_verify_reread() {
     // Ack arrives 2.3 s after the write: after the 2 s ack timeout, inside the 0.5 s
     // quiet window that drain uses.
     c.transport_mut()
-        .sim
+        .sim()
         .inject(Fault::LateAck { delay_ms: 2_300 });
     let t0 = c.transport().now();
     assert!(matches!(c.write(0x24, 0, 0, &new), Err(Error::Unacked(_))));
@@ -66,7 +66,7 @@ fn test_late_ack_drained_before_verify_reread() {
 fn test_drain_waits_out_busy_then_rereads() {
     let mut c = client();
     let (base, new) = block(&mut c);
-    c.transport_mut().sim.inject(Fault::Busy {
+    c.transport_mut().sim_mut().inject(Fault::Busy {
         frames: frames_over_busy_limit(),
     });
     assert!(matches!(c.write(0x24, 0, 0, &new), Err(Error::Unacked(_))));
@@ -85,7 +85,7 @@ fn test_drain_waits_out_busy_then_rereads() {
 fn test_end_binary_held_after_unacked_write() {
     let mut c = client();
     let (base, new) = block(&mut c);
-    c.transport_mut().sim.inject(Fault::NoAckDropped);
+    c.transport_mut().sim_mut().inject(Fault::NoAckDropped);
     assert!(matches!(c.write(0x24, 0, 0, &new), Err(Error::Unacked(_))));
     assert_eq!(c.end_binary(), Err(Error::EndBinaryHeld));
     assert!(!end_binary_sent(&c), "nothing sent while held");
@@ -101,13 +101,13 @@ fn test_end_binary_held_after_unacked_write() {
 fn test_end_binary_held_after_busy_timeout_until_rollback() {
     let mut c = client();
     let (base, new) = block(&mut c);
-    c.transport_mut().sim.inject(Fault::Busy {
+    c.transport_mut().sim_mut().inject(Fault::Busy {
         frames: frames_over_busy_limit(),
     });
     assert!(matches!(c.write(0x24, 0, 0, &new), Err(Error::Unacked(_))));
     assert_eq!(c.end_binary(), Err(Error::EndBinaryHeld));
     // Something else changed the block meanwhile: verify says neither.
-    c.transport_mut().sim.db.get_mut(&0x24).unwrap()[0] ^= 0x01;
+    c.transport_mut().sim_mut().db.get_mut(&0x24).unwrap()[0] ^= 0x01;
     assert_eq!(
         c.verify_block(0x24, 0, 0, &new, &base),
         Ok(VerifyOutcome::Neither)
@@ -116,7 +116,7 @@ fn test_end_binary_held_after_busy_timeout_until_rollback() {
     assert_eq!(c.end_binary(), Err(Error::EndBinaryHeld));
     assert!(!end_binary_sent(&c));
     c.rollback_block(0x24, 0, 0, &base).unwrap();
-    assert_eq!(c.transport().sim.db[&0x24][..150], base[..]);
+    assert_eq!(c.transport().sim().db[&0x24][..150], base[..]);
     assert_eq!(c.state(), &SessionState::Binary);
     c.end_binary().unwrap();
     assert!(end_binary_sent(&c));
@@ -126,14 +126,14 @@ fn test_end_binary_held_after_busy_timeout_until_rollback() {
 fn test_failed_rollback_locks_and_allows_end() {
     let mut c = client();
     let (base, new) = block(&mut c);
-    c.transport_mut().sim.inject(Fault::NoAckApplied);
+    c.transport_mut().sim_mut().inject(Fault::NoAckApplied);
     assert!(matches!(c.write(0x24, 0, 0, &new), Err(Error::Unacked(_))));
-    c.transport_mut().sim.db.get_mut(&0x24).unwrap()[0] ^= 0x01;
+    c.transport_mut().sim_mut().db.get_mut(&0x24).unwrap()[0] ^= 0x01;
     assert_eq!(
         c.verify_block(0x24, 0, 0, &new, &base),
         Ok(VerifyOutcome::Neither)
     );
-    c.transport_mut().sim.inject(Fault::SilentWrite);
+    c.transport_mut().sim_mut().inject(Fault::SilentWrite);
     assert_eq!(c.rollback_block(0x24, 0, 0, &base), Err(Error::Locked));
     assert_eq!(c.state(), &SessionState::Locked);
     assert_eq!(c.write(0x24, 0, 0, &base), Err(Error::Locked));

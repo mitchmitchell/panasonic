@@ -6,10 +6,15 @@
 //! `kxprov: error: ...`, with no backtrace.
 
 use clap::{Parser, Subcommand, ValueEnum};
+use kxprov_api::{OperationalMode, Profile, SetModeParams};
 use kxtd1232::error::NotAllowed;
 use kxtd1232::{build_plan, field_patch, Client, Error, FieldKind, Granularity};
 use kxtd1232_sim::{SimPbx, SimTransport, PLACEHOLDER_PASSWORD};
+mod token_atomic;
+
+use std::path::PathBuf;
 use std::process::ExitCode;
+use token_atomic::atomic_write_tokens;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -21,6 +26,9 @@ struct Cli {
     /// Transport. Only the in-process simulator exists in Phase A.
     #[arg(long, value_enum, default_value_t = TransportKind::Sim)]
     transport: TransportKind,
+    /// Daemon Unix socket (admin commands only).
+    #[arg(long, default_value = "/run/kx-provision/kxprovd.sock")]
+    socket: std::path::PathBuf,
     #[command(subcommand)]
     cmd: Command,
 }
@@ -49,6 +57,95 @@ enum Command {
         index: u16,
         value: String,
     },
+    /// Clear persisted LOCKED state (root admin, after verified backup).
+    Unlock {
+        #[arg(long)]
+        job: String,
+        #[arg(long)]
+        reason: String,
+    },
+    /// Operational mode and profile (v2.7 F1, root socket only).
+    Mode {
+        #[command(subcommand)]
+        cmd: ModeCommand,
+    },
+    /// Record simulator test pass for this build hash (v2.7 F1).
+    SimMark {
+        #[command(subcommand)]
+        cmd: SimMarkCommand,
+    },
+    /// Daemon bearer token admin (root; tokens file 0600).
+    Token {
+        #[command(subcommand)]
+        cmd: TokenCommand,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum TokenCommand {
+    /// Replace a token secret (prints new bearer once).
+    Rotate {
+        #[arg(long)]
+        id: String,
+        #[arg(long, default_value = "/var/lib/kx-provision/tokens.json")]
+        tokens_path: PathBuf,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum ModeCommand {
+    Set {
+        #[arg(long, value_enum)]
+        mode: OperationalModeCli,
+        #[arg(long, value_enum)]
+        profile: ProfileCli,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum SimMarkCommand {
+    /// Run simulator crate tests and write sim-mark.json on success.
+    Write {
+        #[arg(long, default_value = "/var/lib/kx-provision")]
+        data_dir: PathBuf,
+    },
+    /// Show whether the current build hash is marked.
+    Status {
+        #[arg(long, default_value = "/var/lib/kx-provision")]
+        data_dir: PathBuf,
+    },
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+enum OperationalModeCli {
+    Testing,
+    Production,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+enum ProfileCli {
+    Sim,
+    Test,
+    Prod,
+}
+
+impl From<OperationalModeCli> for OperationalMode {
+    fn from(v: OperationalModeCli) -> Self {
+        match v {
+            OperationalModeCli::Testing => OperationalMode::Testing,
+            OperationalModeCli::Production => OperationalMode::Production,
+        }
+    }
+}
+
+impl From<ProfileCli> for Profile {
+    fn from(v: ProfileCli) -> Self {
+        match v {
+            ProfileCli::Sim => Profile::Sim,
+            ProfileCli::Test => Profile::Test,
+            ProfileCli::Prod => Profile::Prod,
+        }
+    }
 }
 
 /// CLI failure, split by exit code.
@@ -112,6 +209,18 @@ fn check_ranges(cmd: &Command) -> Result<(), CliError> {
 
 /// Command result plus any close (end-binary) failure, which is always reported.
 fn run(cli: &Cli) -> (Result<(), CliError>, Option<Error>) {
+    if matches!(cli.cmd, Command::Unlock { .. }) {
+        return (unlock_daemon(cli), None);
+    }
+    if matches!(cli.cmd, Command::Mode { .. }) {
+        return (mode_daemon(cli), None);
+    }
+    if matches!(cli.cmd, Command::SimMark { .. }) {
+        return (sim_mark(cli), None);
+    }
+    if matches!(cli.cmd, Command::Token { .. }) {
+        return (token_admin(cli), None);
+    }
     if let Err(e) = check_ranges(&cli.cmd) {
         return (Err(e), None);
     }
@@ -144,6 +253,7 @@ fn command(c: &mut Client<SimTransport>, cmd: &Command) -> Result<(), CliError> 
         Command::Version => {
             println!("kxprov {}", env!("CARGO_PKG_VERSION"));
             println!("pbx {}", c.version()?);
+            println!("build {}", env!("KXPROV_BUILD_HASH"));
         }
         Command::Read { kind, first, count } => {
             let size = kind.record_size();
@@ -169,8 +279,174 @@ fn command(c: &mut Client<SimTransport>, cmd: &Command) -> Result<(), CliError> 
                 diff.join(", ")
             );
         }
+        Command::Unlock { .. }
+        | Command::Mode { .. }
+        | Command::SimMark { .. }
+        | Command::Token { .. } => unreachable!("handled in run()"),
     }
     Ok(())
+}
+
+fn mode_daemon(cli: &Cli) -> Result<(), CliError> {
+    let Command::Mode { cmd } = &cli.cmd else {
+        return Err(CliError::Usage("mode".into()));
+    };
+    let ModeCommand::Set { mode, profile } = cmd;
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| CliError::Usage(e.to_string()))?;
+    rt.block_on(async {
+        let mut c = kxprov_api::ApiClient::connect(&cli.socket)
+            .await
+            .map_err(|e| CliError::Usage(e.to_string()))?;
+        let kxprov_api::ResponseResult::SetMode(r) = c
+            .call(kxprov_api::RequestBody::SetMode {
+                params: SetModeParams {
+                    mode: (*mode).into(),
+                    profile: (*profile).into(),
+                },
+            })
+            .await
+            .map_err(|e| CliError::Usage(e.to_string()))?
+        else {
+            return Err(CliError::Usage("unexpected response".into()));
+        };
+        println!(
+            "mode={:?} profile={:?} counter={}",
+            r.mode, r.profile, r.counter
+        );
+        Ok(())
+    })
+}
+
+fn sim_mark(cli: &Cli) -> Result<(), CliError> {
+    let Command::SimMark { cmd } = &cli.cmd else {
+        return Err(CliError::Usage("sim-mark".into()));
+    };
+    match cmd {
+        SimMarkCommand::Status { data_dir } => {
+            let path = data_dir.join("sim-mark.json");
+            if !path.exists() {
+                println!("marked=false build={}", env!("KXPROV_BUILD_HASH"));
+                return Ok(());
+            }
+            let raw = std::fs::read_to_string(&path).map_err(|e| CliError::Usage(e.to_string()))?;
+            let v: serde_json::Value =
+                serde_json::from_str(&raw).map_err(|e| CliError::Usage(e.to_string()))?;
+            let hash = v["build_hash"].as_str().unwrap_or("");
+            let marked = hash == env!("KXPROV_BUILD_HASH");
+            println!(
+                "marked={marked} build={} stored={hash}",
+                env!("KXPROV_BUILD_HASH")
+            );
+            Ok(())
+        }
+        SimMarkCommand::Write { data_dir } => {
+            let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("..")
+                .join("..");
+            let status = std::process::Command::new("cargo")
+                .current_dir(&workspace)
+                .args([
+                    "test",
+                    "-p",
+                    "kxtd1232-sim",
+                    "-p",
+                    "kxprovd",
+                    "--lib",
+                    "--tests",
+                ])
+                .status()
+                .map_err(|e| CliError::Usage(e.to_string()))?;
+            if !status.success() {
+                return Err(CliError::Usage("simulator tests failed".into()));
+            }
+            std::fs::create_dir_all(data_dir).map_err(|e| CliError::Usage(e.to_string()))?;
+            let mark = serde_json::json!({
+                "build_hash": env!("KXPROV_BUILD_HASH"),
+                "marked_at_ms": std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as u64)
+                    .unwrap_or(0),
+            });
+            let bytes =
+                serde_json::to_vec_pretty(&mark).map_err(|e| CliError::Usage(e.to_string()))?;
+            let path = data_dir.join("sim-mark.json");
+            std::fs::write(&path, bytes).map_err(|e| CliError::Usage(e.to_string()))?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+                    .map_err(|e| CliError::Usage(e.to_string()))?;
+            }
+            println!("sim-mark written for build {}", env!("KXPROV_BUILD_HASH"));
+            Ok(())
+        }
+    }
+}
+
+fn token_admin(cli: &Cli) -> Result<(), CliError> {
+    let Command::Token { cmd } = &cli.cmd else {
+        return Err(CliError::Usage("token".into()));
+    };
+    match cmd {
+        TokenCommand::Rotate { id, tokens_path } => {
+            let mut file: kxprov_api::TokensFile = if tokens_path.exists() {
+                let raw = std::fs::read(tokens_path).map_err(|e| CliError::Usage(e.to_string()))?;
+                serde_json::from_slice(&raw).map_err(|e| CliError::Usage(e.to_string()))?
+            } else {
+                return Err(CliError::Usage("tokens file missing".into()));
+            };
+            let entry = file
+                .tokens
+                .iter_mut()
+                .find(|t| t.id.as_str() == id)
+                .ok_or_else(|| CliError::Usage(format!("token id {id} not found")))?;
+            let mut secret_bytes = [0u8; 32];
+            getrandom::fill(&mut secret_bytes).map_err(|e| CliError::Usage(e.to_string()))?;
+            let bearer = hex::encode(secret_bytes);
+            entry.secret_hash = kxprov_api::hash_bearer_secret(&bearer);
+            entry.revoked = false;
+            kxprov_api::validate_tokens_file(&file)
+                .map_err(|e| CliError::Usage(format!("{e:?}")))?;
+            let data =
+                serde_json::to_vec_pretty(&file).map_err(|e| CliError::Usage(e.to_string()))?;
+            atomic_write_tokens(tokens_path, &data).map_err(|e| CliError::Usage(e.to_string()))?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(tokens_path, std::fs::Permissions::from_mode(0o600))
+                    .map_err(|e| CliError::Usage(e.to_string()))?;
+            }
+            println!("rotated token {id}; new bearer (store securely):\n{bearer}");
+            Ok(())
+        }
+    }
+}
+
+fn unlock_daemon(cli: &Cli) -> Result<(), CliError> {
+    let Command::Unlock { job, reason } = &cli.cmd else {
+        return Err(CliError::Usage("unlock".into()));
+    };
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| CliError::Usage(e.to_string()))?;
+    rt.block_on(async {
+        let mut c = kxprov_api::ApiClient::connect(&cli.socket)
+            .await
+            .map_err(|e| CliError::Usage(e.to_string()))?;
+        c.call(kxprov_api::RequestBody::Unlock {
+            params: kxprov_api::UnlockParams {
+                job_id: job.clone(),
+                reason: reason.clone(),
+            },
+        })
+        .await
+        .map_err(|e| CliError::Usage(e.to_string()))?;
+        Ok(())
+    })
 }
 
 fn main() -> ExitCode {

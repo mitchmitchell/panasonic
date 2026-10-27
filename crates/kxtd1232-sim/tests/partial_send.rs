@@ -19,7 +19,7 @@ fn client() -> Client<SimTransport> {
 }
 
 fn db(c: &Client<SimTransport>, r: usize) -> Vec<u8> {
-    c.transport().sim.db[&0x25][r * 16..r * 16 + 16].to_vec()
+    c.transport().sim().db[&0x25][r * 16..r * 16 + 16].to_vec()
 }
 
 fn relogin(c: &mut Client<SimTransport>) {

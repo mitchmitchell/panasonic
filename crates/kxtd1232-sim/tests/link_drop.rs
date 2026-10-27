@@ -30,7 +30,7 @@ fn block(c: &mut Client<SimTransport>) -> (Vec<u8>, Vec<u8>) {
 
 fn write_cmds(c: &Client<SimTransport>) -> usize {
     c.transport()
-        .sim
+        .sim()
         .commands
         .iter()
         .filter(|&&b| b == 0x00)
@@ -42,7 +42,7 @@ fn test_link_drop_mid_chunk_disconnects_then_relogin_verify() {
     let mut c = client();
     let (base, new) = block(&mut c);
     c.transport_mut()
-        .sim
+        .sim()
         .inject(Fault::LinkDropMidChunk { partial_len: 2 });
     assert!(matches!(
         c.write(0x25, 10, 0, &new),
@@ -69,7 +69,7 @@ fn test_link_drop_partial_frame_send_verify_after_relogin() {
     let mut c = client();
     let (base, new) = block(&mut c);
     c.transport_mut()
-        .sim
+        .sim()
         .inject(Fault::LinkDropMidSend { after_bytes: 6 });
     assert!(matches!(
         c.write(0x25, 10, 0, &new),
@@ -110,7 +110,7 @@ fn test_link_drop_blocks_until_relogin() {
     let mut c = client();
     let (_base, new) = block(&mut c);
     c.transport_mut()
-        .sim
+        .sim()
         .inject(Fault::LinkDropMidChunk { partial_len: 1 });
     assert!(matches!(
         c.write(0x25, 10, 0, &new),
