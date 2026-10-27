@@ -132,10 +132,18 @@ impl LoginRateLimiter {
         let lock_result = tokio::time::timeout(MAX_ACCOUNT_QUEUE_WAIT, verify.lock()).await;
 
         let _verify_guard = match lock_result {
-            Err(_) => return Err(LoginGateError::AccountQueueTimeout),
+            Err(_) => {
+                drop(waiter_slot);
+                return Err(LoginGateError::AccountQueueTimeout);
+            }
             Ok(guard) => guard,
         };
         drop(waiter_slot);
+
+        let ip_delay = self.delay_for_key(ip_key).await;
+        if ip_delay > Duration::ZERO {
+            return Err(LoginGateError::IpRateLimited(ip_delay));
+        }
 
         Ok(attempt().await)
     }
@@ -146,6 +154,10 @@ impl LoginRateLimiter {
         ip_key: &str,
         session_prior_ip_key: Option<&str>,
     ) -> bool {
+        // Serve Unix uses one loopback peer for all clients; do not treat that bucket as privileged.
+        if shared_loopback_ip_key(ip_key) && !ip_key.starts_with("ts-login:") {
+            return false;
+        }
         if session_prior_ip_key == Some(ip_key) {
             return true;
         }
@@ -592,6 +604,79 @@ mod tests {
             "expected 1-2 verifies, got {ok} (rejected {deny})"
         );
         assert!(deny >= 8, "expected most attempts rejected, got {deny}");
+    }
+
+    #[tokio::test]
+    async fn shared_loopback_ip_does_not_grant_privileged_queue_bypass() {
+        let limiter = Arc::new(LoginRateLimiter::new(
+            Duration::from_millis(150),
+            Duration::from_secs(30),
+            Duration::from_secs(300),
+        ));
+        limiter.on_success("acct:admin", "ip:127.0.0.1").await;
+        for i in 0..10 {
+            limiter
+                .record_failure("acct:admin", &format!("ip:attacker-{i}"))
+                .await;
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        let barrier = Arc::new(tokio::sync::Barrier::new(4));
+        let mut handles = Vec::new();
+        for _ in 0..4 {
+            let limiter = Arc::clone(&limiter);
+            let barrier = Arc::clone(&barrier);
+            handles.push(tokio::spawn(async move {
+                barrier.wait().await;
+                limiter
+                    .enter_account_login("acct:admin", "ip:127.0.0.1", None, || async {
+                        tokio::time::sleep(Duration::from_millis(80)).await;
+                    })
+                    .await
+            }));
+        }
+        let mut full = 0;
+        for h in handles {
+            if matches!(
+                h.await.unwrap(),
+                Err(LoginGateError::AccountQueueFull) | Err(LoginGateError::AccountQueueTimeout)
+            ) {
+                full += 1;
+            }
+        }
+        assert!(
+            full >= 1,
+            "shared loopback must not bypass dirty-IP waiter cap via last-success"
+        );
+    }
+
+    #[tokio::test]
+    async fn ip_backoff_rechecked_after_verify_lock_before_password() {
+        let limiter = Arc::new(LoginRateLimiter::new(
+            Duration::from_millis(200),
+            Duration::from_secs(30),
+            Duration::from_secs(300),
+        ));
+        let limiter_bg = Arc::clone(&limiter);
+        let started = Arc::new(tokio::sync::Notify::new());
+        let started_bg = Arc::clone(&started);
+        let t1 = tokio::spawn(async move {
+            limiter_bg
+                .enter_account_login("acct:admin", "ip:dirty", None, || async {
+                    started_bg.notify_waiters();
+                    tokio::time::sleep(Duration::from_millis(400)).await;
+                })
+                .await
+        });
+        started.notified().await;
+        limiter.record_failure("acct:admin", "ip:dirty").await;
+        let t2 = limiter
+            .enter_account_login("acct:admin", "ip:dirty", None, || async {})
+            .await;
+        assert!(
+            matches!(t2, Err(LoginGateError::IpRateLimited(_))),
+            "expected IP rate limit after verify lock, got {t2:?}"
+        );
+        let _ = t1.await;
     }
 
     #[tokio::test]

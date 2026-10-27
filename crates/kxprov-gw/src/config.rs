@@ -726,6 +726,19 @@ mod tests {
     }
 
     #[test]
+    fn serve_hostname_in_tailnet_and_https_allowlists() {
+        let cfg = GatewayConfig {
+            serve_hostname: Some("gw.example.ts.net".into()),
+            ..Default::default()
+        };
+        let tailnet = cfg.effective_web_tailnet_hosts();
+        assert!(
+            tailnet.contains(&"gw.example.ts.net:80".to_string()),
+            "Tailscale Serve hostname must be allowed on tailnet listener: {tailnet:?}"
+        );
+    }
+
+    #[test]
     fn serve_hostname_allowlist_uses_443_not_lan_bind_port() {
         let cfg = GatewayConfig {
             bind: Some("127.0.0.1:8443".into()),

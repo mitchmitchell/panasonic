@@ -48,10 +48,14 @@ impl DaemonClient {
         {
             Ok(r) => Ok(r),
             Err(e @ ApiError::Io(_)) => {
+                drop(guard);
                 if request_is_mutating(&body) {
+                    if let Ok(fresh) = ApiClient::connect(&self.socket_path).await {
+                        let mut guard = self.client.lock().await;
+                        *guard = fresh;
+                    }
                     return Err(map_api_error(e));
                 }
-                drop(guard);
                 let fresh = ApiClient::connect(&self.socket_path)
                     .await
                     .map_err(map_api_error)?;
@@ -70,13 +74,20 @@ impl DaemonClient {
 /// Mutating RPCs must not be resent after I/O failure: the daemon may have already
 /// processed the request if the response was lost on the wire.
 fn request_is_mutating(body: &RequestBody) -> bool {
-    !matches!(
-        body,
+    match body {
         RequestBody::Status
-            | RequestBody::ReadFields { .. }
-            | RequestBody::ListBackups
-            | RequestBody::Whoami
-    )
+        | RequestBody::ReadFields { .. }
+        | RequestBody::ListBackups
+        | RequestBody::Whoami => false,
+        RequestBody::PlanChange { .. }
+        | RequestBody::SubmitApproval { .. }
+        | RequestBody::SetMode { .. }
+        | RequestBody::BackupNow
+        | RequestBody::ApplyPlan { .. }
+        | RequestBody::Unlock { .. }
+        | RequestBody::SimTriggerBusy { .. }
+        | RequestBody::SimTriggerGoliathCopyFail => true,
+    }
 }
 
 fn daemon_auth(caller: &CallerIdentity, gateway_bearer: &str) -> (RequestAuth, Option<String>) {
@@ -325,34 +336,12 @@ impl DaemonBackend for DaemonClient {
 
     async fn rollback(
         &self,
-        caller: &CallerIdentity,
-        job_id: JobId,
+        _caller: &CallerIdentity,
+        _job_id: JobId,
     ) -> Result<ApplyJob, BackendError> {
-        let job_id_str = job_id.0.clone();
-        match self
-            .call(
-                caller,
-                RequestBody::Unlock {
-                    params: kxprov_api::UnlockParams {
-                        job_id: job_id_str,
-                        reason: "rollback".into(),
-                    },
-                },
-            )
-            .await?
-        {
-            ResponseResult::Unlock(_) => Ok(ApplyJob {
-                job_id,
-                state: JobState::Succeeded,
-                message: "rollback submitted".into(),
-            }),
-            ResponseResult::Job(JobRef { job_id }) => Ok(ApplyJob {
-                job_id: JobId(job_id),
-                state: JobState::Queued,
-                message: String::new(),
-            }),
-            _ => Err(BackendError::BadRequest("daemon")),
-        }
+        // kxprovd has no job-scoped rollback RPC yet; Unlock only clears the global lock
+        // and ignores job_id — do not map MCP rollback to it.
+        Err(BackendError::BadRequest("rollback not supported by daemon"))
     }
 }
 
@@ -360,6 +349,9 @@ impl DaemonBackend for DaemonClient {
 mod tests {
     use super::*;
     use kxprov_api::{ApplyPlanParams, DiffHash, PlanId, Profile};
+    use kxprov_mock::BackendError;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
 
     #[test]
     fn mutating_requests_are_classified() {
@@ -387,5 +379,136 @@ mod tests {
                 profile: Profile::Sim,
             },
         }));
+        assert!(request_is_mutating(&RequestBody::Unlock {
+            params: kxprov_api::UnlockParams {
+                job_id: "j".into(),
+                reason: "x".into(),
+            },
+        }));
+    }
+
+    #[tokio::test]
+    async fn rollback_fail_closed_without_daemon_unlock() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("kxprovd.sock");
+        let listener = tokio::net::UnixListener::bind(&sock).unwrap();
+        let lines = Arc::new(AtomicUsize::new(0));
+        let lines_in = Arc::clone(&lines);
+        tokio::spawn(async move {
+            use tokio::io::AsyncBufReadExt;
+            loop {
+                let (mut stream, _) = listener.accept().await.expect("accept");
+                let mut reader = tokio::io::BufReader::new(&mut stream);
+                let mut line = String::new();
+                if reader.read_line(&mut line).await.is_ok() && !line.is_empty() {
+                    lines_in.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+        });
+        let client = DaemonClient::connect(&sock, "gw-bearer".into())
+            .await
+            .expect("connect");
+        let caller = kxprov_mock::CallerIdentity::Mcp(kxprov_mock::McpTokenIdentity {
+            token_id: kxprov_api::TokenId("t".into()),
+            agent_name: "test".into(),
+            scopes: kxprov_mock::ScopeSet::empty(),
+            bearer: "b".into(),
+        });
+        let before = lines.load(Ordering::SeqCst);
+        let err = client
+            .rollback(&caller, JobId("job-1".into()))
+            .await
+            .expect_err("rollback must not call daemon");
+        assert_eq!(
+            err,
+            BackendError::BadRequest("rollback not supported by daemon")
+        );
+        assert_eq!(
+            lines.load(Ordering::SeqCst),
+            before,
+            "rollback must not send a daemon RPC line"
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_plan_io_sends_exactly_one_request_and_reconnects() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        use kxprov_api::{
+            DaemonMode, DiffHash, GateFlags, OperationalMode, PlanId, Profile, Scope,
+        };
+        use kxprov_mock::{McpTokenIdentity, ScopeSet};
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("kxprovd.sock");
+        let listener = tokio::net::UnixListener::bind(&sock).unwrap();
+        let requests = Arc::new(AtomicUsize::new(0));
+        let reqs = Arc::clone(&requests);
+        tokio::spawn(async move {
+            while reqs.load(Ordering::SeqCst) < 2 {
+                let (mut stream, _) = listener.accept().await.expect("accept");
+                let n = reqs.fetch_add(1, Ordering::SeqCst);
+                let mut line = String::new();
+                let mut reader = tokio::io::BufReader::new(&mut stream);
+                let _ = reader.read_line(&mut line).await;
+                if n == 0 {
+                    drop(stream);
+                    continue;
+                }
+                let id = serde_json::from_str::<serde_json::Value>(&line)
+                    .ok()
+                    .and_then(|v| v.get("id").and_then(|id| id.as_str().map(String::from)))
+                    .unwrap_or_else(|| "1".into());
+                let resp = kxprov_api::Response {
+                    id,
+                    ok: true,
+                    result: Some(kxprov_api::ResponseResult::Status(
+                        kxprov_api::StatusResponse {
+                            profile: Profile::Sim,
+                            mode: DaemonMode::ReadOnly,
+                            operational_mode: OperationalMode::Testing,
+                            transport: "test".into(),
+                            gates: GateFlags {
+                                locked: false,
+                                live_writes_approved: false,
+                            },
+                            locked_alert: None,
+                            queue_depth: 0,
+                            active_job: None,
+                        },
+                    )),
+                    error: None,
+                };
+                let out = serde_json::to_string(&resp).unwrap() + "\n";
+                let _ = stream.write_all(out.as_bytes()).await;
+            }
+        });
+
+        let client = DaemonClient::connect(&sock, "gw-bearer".into())
+            .await
+            .expect("connect");
+        let caller = CallerIdentity::Mcp(McpTokenIdentity {
+            token_id: kxprov_api::TokenId("t".into()),
+            agent_name: "test".into(),
+            scopes: ScopeSet::empty().with(Scope::Write),
+            bearer: "b".into(),
+        });
+        let apply_err = client
+            .apply_plan(&caller, PlanId("plan".into()), DiffHash("hash".into()))
+            .await;
+        assert!(apply_err.is_err(), "expected I/O error after dropped read");
+        assert_eq!(requests.load(Ordering::SeqCst), 1, "single mutating send");
+
+        client
+            .status(&caller)
+            .await
+            .expect("status after reconnect");
+        assert_eq!(
+            requests.load(Ordering::SeqCst),
+            2,
+            "read-only call uses fresh connection"
+        );
     }
 }
