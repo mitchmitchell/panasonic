@@ -43,6 +43,42 @@ fn wait_live_at_most_cap(store: &TokenStore, deadline: Instant) {
     }
 }
 
+fn wait_live_probe_threads_drained(store: &TokenStore, deadline: Instant) {
+    while store.live_disk_probe_threads_for_test() > 0 {
+        assert!(
+            Instant::now() < deadline,
+            "probe threads did not drain (live={}, abandoned={})",
+            store.live_disk_probe_threads_for_test(),
+            store.leaked_disk_probe_threads_for_test()
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// Open both FIFO ends concurrently so neither side blocks waiting for a peer.
+fn write_bytes_through_fifo(path: &std::path::Path, bytes: &[u8]) {
+    use std::io::Write;
+    let path = path.to_path_buf();
+    let bytes = bytes.to_vec();
+    std::thread::scope(|scope| {
+        let path_read = path.clone();
+        scope.spawn(move || {
+            let _reader = std::fs::OpenOptions::new()
+                .read(true)
+                .open(&path_read)
+                .expect("fifo read end for paired open");
+            std::thread::sleep(Duration::from_secs(2));
+        });
+        scope.spawn(move || {
+            let mut writer = std::fs::OpenOptions::new()
+                .write(true)
+                .open(path)
+                .expect("fifo write end for paired open");
+            writer.write_all(&bytes).expect("write tokens through fifo");
+        });
+    });
+}
+
 fn assert_probe_counts_bounded(store: &TokenStore) {
     assert!(
         store.live_disk_probe_threads_for_test() <= MAX_LIVE_PROBE_THREADS,
@@ -166,17 +202,12 @@ fn fifo_tokens_single_probe_thread_fast_fail_and_recovery() {
         slow_calls.load(Ordering::Relaxed)
     );
 
+    wait_live_probe_threads_drained(&store, Instant::now() + Duration::from_secs(10));
+
     {
-        use std::io::Write;
         let file = kxprovd::test_util::default_tokens_file();
         let bytes = serde_json::to_vec_pretty(&file).expect("json");
-        let mut writer = std::fs::OpenOptions::new()
-            .write(true)
-            .open(&path)
-            .expect("open fifo for write to unblock probe");
-        writer
-            .write_all(bytes.as_slice())
-            .expect("feed valid tokens through fifo");
+        write_bytes_through_fifo(&path, &bytes);
     }
 
     wait_live_at_most_cap(&store, Instant::now() + Duration::from_secs(5));
