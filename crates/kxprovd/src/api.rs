@@ -5,6 +5,8 @@ use crate::gates::{prod_write_gate, GateState, ProdWriteGate};
 use crate::job_principal::JobPrincipal;
 use crate::locked::LockedStore;
 use crate::mode::{write_approval_required, ModeStore};
+#[cfg(feature = "sim-fault-triggers")]
+use crate::peer::PeerCred;
 use crate::peer::{PeerPolicy, PeerRole};
 use crate::plan_live::verify_live_diff_hash;
 use crate::plan_store::PlanStore;
@@ -16,7 +18,7 @@ use crate::worker::backup_info;
 use kxprov_api::{
     ApiErrorBody, ApplyPlanParams, OperationalMode, PlanChangeParams, Profile, RequestAuth,
     RequestBody, RequestEnvelope, Response, ResponseResult, Scope, SetModeParams, SetModeResult,
-    SubmitApprovalParams, SubmitApprovalResult, TokenId, UnlockParams, UnlockResult,
+    SubmitApprovalParams, SubmitApprovalResult, TokenId, UnlockParams, UnlockResult, WhoamiResult,
 };
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -108,11 +110,11 @@ async fn dispatch(
     env: &RequestEnvelope,
 ) -> Response {
     let id = env.id.clone();
+    if let Some(ref audit) = env.audit {
+        tracing::info!(%audit, "gateway audit (not used for authorization)");
+    }
     let role = state.peer_policy.role(cred);
-    let locked = match state.locked.load() {
-        Ok(s) => s.locked,
-        Err(_) => true,
-    };
+    let locked = state.locked.load().ok().is_some_and(|s| s.locked);
 
     let result = match &env.body {
         RequestBody::Status => Ok(ResponseResult::Status(status_snapshot(state, locked).await)),
@@ -188,6 +190,15 @@ async fn dispatch(
             apply_plan(state, params, token, locked).await
         }
         RequestBody::Unlock { params } => unlock(state, cred, params.clone()).await,
+        RequestBody::Whoami => whoami(state, role, &env.auth).await,
+        #[cfg(feature = "sim-fault-triggers")]
+        RequestBody::SimTriggerBusy { params } => {
+            sim_trigger_busy(state, cred, role, &env.auth, params).await
+        }
+        #[cfg(feature = "sim-fault-triggers")]
+        RequestBody::SimTriggerGoliathCopyFail => {
+            sim_trigger_goliath_copy_fail(state, cred, role, &env.auth).await
+        }
     };
 
     match result {
@@ -210,6 +221,93 @@ fn err_response(id: String, e: ApiErrorBody) -> Response {
     }
 }
 
+async fn whoami(
+    state: &ApiState,
+    role: PeerRole,
+    auth: &Option<RequestAuth>,
+) -> Result<ResponseResult, ApiErrorBody> {
+    if role == PeerRole::ReadOnly {
+        return Err(api_err("forbidden", "read-only peer"));
+    }
+    let auth = auth
+        .as_ref()
+        .ok_or_else(|| api_err("token_required", "bearer required"))?;
+    let now = now_ms();
+    let verified = state
+        .tokens
+        .verify_bearer_identity(&auth.bearer, now)
+        .map_err(token_error_to_api)?;
+    Ok(ResponseResult::Whoami(WhoamiResult {
+        token_id: verified.id,
+        scopes: verified.scopes,
+    }))
+}
+
+#[cfg(feature = "sim-fault-triggers")]
+async fn sim_runtime_allowed(state: &ApiState) -> Result<(), ApiErrorBody> {
+    if state.config.transport != crate::config::TransportKind::Sim {
+        return Err(api_err("forbidden", "sim transport only"));
+    }
+    let profile = *state.profile.read().await;
+    if profile != Profile::Sim && profile != Profile::Test {
+        return Err(api_err("forbidden", "sim/test profile only"));
+    }
+    Ok(())
+}
+
+#[cfg(feature = "sim-fault-triggers")]
+async fn sim_trigger_busy(
+    state: &ApiState,
+    cred: PeerCred,
+    role: PeerRole,
+    auth: &Option<RequestAuth>,
+    params: &kxprov_api::SimTriggerBusyParams,
+) -> Result<ResponseResult, ApiErrorBody> {
+    sim_trigger_access(state, cred, role, auth).await?;
+    let Some(pbx) = state.config.sim_pbx.as_ref() else {
+        return Err(api_err("forbidden", "no sim transport"));
+    };
+    if params.frames == 0 {
+        return Err(api_err("bad_request", "frames must be > 0"));
+    }
+    pbx.lock()
+        .expect("sim pbx lock")
+        .inject(kxtd1232_sim::Fault::Busy {
+            frames: params.frames,
+        });
+    Ok(ResponseResult::SimTrigger(kxprov_api::SimTriggerResult {
+        ok: true,
+    }))
+}
+
+#[cfg(feature = "sim-fault-triggers")]
+async fn sim_trigger_goliath_copy_fail(
+    state: &ApiState,
+    cred: PeerCred,
+    role: PeerRole,
+    auth: &Option<RequestAuth>,
+) -> Result<ResponseResult, ApiErrorBody> {
+    sim_trigger_access(state, cred, role, auth).await?;
+    state.goliath.trigger_next_copy_fail();
+    Ok(ResponseResult::SimTrigger(kxprov_api::SimTriggerResult {
+        ok: true,
+    }))
+}
+
+#[cfg(feature = "sim-fault-triggers")]
+async fn sim_trigger_access(
+    state: &ApiState,
+    cred: PeerCred,
+    role: PeerRole,
+    auth: &Option<RequestAuth>,
+) -> Result<(), ApiErrorBody> {
+    sim_runtime_allowed(state).await?;
+    if state.peer_policy.is_admin(cred) {
+        return Ok(());
+    }
+    require_access(state, cred, role, auth, Scope::Write).map(|_| ())
+}
+
 fn verify_bearer(
     state: &ApiState,
     auth: &RequestAuth,
@@ -220,18 +318,22 @@ fn verify_bearer(
         .tokens
         .verify_bearer(&auth.bearer, now, need)
         .map(|v| v.id)
-        .map_err(|e| match e {
-            TokenError::Unauthorized | TokenError::Revoked | TokenError::Expired => {
-                api_err("unauthorized", "invalid bearer")
-            }
-            TokenError::ScopeDenied => api_err("forbidden", "token scope denied"),
-            TokenError::StoreUnavailable | TokenError::Io(_) | TokenError::Json(_) => {
-                api_err("token", "token store unavailable")
-            }
-            TokenError::InsecurePermissions | TokenError::Invalid(_) => {
-                api_err("token", "invalid tokens configuration")
-            }
-        })
+        .map_err(token_error_to_api)
+}
+
+fn token_error_to_api(e: TokenError) -> ApiErrorBody {
+    match e {
+        TokenError::Unauthorized | TokenError::Revoked | TokenError::Expired => {
+            api_err("unauthorized", "invalid bearer")
+        }
+        TokenError::ScopeDenied => api_err("forbidden", "token scope denied"),
+        TokenError::StoreUnavailable => api_err("token", "token store unavailable"),
+        TokenError::InsecurePermissions | TokenError::Invalid(_) => {
+            api_err("token", "invalid tokens configuration")
+        }
+        TokenError::Io(err) => api_err("token", &err.to_string()),
+        TokenError::Json(err) => api_err("token", &err.to_string()),
+    }
 }
 
 fn require_access(
@@ -432,7 +534,6 @@ async fn set_mode(
             let code = match e {
                 crate::transition::TransitionError::Mismatch => "transition_mismatch",
                 crate::transition::TransitionError::NoDigest => "transition_no_backup",
-                crate::transition::TransitionError::BlockPersist(_) => "transition_block",
                 _ => "transition",
             };
             return Err(api_err(code, &e.to_string()));
@@ -550,11 +651,8 @@ async fn unlock(
     if !state.peer_policy.is_admin(cred) {
         return Err(api_err("forbidden", "root admin required"));
     }
-    tracing::info!(
-        job_id = %params.job_id,
-        reason = %params.reason,
-        "LOCKED cleared via unlock"
-    );
+    let _ = params.reason;
+    let _ = params.job_id;
     state
         .locked
         .clear()

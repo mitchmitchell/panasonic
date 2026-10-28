@@ -939,7 +939,7 @@ impl TokenStore {
         }
         let approve_ids: Vec<_> = entries
             .iter()
-            .filter(|t| !t.revoked && t.scopes.iter().any(|s| *s == Scope::Approve))
+            .filter(|t| !t.revoked && t.scopes.contains(&Scope::Approve))
             .map(|t| t.id.clone())
             .collect();
         if approve_ids.len() != 1 || approve_ids[0] != *approver_token_id {
@@ -1183,8 +1183,37 @@ impl TokenStore {
         if need == Scope::Approve && entry.id != state.approver_token_id {
             return Err(TokenError::ScopeDenied);
         }
-        if !entry.scopes.iter().any(|s| *s == need) {
+        if !entry.scopes.contains(&need) {
             return Err(TokenError::ScopeDenied);
+        }
+        Ok(VerifiedToken {
+            id: entry.id.clone(),
+            scopes: entry.scopes.clone(),
+        })
+    }
+
+    /// Validate bearer credentials and return token identity without requiring a specific scope.
+    pub fn verify_bearer_identity(
+        &self,
+        bearer: &str,
+        now_ms: u64,
+    ) -> Result<VerifiedToken, TokenError> {
+        let delta = self.refresh_if_modified()?;
+        {
+            let state = self.inner.lock().expect("token store lock");
+            if state.store_unavailable {
+                return Err(TokenError::StoreUnavailable);
+            }
+        }
+        self.notify_token_revocation_changes(&delta);
+        let state = self.inner.lock().expect("token store lock");
+        let hash = hash_bearer_secret(bearer);
+        let entry = Self::find_entry(&state.entries, &hash).ok_or(TokenError::Unauthorized)?;
+        if entry.revoked {
+            return Err(TokenError::Revoked);
+        }
+        if now_ms >= entry.expires_at_ms {
+            return Err(TokenError::Expired);
         }
         Ok(VerifiedToken {
             id: entry.id.clone(),
@@ -1665,16 +1694,25 @@ mod tests {
             let ok = TokenStore::try_read_fifo_tokens_bytes(&reader_path, Some(&cancel_live));
             let _ = done_tx.send(ok);
         });
+        // Let the reader thread open its O_NONBLOCK read fd before pairing ends (avoid FIFO open deadlock).
+        std::thread::sleep(Duration::from_millis(50));
         std::thread::scope(|scope| {
+            use nix::fcntl::{open, OFlag};
+            use nix::sys::stat::Mode;
+            use nix::unistd::close;
             use std::io::Write;
+
             let path_read = path_feed.clone();
             let path_write = path_feed;
             scope.spawn(move || {
-                let _hold = std::fs::OpenOptions::new()
-                    .read(true)
-                    .open(path_read)
-                    .expect("fifo read end for paired open");
+                let fd = open(
+                    path_read.as_path(),
+                    OFlag::O_RDONLY | OFlag::O_NONBLOCK,
+                    Mode::empty(),
+                )
+                .expect("fifo read end for paired open");
                 std::thread::sleep(Duration::from_secs(2));
+                let _ = close(fd);
             });
             scope.spawn(move || {
                 let mut w = std::fs::OpenOptions::new()

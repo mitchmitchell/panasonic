@@ -1,40 +1,24 @@
 use crate::gates::GateConfig;
 use crate::peer::PeerPolicy;
 use kxprov_api::Profile;
+use kxprov_api::{
+    goliath_dir, resolve_profile_data_dir, sim_passed_path, DAEMON_ETC_CONFIG, DAEMON_SOCKET,
+    DATA_DIR, TOKENS_JSON,
+};
 use kxtd1232::{Timing, TimingConfigError};
-#[cfg(feature = "inprocess-sim")]
 use kxtd1232_sim::SimPbx;
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
-#[cfg(feature = "inprocess-sim")]
 use std::sync::{Arc, Mutex};
 use thiserror::Error;
 
-pub const ETC_CONFIG: &str = "/etc/kxprov/kxprovd.json";
-pub const PROVISION_ROOT: &str = "/var/lib/kx-provision";
-pub const DEFAULT_SOCKET: &str = "/run/kx-provision/kxprovd.sock";
-/// Root-only epoch counters (P4-R10), separate from per-profile `mode.json` / `profile.json`.
-pub const EPOCH_DIR_NAME: &str = ".epoch";
+pub const ETC_CONFIG: &str = DAEMON_ETC_CONFIG;
 
+pub use kxprov_api::{profile_epoch_counter_path, EPOCH_DIR_NAME};
+
+/// Profile-scoped tree under the provision root (`{root}/sim`, etc.).
 pub fn profile_data_dir(provision_root: impl AsRef<Path>, profile: Profile) -> PathBuf {
-    let seg = match profile {
-        Profile::Sim => "sim",
-        Profile::Test => "test",
-        Profile::Prod => "prod",
-    };
-    provision_root.as_ref().join(seg)
-}
-
-pub fn profile_epoch_counter_path(provision_root: impl AsRef<Path>, profile: Profile) -> PathBuf {
-    let seg = match profile {
-        Profile::Sim => "sim",
-        Profile::Test => "test",
-        Profile::Prod => "prod",
-    };
-    provision_root
-        .as_ref()
-        .join(EPOCH_DIR_NAME)
-        .join(format!("{seg}.counter"))
+    resolve_profile_data_dir(provision_root.as_ref(), profile)
 }
 
 /// Monotonic highest epoch ever written under this provision root (cross-profile rollback guard).
@@ -65,10 +49,11 @@ pub struct Config {
     pub serial_device: PathBuf,
     pub gateway_uid: u32,
     pub admin_uid: u32,
+    /// Group on the daemon Unix socket (`0660`), e.g. `kxprovision`.
+    pub daemon_socket_group: String,
     pub totp_enabled: bool,
     pub totp_secret_path: Option<PathBuf>,
     pub timing: Timing,
-    #[cfg(feature = "inprocess-sim")]
     pub sim_pbx: Option<Arc<Mutex<SimPbx>>>,
     pub tokens_path: PathBuf,
 }
@@ -84,14 +69,17 @@ struct EtcConfigFile {
     #[serde(default = "default_tokens_path")]
     tokens_path: PathBuf,
     password_path: PathBuf,
-    #[serde(default)]
     goliath_target: Option<PathBuf>,
     #[serde(default = "default_serial")]
     serial_device: PathBuf,
-    #[serde(default = "default_gateway_uid")]
-    gateway_uid: u32,
+    #[serde(default)]
+    gateway_uid: Option<u32>,
+    #[serde(default = "default_gateway_user")]
+    gateway_user: String,
     #[serde(default = "default_admin_uid")]
     admin_uid: u32,
+    #[serde(default = "default_daemon_socket_group")]
+    daemon_socket_group: String,
     #[serde(default)]
     profile: Profile,
     #[serde(default)]
@@ -111,28 +99,84 @@ struct EtcConfigFile {
 #[serde(rename_all = "snake_case")]
 enum TransportKindWire {
     #[default]
-    Serial,
     Sim,
+    Serial,
 }
 
 fn default_provision_root() -> PathBuf {
-    PathBuf::from(PROVISION_ROOT)
+    PathBuf::from(DATA_DIR)
 }
 
 fn default_socket() -> PathBuf {
-    PathBuf::from(DEFAULT_SOCKET)
+    PathBuf::from(DAEMON_SOCKET)
 }
 
 fn default_tokens_path() -> PathBuf {
-    PathBuf::from(PROVISION_ROOT).join("tokens.json")
+    PathBuf::from(TOKENS_JSON)
+}
+
+/// Production path defaults (serde defaults and package layout).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProductionPathDefaults {
+    pub provision_root: PathBuf,
+    pub data_dir: PathBuf,
+    pub socket_path: PathBuf,
+    pub tokens_path: PathBuf,
+    pub goliath_target: PathBuf,
+}
+
+pub fn production_path_defaults() -> ProductionPathDefaults {
+    let profile = Profile::Sim;
+    let provision_root = default_provision_root();
+    ProductionPathDefaults {
+        socket_path: default_socket(),
+        data_dir: profile_data_dir(&provision_root, profile),
+        provision_root,
+        tokens_path: default_tokens_path(),
+        goliath_target: PathBuf::from(goliath_dir(profile)),
+    }
+}
+
+impl Config {
+    /// Active profile state directory (plans, backups, mode.json, …).
+    pub fn profile_data_dir(&self) -> PathBuf {
+        self.data_dir.clone()
+    }
+
+    /// Simulator pass marker path (same resolution as `kxprov sim-mark`).
+    pub fn sim_passed_path(&self) -> PathBuf {
+        sim_passed_path(&self.provision_root)
+    }
 }
 
 fn default_serial() -> PathBuf {
     PathBuf::from("/dev/kxpbx")
 }
 
-fn default_gateway_uid() -> u32 {
-    1000
+fn default_gateway_user() -> String {
+    "kxprov-gw".into()
+}
+
+fn default_daemon_socket_group() -> String {
+    "kxprovision".into()
+}
+
+fn resolve_gateway_uid(explicit: Option<u32>, user_name: &str) -> Result<u32, ConfigError> {
+    if let Some(uid) = explicit {
+        return Ok(uid);
+    }
+    #[cfg(unix)]
+    {
+        use nix::unistd::User;
+        let user = User::from_name(user_name).map_err(|e| ConfigError::Io(e.into()))?;
+        user.ok_or_else(|| ConfigError::UnknownGatewayUser(user_name.to_string()))
+            .map(|u| u.uid.as_raw())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = user_name;
+        Err(ConfigError::Missing)
+    }
 }
 
 fn default_admin_uid() -> u32 {
@@ -149,8 +193,10 @@ pub enum ConfigError {
     Timing(#[from] TimingConfigError),
     #[error("gateway_uid must differ from admin_uid")]
     UidsMustDiffer,
-    #[error("in-process sim transport was not enabled at build time (rebuild with feature inprocess-sim)")]
-    SimTransportNotBuilt,
+    #[error("gateway user {0} not found (set gateway_uid explicitly)")]
+    UnknownGatewayUser(String),
+    #[error("missing config")]
+    Missing,
 }
 
 impl std::fmt::Debug for Config {
@@ -158,6 +204,7 @@ impl std::fmt::Debug for Config {
         f.debug_struct("Config")
             .field("profile", &self.profile)
             .field("transport", &self.transport)
+            .field("provision_root", &self.provision_root)
             .field("data_dir", &self.data_dir)
             .field("timing", &self.timing)
             .field("tokens_path", &self.tokens_path)
@@ -170,10 +217,6 @@ impl Config {
         self.timing.validate()?;
         if self.gateway_uid == self.admin_uid {
             return Err(ConfigError::UidsMustDiffer);
-        }
-        #[cfg(not(feature = "inprocess-sim"))]
-        if self.transport == TransportKind::Sim {
-            return Err(ConfigError::SimTransportNotBuilt);
         }
         Ok(())
     }
@@ -201,6 +244,12 @@ impl Config {
         let goliath_target = file
             .goliath_target
             .unwrap_or_else(|| data_dir.join("goliath"));
+        let sim_pbx = if transport == TransportKind::Sim {
+            Some(Arc::new(Mutex::new(SimPbx::default())))
+        } else {
+            None
+        };
+        let gateway_uid = resolve_gateway_uid(file.gateway_uid, &file.gateway_user)?;
         let cfg = Self {
             profile: file.profile,
             transport,
@@ -209,16 +258,16 @@ impl Config {
             socket_path: file.socket_path,
             password: password.trim().to_string(),
             gates: file.gates,
-            peer_policy: PeerPolicy::new(file.gateway_uid, file.admin_uid),
+            peer_policy: PeerPolicy::new(gateway_uid, file.admin_uid),
             goliath_target,
             serial_device: file.serial_device,
-            gateway_uid: file.gateway_uid,
+            gateway_uid,
             admin_uid: file.admin_uid,
+            daemon_socket_group: file.daemon_socket_group,
             totp_enabled: file.totp_enabled,
             totp_secret_path: file.totp_secret_path,
             timing,
-            #[cfg(feature = "inprocess-sim")]
-            sim_pbx: None,
+            sim_pbx,
             tokens_path: file.tokens_path,
         };
         cfg.validate()?;
@@ -227,19 +276,53 @@ impl Config {
 
     #[cfg(feature = "test-util")]
     pub fn sim_test(data_dir: PathBuf, socket_path: PathBuf, peer_uid: u32) -> Self {
+        let provision_root = data_dir.clone();
+        let profile_dir = profile_data_dir(&provision_root, Profile::Sim);
         Self {
             profile: Profile::Sim,
             transport: TransportKind::Sim,
-            provision_root: data_dir.clone(),
-            data_dir: data_dir.clone(),
+            provision_root,
+            data_dir: profile_dir.clone(),
             socket_path,
             password: kxtd1232_sim::PLACEHOLDER_PASSWORD.to_string(),
             gates: GateConfig::default(),
             peer_policy: PeerPolicy::new(peer_uid.wrapping_add(1), peer_uid),
-            goliath_target: data_dir.join("goliath"),
+            goliath_target: profile_dir.join("goliath"),
             serial_device: PathBuf::from("/dev/kxpbx"),
             gateway_uid: peer_uid.wrapping_add(1),
             admin_uid: peer_uid,
+            daemon_socket_group: String::new(),
+            totp_enabled: false,
+            totp_secret_path: None,
+            timing: Timing::default(),
+            sim_pbx: Some(Arc::new(Mutex::new(SimPbx::default()))),
+            tokens_path: data_dir.join("tokens.json"),
+        }
+    }
+
+    #[cfg(feature = "test-util")]
+    pub fn sim_test_gateway_caller(
+        data_dir: PathBuf,
+        socket_path: PathBuf,
+        gateway_uid: u32,
+    ) -> Self {
+        let admin_uid = gateway_uid.wrapping_add(1);
+        let provision_root = data_dir.clone();
+        let profile_dir = profile_data_dir(&provision_root, Profile::Sim);
+        Self {
+            profile: Profile::Sim,
+            transport: TransportKind::Sim,
+            provision_root,
+            data_dir: profile_dir.clone(),
+            socket_path,
+            password: kxtd1232_sim::PLACEHOLDER_PASSWORD.to_string(),
+            gates: GateConfig::default(),
+            peer_policy: PeerPolicy::new(gateway_uid, admin_uid),
+            goliath_target: profile_dir.join("goliath"),
+            serial_device: PathBuf::from("/dev/kxpbx"),
+            gateway_uid,
+            admin_uid,
+            daemon_socket_group: String::new(),
             totp_enabled: false,
             totp_secret_path: None,
             timing: Timing::default(),

@@ -1,0 +1,78 @@
+//! Host / Origin allow-list: explicit ports and HTTP/2-style URI authority.
+
+use std::sync::Arc;
+use std::time::Duration;
+
+use axum::body::Body;
+use axum::http::{header, Method, Request, StatusCode};
+use http_body_util::BodyExt;
+use kxprov_gw::{production_web_router, HostOriginConfig, RateLimiter};
+use kxprov_web::LoginRateLimiter;
+mod support;
+
+use support::{
+    apply_web_connect, cookie_header_from_set_cookies, form_urlencoded, test_web_state,
+    TestVerifier,
+};
+use tower::ServiceExt;
+
+#[tokio::test]
+async fn localhost_with_port_passes_host_and_origin_on_login_post() {
+    let mut state = test_web_state();
+    state.login_limiter = Arc::new(LoginRateLimiter::new(
+        Duration::from_secs(1),
+        Duration::from_secs(30),
+        Duration::from_secs(300),
+    ));
+    state.admin = Arc::new(TestVerifier);
+    let app = production_web_router(
+        state,
+        HostOriginConfig {
+            allowed_hosts: vec!["localhost:8080".into()],
+            allowed_origins: vec!["http://localhost:8080".into()],
+        },
+        false,
+        900,
+        kxprov_web::WEB_SESSION_ABSOLUTE_SECS,
+        RateLimiter::new(120),
+    );
+
+    let peer: std::net::SocketAddr = "127.0.0.1:8080".parse().unwrap();
+    let get = app
+        .clone()
+        .oneshot({
+            let mut req = Request::builder()
+                .uri("http://localhost:8080/login")
+                .body(Body::empty())
+                .unwrap();
+            apply_web_connect(&mut req, peer, false);
+            req
+        })
+        .await
+        .unwrap();
+    assert_eq!(get.status(), StatusCode::OK);
+    let cookie = cookie_header_from_set_cookies(get.headers());
+    let body_bytes = get.into_body().collect().await.unwrap().to_bytes();
+    let html = String::from_utf8_lossy(&body_bytes);
+    let csrf = html
+        .split("name=\"_csrf\" value=\"")
+        .nth(1)
+        .and_then(|s| s.split('"').next())
+        .expect("csrf");
+
+    let mut req = Request::builder()
+        .method(Method::POST)
+        .uri("http://localhost:8080/login")
+        .header(header::HOST, "localhost:8080")
+        .header(header::ORIGIN, "http://localhost:8080")
+        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .header(header::COOKIE, cookie)
+        .body(Body::from(format!(
+            "password=test-admin-password&_csrf={}",
+            form_urlencoded(csrf)
+        )))
+        .unwrap();
+    apply_web_connect(&mut req, peer, false);
+    let post = app.oneshot(req).await.unwrap();
+    assert_eq!(post.status(), StatusCode::SEE_OTHER);
+}

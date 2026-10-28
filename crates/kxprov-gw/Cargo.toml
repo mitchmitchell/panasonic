@@ -1,0 +1,117 @@
+[package]
+name = "kxprov-gw"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "kxprov-gw"
+path = "src/main.rs"
+
+[[test]]
+name = "startup"
+path = "tests/startup.rs"
+required-features = ["test-secret-skip"]
+
+[[test]]
+name = "daemon_e2e"
+path = "tests/daemon_e2e.rs"
+required-features = ["test-secret-skip"]
+
+[[test]]
+name = "non_root_gateway_daemon"
+path = "tests/non_root_gateway_daemon.rs"
+
+[[test]]
+name = "host_allowlist"
+path = "tests/host_allowlist.rs"
+required-features = ["test-secret-skip"]
+
+[[test]]
+name = "host_authority"
+path = "tests/host_authority.rs"
+required-features = ["test-secret-skip"]
+
+[[test]]
+name = "https_origin_allowlist"
+path = "tests/https_origin_allowlist.rs"
+required-features = ["test-secret-skip"]
+
+[[test]]
+name = "login_xff_rate_limit"
+path = "tests/login_xff_rate_limit.rs"
+required-features = ["test-secret-skip"]
+
+[[test]]
+name = "serve_unix_xff"
+path = "tests/serve_unix_xff.rs"
+required-features = ["test-secret-skip"]
+
+[[test]]
+name = "run_a4_script"
+path = "tests/run_a4_script.rs"
+required-features = ["test-secret-skip"]
+
+[[test]]
+name = "run_seed"
+path = "tests/run_seed.rs"
+required-features = ["test-secret-skip"]
+
+[features]
+test-secret-skip = []
+sim-fault-triggers = ["kxprov-api/sim-fault-triggers"]
+
+[dependencies]
+anyhow.workspace = true
+async-trait = "0.1"
+argon2 = { workspace = true, features = ["password-hash"] }
+axum.workspace = true
+axum-server.workspace = true
+axum_csrf = { workspace = true, features = ["layer"] }
+base64.workspace = true
+hex.workspace = true
+http.workspace = true
+kxprov-api.workspace = true
+kxprov-mock.workspace = true
+kxtd1232.workspace = true
+kxprov-mcp = { workspace = true }
+rmcp = { workspace = true }
+tower-service = "0.3"
+kxprov-web = { workspace = true }
+rustls.workspace = true
+rustls-pemfile.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+sha2.workspace = true
+subtle.workspace = true
+time.workspace = true
+tokio.workspace = true
+tower.workspace = true
+nix = { version = "0.29", features = ["user", "socket", "fs"] }
+tower-http = { workspace = true, features = ["set-header"] }
+tower-sessions.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+toml = "0.8"
+
+[dev-dependencies]
+serial_test = "3"
+kxprovd = { path = "../kxprovd", features = ["test-util"] }
+argon2 = { workspace = true, features = ["password-hash"] }
+hyper.workspace = true
+rand = "0.8"
+http-body-util.workspace = true
+rcgen = "0.14"
+reqwest = { version = "0.12", default-features = false, features = [
+    "rustls-tls",
+    "json",
+] }
+serde_json.workspace = true
+tempfile = "3"
+libc = "0.2"
+nix = { version = "0.29", features = ["user"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+uuid.workspace = true

@@ -2,23 +2,28 @@
 
 mod common;
 
-use common::{bearer_auth, init_test_daemon, WRITER_SECRET};
+use common::{bearer_auth, init_test_daemon, wait_daemon_api_ready, WRITER_SECRET};
+use kxprov_api::resolve_profile_data_dir;
 use kxprov_api::{ApiClient, PlanChangeParams, RequestBody, Scope};
-use kxprov_api::{OperationalMode, Profile};
+use kxprov_api::{
+    ApiError, OperationalMode, Profile, DAEMON_SOCKET, DATA_DIR, TOKENS_JSON, TOKEN_QUEUE_DEPTH_MAX,
+};
 use kxprovd::audit::AuditKind;
 use kxprovd::mode::{ModeFileBody, ModeStore, ProfileFileBody};
 use kxprovd::tokens::TokenStore;
-use std::time::Duration;
+use serial_test::serial;
 
 #[test]
 fn rolled_back_mode_json_fails_closed_to_production() {
     let tmp = tempfile::tempdir().unwrap();
+    let profile_root = resolve_profile_data_dir(tmp.path(), Profile::Test);
+    std::fs::create_dir_all(&profile_root).unwrap();
     let store = ModeStore::new(tmp.path(), Profile::Test);
     store
         .set_operational(OperationalMode::Testing, Profile::Test, true)
         .unwrap();
     std::fs::write(
-        tmp.path().join("mode.json"),
+        profile_root.join("mode.json"),
         serde_json::to_vec_pretty(&ModeFileBody {
             mode: OperationalMode::Testing,
             counter: 0,
@@ -37,12 +42,14 @@ fn rolled_back_mode_json_fails_closed_to_production() {
 #[test]
 fn rolled_back_profile_json_fails_closed_to_prod_profile() {
     let tmp = tempfile::tempdir().unwrap();
+    let profile_root = resolve_profile_data_dir(tmp.path(), Profile::Sim);
+    std::fs::create_dir_all(&profile_root).unwrap();
     let store = ModeStore::new(tmp.path(), Profile::Sim);
     store
         .set_operational(OperationalMode::Production, Profile::Sim, true)
         .unwrap();
     std::fs::write(
-        tmp.path().join("profile.json"),
+        profile_root.join("profile.json"),
         serde_json::to_vec_pretty(&ProfileFileBody {
             profile: Profile::Sim,
             counter: 0,
@@ -93,82 +100,96 @@ fn approver_with_plan_scope_rejected_at_mint() {
 }
 
 #[tokio::test]
+#[serial]
 async fn per_token_queue_depth_rate_limit_integration() {
-    use kxprov_api::TOKEN_QUEUE_DEPTH_MAX;
-    use std::sync::Arc;
-    use tokio::sync::Barrier;
+    use kxprovd::test_util::PlanChangeHoldGuard;
+
+    kxprovd::queue::assert_writer_token_queue_depth_cap().await;
 
     let tmp = tempfile::tempdir().unwrap();
     let uid = nix::unistd::getuid().as_raw();
     let (_d, sock) = init_test_daemon(&tmp, uid, Profile::Sim);
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    wait_daemon_api_ready(&sock).await;
 
-    let plan = |n: u16| PlanChangeParams {
-        kind: kxprov_api::FieldKindWire::CidName,
-        index: n,
-        value: format!("RL-{n}"),
-    };
-
-    let n = (TOKEN_QUEUE_DEPTH_MAX + 1) as usize;
-    let barrier = Arc::new(Barrier::new(n));
-    let mut handles = Vec::new();
-    for i in 0..n {
-        let sock = sock.clone();
-        let barrier = barrier.clone();
-        handles.push(tokio::spawn(async move {
-            barrier.wait().await;
-            let mut c = ApiClient::connect(&sock).await.unwrap();
-            c.call_auth(
-                RequestBody::PlanChange {
-                    params: plan(i as u16),
-                },
-                Some(bearer_auth(WRITER_SECRET)),
-            )
-            .await
+    let _hold = PlanChangeHoldGuard::arm();
+    let sock = std::sync::Arc::new(sock);
+    let mut in_flight = Vec::with_capacity(usize::try_from(TOKEN_QUEUE_DEPTH_MAX).unwrap());
+    for i in 0..TOKEN_QUEUE_DEPTH_MAX {
+        let sock = std::sync::Arc::clone(&sock);
+        in_flight.push(tokio::spawn(async move {
+            let mut client = ApiClient::connect(sock.as_path()).await.unwrap();
+            client
+                .call_auth(
+                    RequestBody::PlanChange {
+                        params: PlanChangeParams {
+                            kind: kxprov_api::FieldKindWire::CidName,
+                            index: 1,
+                            value: format!("RL-{i}"),
+                        },
+                    },
+                    Some(bearer_auth(WRITER_SECRET)),
+                )
+                .await
         }));
     }
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 
-    let mut rate_limited = false;
-    for h in handles {
-        match h.await.unwrap() {
-            Err(e) if e.to_string().contains("rate_limit") => rate_limited = true,
-            Ok(_) | Err(_) => {}
-        }
+    let mut client = ApiClient::connect(sock.as_path()).await.unwrap();
+    match client
+        .call_auth(
+            RequestBody::PlanChange {
+                params: PlanChangeParams {
+                    kind: kxprov_api::FieldKindWire::CidName,
+                    index: 1,
+                    value: "RL-over".into(),
+                },
+            },
+            Some(bearer_auth(WRITER_SECRET)),
+        )
+        .await
+    {
+        Err(ApiError::Remote { code, .. }) if code == "rate_limit" => {}
+        other => panic!("expected rate_limit at queue depth cap, got {other:?}"),
     }
-    assert!(rate_limited, "expected queue depth rate limit");
+
+    drop(_hold);
+    for h in in_flight {
+        h.await
+            .unwrap()
+            .expect("held plan_change should complete after guard release");
+    }
 }
 
 #[test]
 fn default_production_paths() {
-    use kxprovd::config::Config;
+    use kxprovd::config::{production_path_defaults, profile_data_dir, Config};
     let p = tempfile::tempdir().unwrap();
     let pass = p.path().join("password");
     std::fs::write(&pass, "0000").unwrap();
     let cfg_path = p.path().join("kxprovd.json");
+    let gateway_uid = nix::unistd::getuid().as_raw();
     std::fs::write(
         &cfg_path,
-        format!(r#"{{"password_path":"{}"}}"#, pass.display()),
+        format!(
+            r#"{{"password_path":"{}","gateway_uid":{gateway_uid}}}"#,
+            pass.display()
+        ),
     )
     .unwrap();
     let cfg = Config::load_from_etc(&cfg_path).unwrap();
-    assert_eq!(
-        cfg.provision_root,
-        std::path::PathBuf::from(kxprovd::config::PROVISION_ROOT)
-    );
+    let defaults = production_path_defaults();
+    assert_eq!(cfg.provision_root, defaults.provision_root);
+    assert_eq!(cfg.provision_root, std::path::PathBuf::from(DATA_DIR));
+    assert_eq!(cfg.data_dir, defaults.data_dir);
     assert_eq!(
         cfg.data_dir,
-        kxprovd::config::profile_data_dir(
-            kxprovd::config::PROVISION_ROOT,
-            kxprov_api::Profile::Sim,
-        )
+        profile_data_dir(&defaults.provision_root, Profile::Sim)
     );
+    assert_eq!(cfg.socket_path, std::path::PathBuf::from(DAEMON_SOCKET));
+    assert_eq!(cfg.tokens_path, std::path::PathBuf::from(TOKENS_JSON));
     assert_eq!(
-        cfg.socket_path,
-        std::path::PathBuf::from(kxprovd::config::DEFAULT_SOCKET)
-    );
-    assert_eq!(
-        cfg.tokens_path,
-        std::path::PathBuf::from(kxprovd::config::PROVISION_ROOT).join("tokens.json")
+        cfg.profile_data_dir(),
+        profile_data_dir(&cfg.provision_root, Profile::Sim)
     );
 }
 
@@ -180,10 +201,11 @@ fn profile_data_dir_honors_configured_provision_root() {
     let pass = p.path().join("password");
     std::fs::write(&pass, "0000").unwrap();
     let cfg_path = p.path().join("kxprovd.json");
+    let gateway_uid = nix::unistd::getuid().as_raw();
     std::fs::write(
         &cfg_path,
         format!(
-            r#"{{"password_path":"{}","provision_root":"{}"}}"#,
+            r#"{{"password_path":"{}","provision_root":"{}","gateway_uid":{gateway_uid}}}"#,
             pass.display(),
             root.display()
         ),
@@ -191,14 +213,8 @@ fn profile_data_dir_honors_configured_provision_root() {
     .unwrap();
     let cfg = Config::load_from_etc(&cfg_path).unwrap();
     assert_eq!(cfg.provision_root, root);
-    assert_eq!(
-        cfg.data_dir,
-        profile_data_dir(&root, kxprov_api::Profile::Sim)
-    );
-    assert_eq!(
-        profile_data_dir(&root, kxprov_api::Profile::Prod),
-        root.join("prod")
-    );
+    assert_eq!(cfg.data_dir, profile_data_dir(&root, Profile::Sim));
+    assert_eq!(profile_data_dir(&root, Profile::Prod), root.join("prod"));
     assert_eq!(
         profile_epoch_counter_path(&root, Profile::Sim),
         root.join(".epoch/sim.counter")
@@ -234,10 +250,11 @@ fn custom_data_dir_is_provision_root_with_profile_subdirs() {
     let pass = p.path().join("password");
     std::fs::write(&pass, "0000").unwrap();
     let cfg_path = p.path().join("kxprovd.json");
+    let gateway_uid = nix::unistd::getuid().as_raw();
     std::fs::write(
         &cfg_path,
         format!(
-            r#"{{"password_path":"{}","data_dir":"{}"}}"#,
+            r#"{{"password_path":"{}","data_dir":"{}","gateway_uid":{gateway_uid}}}"#,
             pass.display(),
             data_root.display()
         ),

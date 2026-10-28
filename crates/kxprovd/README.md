@@ -1,5 +1,9 @@
 # kxprovd
 
+Production layout defaults (shared with gateway and CLI via `kxprov-api::paths`): data
+`/var/lib/kx-provision`, Unix socket `/run/kx-provision/kxprovd.sock`, config
+`/etc/kx-provision/kxprovd.json`.
+
 Single serial owner for kx-provision (design v2.7 F1): unsigned **mode.json** + **profile.json**
 (fail-closed Production), root **set_mode** while idle, **submit_approval** with plan id or 8-hex
 prefix, profile-tied testing mode, live

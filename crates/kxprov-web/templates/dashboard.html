@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <title>kx-provision</title>
+  {% include "_head.html" %}
+</head>
+<body>
+  {% include "_header.html" %}
+  {% if show_mode_banner %}
+  <div class="mode-banner mode-banner--{{ mode_banner_class }}" role="status">
+    {{ mode_banner }}
+  </div>
+  {% endif %}
+  <main>
+    <h1>kx-provision
+      {% if show_profile_badge %}
+      <span class="profile-badge profile-badge--{{ profile_badge_class }}">{{ profile_badge }}</span>
+      {% endif %}
+    </h1>
+    {% if show_status %}
+    <p class="status-line">
+      {% if locked %}The phone database is locked for live changes.{% else %}The phone database is open for changes.{% endif %}
+      · {{ queue_depth }} job(s) waiting in the apply queue.
+    </p>
+    {% endif %}
+    <form method="post" action="/logout">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <button type="submit">Sign out</button>
+    </form>
+
+    <h2>View a record</h2>
+    <p class="help">Look up current field values before you plan a change. This view is read-only.</p>
+    <form method="post" action="/read" class="read-form">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <label>
+        Phone table
+        <span class="field-help">Which database table to read (decimal number, e.g. 36 for caller ID numbers).</span>
+        <input name="table" value="{{ table_value }}">
+      </label>
+      <label>
+        Record number
+        <span class="field-help">Which record in that table (1–9999).</span>
+        <input name="record" value="{{ record_value }}">
+      </label>
+      {% if show_read_form_error %}
+      <p class="inline-error" role="alert">{{ read_form_error }}</p>
+      {% endif %}
+      <button type="submit">View record</button>
+    </form>
+    {% if show_read_result %}
+    <section class="read-result">
+      <h3>Record {{ read_record }} in table {{ read_table }}</h3>
+      <dl class="field-list">
+        {% for row in read_fields %}
+        <dt>{{ row.name }}</dt>
+        <dd>{{ row.value }}</dd>
+        {% endfor %}
+      </dl>
+    </section>
+    {% endif %}
+
+    <h2>Dry-run plan</h2>
+    <p class="help">Build a change plan here; applying changes and approvals happen through the daemon and your chat tools, not this page.</p>
+    <form method="post" action="/plan" class="plan-form">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <label>
+        Phone table
+        <span class="field-help">Which database table to change (decimal number, e.g. 36 for caller ID numbers).</span>
+        <input name="table" value="{{ table_value }}">
+      </label>
+      <label>
+        Record number
+        <span class="field-help">Which record in that table (1–9999).</span>
+        <input name="record" value="{{ record_value }}">
+      </label>
+      <label>
+        Field
+        <span class="field-help">Which setting to update (must match the table you chose).</span>
+        <select name="field">
+          <option value="cid_number" {% if field_value == "cid_number" %}selected{% endif %}>Caller ID number (cid_number)</option>
+          <option value="cid_name" {% if field_value == "cid_name" %}selected{% endif %}>Caller ID name (cid_name)</option>
+          <option value="ext_name" {% if field_value == "ext_name" %}selected{% endif %}>Extension label (ext_name)</option>
+        </select>
+      </label>
+      <label>
+        New value
+        <span class="field-help">What the field should contain after the change.</span>
+        <input name="new_value" value="{{ new_value_value }}">
+      </label>
+      {% if show_plan_form_error %}
+      <p class="inline-error" role="alert">{{ plan_form_error }}</p>
+      {% endif %}
+      <button type="submit">Plan change</button>
+    </form>
+    {% if show_plan %}
+    <section class="plan-result">
+      <h3>Planned change</h3>
+      <p>Plan ID: <code class="hash-code">{{ plan_id_hex }}</code></p>
+      <p>Full diff hash: <code class="hash-code">{{ diff_hash_hex }}</code></p>
+      <dl class="plan-detail">
+        <dt>Phone table</dt><dd>{{ plan_table }}</dd>
+        <dt>Record</dt><dd>{{ plan_record }}</dd>
+        <dt>Field</dt><dd>{{ plan_field }}</dd>
+        <dt>Current value</dt><dd>{{ plan_old_value }}</dd>
+        <dt>New value</dt><dd>{{ plan_new_value }}</dd>
+      </dl>
+      <p>{{ plan_summary }}</p>
+      {% if show_production_plan_hint %}
+      <p class="production-hint">
+        <strong>Production:</strong> use plan id prefix <code class="hash-code">{{ plan_id_prefix }}</code> when submitting approval in chat (with full diff hash).
+        Approval window expires <time datetime="{{ plan_expires_at_iso }}">{{ plan_expires_at_chicago }}</time>
+        (<span class="plan-expiry-countdown" data-expires-ms="{{ plan_expires_at_ms }}">…</span>).
+      </p>
+      <script src="/static/plan-expiry.js" defer></script>
+      {% endif %}
+    </section>
+    {% endif %}
+  </main>
+</body>
+</html>

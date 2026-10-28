@@ -1,0 +1,45 @@
+[Unit]
+Description=kx-provision daemon (serial owner, job queue)
+After=network-online.target
+Wants=network-online.target
+Documentation=file:///usr/share/doc/kx-provision/systemd-serial-device.md
+
+[Service]
+Type=simple
+# root:kxprovision so gateway (SupplementaryGroups=kxprovision) can reach kxprovd.sock.
+User=root
+Group=kxprovision
+RuntimeDirectory=kx-provision
+RuntimeDirectoryMode=0750
+UMask=0077
+
+EnvironmentFile=-/etc/kx-provision/daemon.env
+ExecStart=/usr/bin/kxprovd --config /etc/kx-provision/kxprovd.json
+Restart=on-failure
+RestartSec=5
+
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectProc=invisible
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+# Serial transport needs /dev/kxpbx (override via drop-in if `serial_device` differs).
+DevicePolicy=closed
+DeviceAllow=char-rtc r
+DeviceAllow=char-random r
+DeviceAllow=char-urandom r
+DeviceAllow=/dev/null rw
+DeviceAllow=/dev/kxpbx rw
+RestrictNamespaces=yes
+SystemCallFilter=@system-service
+MemoryDenyWriteExecute=yes
+NoNewPrivileges=yes
+
+ReadOnlyPaths=/etc/kx-provision
+ReadWritePaths=/var/lib/kx-provision /run/kx-provision
+
+[Install]
+WantedBy=multi-user.target

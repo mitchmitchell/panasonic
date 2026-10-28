@@ -180,7 +180,7 @@ fn test_stray_write_ack_is_not_a_read_reply() {
     let mut c = client();
     let (_base, new) = block(&mut c);
     c.transport_mut()
-        .sim()
+        .sim_mut()
         .inject(Fault::LateAck { delay_ms: 2_300 });
     assert!(matches!(c.write(0x25, 10, 0, &new), Err(Error::Unacked(_))));
     assert!(c

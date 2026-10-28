@@ -250,6 +250,11 @@ impl SimPbx {
         self.faults.push_back(fault);
     }
 
+    #[cfg(feature = "faults")]
+    pub fn pending_faults(&self) -> usize {
+        self.faults.len()
+    }
+
     /// Header bytes 0x1E–0xFF for `.DBH` assembly (runtime upload image in the sim).
     pub fn dbh_header_tail(&self) -> &[u8; DBH_HEADER_TAIL_LEN] {
         &self.dbh_header_tail
@@ -259,11 +264,6 @@ impl SimPbx {
     pub fn reset_for_new_session(&mut self) {
         self.mode = Mode::Idle;
         self.buf.clear();
-    }
-
-    #[cfg(feature = "faults")]
-    pub fn pending_faults(&self) -> usize {
-        self.faults.len()
     }
 
     #[cfg(feature = "faults")]
@@ -602,6 +602,8 @@ pub struct SimTransport {
     pub sent: Vec<u8>,
     /// When set, the link drops right after the next write frame reaches the simulator.
     pub drop_link_after_write: bool,
+    /// Next write send fails with `LinkDown` after this many bytes left the host.
+    pub fail_write_send_after: Option<usize>,
     /// Next send fails after this many bytes left the host (`LinkDown` if `n > 0`,
     /// [`TransportError::NothingWritten`] if `n == 0`). A full write frame may be stored
     /// when `n` equals the frame length.
@@ -634,6 +636,7 @@ impl SimTransport {
             queue: q,
             sent: Vec::new(),
             drop_link_after_write: false,
+            fail_write_send_after: None,
             fail_send_after: None,
             send_timeout_next: false,
             link_down: false,
@@ -658,6 +661,7 @@ impl SimTransport {
     pub fn reconnect(&mut self) {
         self.link_down = false;
         self.drop_link_after_write = false;
+        self.fail_write_send_after = None;
         self.fail_send_after = None;
         self.send_timeout_next = false;
         #[cfg(feature = "faults")]
@@ -716,6 +720,27 @@ impl SimTransport {
             self.schedule(at, BUSY_FRAME.to_vec());
         }
     }
+
+    fn finish_lockup_train(&mut self, rx_done: u64) {
+        let mut pbx = self.sim.lock().expect("sim pbx lock");
+        if !pbx.lockup_discard {
+            return;
+        }
+        let busy_iv = pbx.config.busy_lockup_interval_ms;
+        let frames = pbx.lockup_busy_left;
+        pbx.lockup_busy_left = 0;
+        let latency_ms = pbx.latency_ms;
+        let total_busy = u64::from(pbx.config.busy_lockup_frames);
+        if frames > 0 {
+            drop(pbx);
+            self.schedule_busy_cadence(rx_done + latency_ms, frames, busy_iv);
+            pbx = self.sim.lock().expect("sim pbx lock");
+        }
+        let train_ms = latency_ms
+            + total_busy.saturating_mul(busy_iv)
+            + kxtd1232::Timing::default().tx_ms(BUSY_FRAME.len());
+        pbx.lockup_end_ms = rx_done.saturating_add(train_ms);
+    }
 }
 
 impl Transport for SimTransport {
@@ -754,34 +779,60 @@ impl Transport for SimTransport {
                 bytes_sent: Some(n),
             }));
         }
-        #[cfg(feature = "faults")]
-        {
-            let mut pbx = self.sim.lock().expect("sim pbx lock");
-            if let Some(n) = pbx.take_mid_send_fault(data) {
+        if data.get(1) == Some(&Cmd::Write.byte()) {
+            if let Some(n) = self.fail_write_send_after.take() {
                 let n = n.min(data.len());
                 if n > 0 {
                     self.sent.extend_from_slice(&data[..n]);
-                    let rx_done = self.now + tline.tx_ms(n);
-                    let emits = pbx.feed(&data[..n], self.now);
-                    drop(pbx);
-                    for (delay, bytes) in emits {
-                        let at = rx_done + delay + tline.tx_ms(bytes.len());
-                        self.schedule(at, bytes);
+                    if n == data.len() {
+                        self.sim.lock().expect("sim pbx lock").feed(data, self.now);
                     }
-                } else {
-                    drop(pbx);
                 }
                 self.link_down = true;
-                if n == 0 {
-                    return Err(TransportError::NothingWritten(
-                        "simulated serial link down mid-send".into(),
-                    ));
-                }
-                return Err(TransportError::LinkDown(LinkDownError {
-                    detail: "simulated serial link down mid-send".into(),
-                    bytes_sent: Some(n),
-                }));
+                return if n == 0 {
+                    Err(TransportError::NothingWritten(
+                        "sim: link dropped mid-send".into(),
+                    ))
+                } else {
+                    Err(TransportError::LinkDown(LinkDownError {
+                        detail: "sim: link dropped mid-send".into(),
+                        bytes_sent: Some(n),
+                    }))
+                };
             }
+        }
+        #[cfg(feature = "faults")]
+        let mid_send_fault = self
+            .sim
+            .lock()
+            .expect("sim pbx lock")
+            .take_mid_send_fault(data);
+        #[cfg(feature = "faults")]
+        if let Some(n) = mid_send_fault {
+            let n = n.min(data.len());
+            if n > 0 {
+                self.sent.extend_from_slice(&data[..n]);
+                let rx_done = self.now + tline.tx_ms(n);
+                let emits = self
+                    .sim
+                    .lock()
+                    .expect("sim pbx lock")
+                    .feed(&data[..n], self.now);
+                for (delay, bytes) in emits {
+                    let at = rx_done + delay + tline.tx_ms(bytes.len());
+                    self.schedule(at, bytes);
+                }
+            }
+            self.link_down = true;
+            if n == 0 {
+                return Err(TransportError::NothingWritten(
+                    "simulated serial link down mid-send".into(),
+                ));
+            }
+            return Err(TransportError::LinkDown(LinkDownError {
+                detail: "simulated serial link down mid-send".into(),
+                bytes_sent: Some(n),
+            }));
         }
         self.sent.extend_from_slice(data);
         if self.drop_link_after_write && data.get(1) == Some(&Cmd::Write.byte()) {
@@ -790,65 +841,40 @@ impl Transport for SimTransport {
             return Ok(());
         }
         let rx_done = self.now + tline.tx_ms(data.len());
-        let (mut pending, _post_busy, finish_lockup) = {
-            let mut pbx = self.sim.lock().expect("sim pbx lock");
-            let emits = pbx.feed(data, self.now);
-            let mut pending = Vec::with_capacity(emits.len());
-            for (delay, bytes) in emits {
-                #[cfg(feature = "faults")]
-                let bytes = {
-                    let mut bytes = bytes;
-                    if let Some(n) = pbx.link_drop_partial.take() {
-                        let n = n.min(bytes.len());
-                        if n < bytes.len() {
-                            bytes.truncate(n);
-                        }
-                        self.link_drop_pending = true;
-                    }
-                    bytes
-                };
-                let at = rx_done + delay + tline.tx_ms(bytes.len());
-                pending.push((at, bytes));
-            }
+        let emits = self.sim.lock().expect("sim pbx lock").feed(data, self.now);
+        for (delay, bytes) in emits {
             #[cfg(feature = "faults")]
-            let post_busy = pbx.post_write_busy.take();
-            #[cfg(not(feature = "faults"))]
-            let post_busy = None::<u32>;
-            let finish_lockup = pbx.lockup_discard;
-            (pending, post_busy, finish_lockup)
-        };
-        for (at, bytes) in pending.drain(..) {
+            let bytes = {
+                let mut bytes = bytes;
+                if let Some(n) = self
+                    .sim
+                    .lock()
+                    .expect("sim pbx lock")
+                    .link_drop_partial
+                    .take()
+                {
+                    let n = n.min(bytes.len());
+                    if n < bytes.len() {
+                        bytes.truncate(n);
+                    }
+                    self.link_drop_pending = true;
+                }
+                bytes
+            };
+            let at = rx_done + delay + tline.tx_ms(bytes.len());
             self.schedule(at, bytes);
         }
         #[cfg(feature = "faults")]
-        if let Some(frames) = _post_busy {
-            let (latency_ms, busy_iv) = {
-                let pbx = self.sim.lock().expect("sim pbx lock");
-                (pbx.latency_ms, pbx.config.busy_lockup_interval_ms)
-            };
-            self.schedule_busy_cadence(rx_done + latency_ms, frames, busy_iv);
-        }
-        if finish_lockup {
-            let followup = {
-                let mut pbx = self.sim.lock().expect("sim pbx lock");
-                if !pbx.lockup_discard {
-                    None
-                } else {
-                    let busy_iv = pbx.config.busy_lockup_interval_ms;
-                    let frames = pbx.lockup_busy_left;
-                    pbx.lockup_busy_left = 0;
-                    let total_busy = u64::from(pbx.config.busy_lockup_frames);
-                    let train_ms = pbx.latency_ms
-                        + total_busy.saturating_mul(busy_iv)
-                        + kxtd1232::Timing::default().tx_ms(BUSY_FRAME.len());
-                    pbx.lockup_end_ms = rx_done.saturating_add(train_ms);
-                    Some((rx_done + pbx.latency_ms, frames, busy_iv))
-                }
-            };
-            if let Some((start_ms, frames, busy_iv)) = followup {
-                self.schedule_busy_cadence(start_ms, frames, busy_iv);
+        {
+            let mut pbx = self.sim.lock().expect("sim pbx lock");
+            if let Some(frames) = pbx.post_write_busy.take() {
+                let busy_iv = pbx.config.busy_lockup_interval_ms;
+                let latency_ms = pbx.latency_ms;
+                drop(pbx);
+                self.schedule_busy_cadence(rx_done + latency_ms, frames, busy_iv);
             }
         }
+        self.finish_lockup_train(rx_done);
         Ok(())
     }
 

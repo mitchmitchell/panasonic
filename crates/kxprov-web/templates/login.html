@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <title>kx-provision login</title>
+  {% include "_head.html" %}
+</head>
+<body>
+  {% include "_header.html" %}
+  <main>
+    <h1>{{ page_title }}</h1>
+    {% if show_error %}<p class="inline-error" role="alert">{{ error }}</p>{% endif %}
+    <form method="post" action="/login">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <label>Password <input type="password" name="password" autocomplete="current-password"></label>
+      <button type="submit">Sign in</button>
+    </form>
+  </main>
+</body>
+</html>

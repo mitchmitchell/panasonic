@@ -1,0 +1,23 @@
+[package]
+name = "kxprov-mock"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+async-trait = "0.1"
+argon2 = { workspace = true, features = ["password-hash"] }
+hex.workspace = true
+kxprov-api.workspace = true
+kxtd1232.workspace = true
+rand = "0.8"
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+time.workspace = true
+tokio = { workspace = true, features = ["sync", "time"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

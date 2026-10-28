@@ -16,18 +16,19 @@ path = "src/main.rs"
 workspace = true
 
 [features]
-default = []
-inprocess-sim = ["dep:kxtd1232-sim"]
+default = ["inprocess-sim"]
+inprocess-sim = []
+sim-fault-triggers = ["kxprov-api/sim-fault-triggers", "kxtd1232-sim/faults"]
 test-util = [
     "inprocess-sim",
     "kxtd1232/test-transport-access",
-    "kxtd1232-sim/faults",
+    "sim-fault-triggers",
 ]
 
 [dependencies]
-kxtd1232 = { path = "../kxtd1232" }
-kxtd1232-sim = { path = "../kxtd1232-sim", optional = true, default-features = false }
 kxprov-api = { path = "../kxprov-api" }
+kxtd1232 = { path = "../kxtd1232" }
+kxtd1232-sim = { path = "../kxtd1232-sim" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
@@ -46,6 +47,7 @@ chrono-tz = "0.10"
 [dev-dependencies]
 tempfile = "3"
 kxprov = { path = "../kxprov" }
+serial_test = "3"
 
 [[test]]
 name = "daemon"
@@ -65,6 +67,18 @@ required-features = ["test-util"]
 
 [[test]]
 name = "security_b2_b3_b6"
+required-features = ["test-util"]
+
+[[test]]
+name = "sim_triggers"
+required-features = ["test-util"]
+
+[[test]]
+name = "run_seed"
+required-features = ["test-util"]
+
+[[test]]
+name = "a4_smoke"
 required-features = ["test-util"]
 
 [[test]]

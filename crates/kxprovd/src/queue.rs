@@ -207,12 +207,47 @@ pub fn field_kind_wire(w: FieldKindWire) -> kxtd1232::FieldKind {
     }
 }
 
+/// Deterministic per-token queue depth cap (used by integration tests; does not complete jobs).
+#[cfg(any(feature = "test-util", test))]
+pub async fn assert_writer_token_queue_depth_cap() {
+    use crate::rate_limit::QUEUE_DEPTH_MAX;
+    use kxprov_api::ReadFieldsParams;
+    let (tx, _rx) = mpsc::channel(64);
+    let q = JobQueue::new(tx);
+    let now = crate::time::now_ms();
+    let writer = JobPrincipal::Token(TokenId("writer".into()));
+    let kind = || JobKind::ReadFields {
+        params: ReadFieldsParams {
+            kind: FieldKindWire::CidName,
+            first: 0,
+            count: 1,
+        },
+    };
+    for _ in 0..QUEUE_DEPTH_MAX {
+        q.enqueue(kind(), Some(writer.clone()), now)
+            .await
+            .expect("under queue depth cap");
+    }
+    assert!(
+        matches!(
+            q.enqueue(kind(), Some(writer), now).await,
+            Err(QueueError::RateLimit)
+        ),
+        "expected queue depth rate limit at enqueue"
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::job_principal::JobPrincipal;
     use crate::rate_limit::QUEUE_DEPTH_MAX;
     use kxprov_api::ReadFieldsParams;
+
+    #[tokio::test]
+    async fn writer_token_queue_depth_cap_at_enqueue() {
+        assert_writer_token_queue_depth_cap().await;
+    }
 
     #[tokio::test]
     async fn local_uids_use_separate_rate_buckets() {

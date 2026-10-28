@@ -100,6 +100,69 @@ fn test_invalid_value_uses_error_prefix() {
 }
 
 #[test]
+fn sim_mark_write_requires_root() {
+    #[cfg(unix)]
+    {
+        use nix::unistd::geteuid;
+        if geteuid().is_root() {
+            return;
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        return;
+    }
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let data = tmp.path().join("data");
+    let o = std::process::Command::new(env!("CARGO_BIN_EXE_kxprov"))
+        .args([
+            "sim-mark",
+            "write",
+            "--data-dir",
+            data.to_str().expect("path"),
+        ])
+        .output()
+        .expect("run");
+    assert!(!o.status.success(), "non-root write should fail");
+    let err = String::from_utf8_lossy(&o.stderr);
+    let combined = format!("{}{}", err, String::from_utf8_lossy(&o.stdout));
+    assert!(
+        combined.contains("root"),
+        "expected root requirement message: {combined}"
+    );
+}
+
+#[test]
+fn sim_mark_resolves_workspace_from_env_outside_checkout() {
+    let workspace = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .canonicalize()
+        .expect("workspace");
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let data = tmp.path().join("data");
+    let o = std::process::Command::new(env!("CARGO_BIN_EXE_kxprov"))
+        .current_dir("/tmp")
+        .env("KXPROV_WORKSPACE", &workspace)
+        .args([
+            "sim-mark",
+            "status",
+            "--data-dir",
+            data.to_str().expect("path"),
+        ])
+        .output()
+        .expect("run");
+    assert_eq!(
+        o.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&o.stderr)
+    );
+    let out = String::from_utf8_lossy(&o.stdout);
+    assert!(out.contains("marked="), "{out}");
+}
+
+#[test]
 fn test_clap_usage_errors_are_one_line() {
     for argv in [
         &["read"][..],

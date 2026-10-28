@@ -168,6 +168,8 @@ async fn run_plan(
     params: kxprov_api::PlanChangeParams,
     token_id: TokenId,
 ) -> JobOutcome {
+    #[cfg(feature = "test-util")]
+    crate::test_util::plan_change_hold_if_armed().await;
     let kind = field_kind_wire(params.kind);
     let patch = match field_patch(kind, params.index, &params.value) {
         Ok(p) => p,
@@ -219,7 +221,10 @@ async fn run_plan(
 
 async fn run_backup(ctx: &WorkerCtx, operational_mode: OperationalMode) -> JobOutcome {
     let job_id = crate::queue::next_job_id();
-    let temp = ctx.config.data_dir.join(format!("{job_id}.partial.dbh"));
+    let temp = ctx
+        .config
+        .profile_data_dir()
+        .join(format!("{job_id}.partial.dbh"));
     let _ = ctx.journal.append(&JournalEntry::BackupStart {
         job_id: job_id.clone(),
         temp_path: temp.display().to_string(),

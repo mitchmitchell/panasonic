@@ -18,6 +18,15 @@ fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
+/// UI and README artwork are not vendor DBH header blocks (design v2.4 §15).
+fn is_allowed_binary(path: &Path) -> bool {
+    let lower = path.to_string_lossy().to_ascii_lowercase();
+    if !lower.ends_with(".png") {
+        return false;
+    }
+    lower.contains("/.github/assets/") || lower.contains("/crates/kxprov-web/assets/")
+}
+
 fn files(dir: &Path, out: &mut Vec<PathBuf>) {
     for e in std::fs::read_dir(dir).unwrap() {
         let p = e.unwrap().path();
@@ -86,6 +95,7 @@ fn test_repo_embeds_no_opaque_header_block() {
             continue;
         }
         match std::fs::read_to_string(p) {
+            Err(_) if is_allowed_binary(p) => {}
             Err(_) => bad.push(format!("{}: binary file", p.display())),
             Ok(text) => bad.extend(
                 scan(&text)
@@ -101,7 +111,7 @@ fn test_repo_embeds_no_opaque_header_block() {
 fn test_scanner_catches_blocks_and_allows_short_patterns() {
     let block: Vec<String> = (0..226).map(|i| format!("0x{:02x}", i % 256)).collect();
     assert_eq!(scan(&block.join(", ")).len(), 1);
-    let spaced: Vec<String> = (0..80).map(|i| format!("{:02X}", i)).collect();
+    let spaced: Vec<String> = (0..80).map(|i| format!("{i:02X}")).collect();
     assert_eq!(scan(&spaced.join(" ")).len(), 1);
     assert_eq!(scan(&"ab".repeat(70)).len(), 1);
     // Fine: frame headers, a fill pattern, a Cargo.lock checksum.

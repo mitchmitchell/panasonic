@@ -77,7 +77,7 @@ fn test_a2_late_ack_garbled_stale() {
     let mut c = client();
     let (base, new) = cid_block(&mut c);
     c.transport_mut()
-        .sim()
+        .sim_mut()
         .inject(Fault::LateAck { delay_ms: 2_300 });
     assert!(matches!(c.write(0x24, 0, 0, &new), Err(Error::Unacked(_))));
     assert_eq!(
@@ -138,7 +138,7 @@ fn test_a2_unacked_then_busy_before_verify() {
     let mut c = client();
     let (base, new) = cid_block(&mut c);
     c.transport_mut()
-        .sim()
+        .sim_mut()
         .inject(Fault::NoAckThenBusy { busy_frames: 12 });
     assert!(matches!(c.write(0x24, 0, 0, &new), Err(Error::Unacked(_))));
     assert_eq!(
@@ -178,7 +178,7 @@ fn test_a2_another_terminal_login_fault() {
         Timing::default(),
     );
     c.transport_mut()
-        .sim()
+        .sim_mut()
         .inject(Fault::AnotherTerminal(SignOn::default().in_use.clone()));
     assert!(matches!(
         c.login(PLACEHOLDER_PASSWORD),

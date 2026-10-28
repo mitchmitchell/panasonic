@@ -346,7 +346,9 @@ async fn token_b_cannot_apply_token_a_plan() {
 #[tokio::test]
 async fn locked_persists_until_unlock() {
     let tmp = tempfile::tempdir().unwrap();
-    let store = LockedStore::new(tmp.path());
+    let profile_root = kxprov_api::resolve_profile_data_dir(tmp.path(), Profile::Sim);
+    std::fs::create_dir_all(&profile_root).unwrap();
+    let store = LockedStore::new(&profile_root);
     store.set_locked("test", Some("j1"), 1).expect("set locked");
     let uid = nix::unistd::getuid().as_raw();
     let (_d, sock) = init_test_daemon(&tmp, uid, Profile::Sim);

@@ -5,6 +5,7 @@
 
 use kxprov_api::Scope;
 use kxprovd::tokens::{TokenError, TokenStore};
+use serial_test::serial;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -55,19 +56,26 @@ fn wait_live_probe_threads_drained(store: &TokenStore, deadline: Instant) {
     }
 }
 
-/// Open both FIFO ends concurrently so neither side blocks waiting for a peer.
+/// Pair FIFO ends without blocking `open()` deadlocks (reader/writer peer wait).
 fn write_bytes_through_fifo(path: &std::path::Path, bytes: &[u8]) {
+    use nix::fcntl::{open, OFlag};
+    use nix::sys::stat::Mode;
+    use nix::unistd::close;
     use std::io::Write;
+
     let path = path.to_path_buf();
     let bytes = bytes.to_vec();
     std::thread::scope(|scope| {
         let path_read = path.clone();
         scope.spawn(move || {
-            let _reader = std::fs::OpenOptions::new()
-                .read(true)
-                .open(&path_read)
-                .expect("fifo read end for paired open");
+            let fd = open(
+                path_read.as_path(),
+                OFlag::O_RDONLY | OFlag::O_NONBLOCK,
+                Mode::empty(),
+            )
+            .expect("fifo read end for paired open");
             std::thread::sleep(Duration::from_secs(2));
+            let _ = close(fd);
         });
         scope.spawn(move || {
             let mut writer = std::fs::OpenOptions::new()
@@ -103,6 +111,7 @@ fn auth_recovers_after_replace(store: &TokenStore, path: &std::path::Path) {
             Err(e) => panic!("unexpected token error: {e}"),
         }
     }
+    wait_live_at_most_cap(store, Instant::now() + Duration::from_secs(8));
     assert!(
         store.live_disk_probe_threads_for_test() <= MAX_LIVE_PROBE_THREADS,
         "live probe threads after recovery"
@@ -114,6 +123,7 @@ fn auth_recovers_after_replace(store: &TokenStore, path: &std::path::Path) {
 }
 
 #[test]
+#[serial]
 fn fifo_tokens_single_probe_thread_fast_fail_and_recovery() {
     let _lock = fifo_test_serial_lock();
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -325,6 +335,7 @@ fn five_fifo_replace_cycles_os_thread_count_bounded() {
 }
 
 #[test]
+#[serial]
 fn fifo_replaced_by_regular_file_via_rename_recovers_auth() {
     let _lock = fifo_test_serial_lock();
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -352,6 +363,7 @@ fn fifo_replaced_by_regular_file_via_rename_recovers_auth() {
 }
 
 #[test]
+#[serial]
 fn fifo_replaced_by_regular_file_via_unlink_create_recovers_auth() {
     let _lock = fifo_test_serial_lock();
     let tmp = tempfile::tempdir().expect("tempdir");

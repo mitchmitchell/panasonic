@@ -1,4 +1,4 @@
-use crate::ids::{Approval, DiffHash, PlanId};
+use crate::ids::{Approval, DiffHash, PlanId, TokenId};
 use serde::{Deserialize, Serialize};
 
 pub use crate::ids::Profile;
@@ -183,14 +183,75 @@ pub struct UnlockResult {
 #[serde(tag = "method", rename_all = "snake_case")]
 pub enum RequestBody {
     Status,
-    ReadFields { params: ReadFieldsParams },
-    PlanChange { params: PlanChangeParams },
-    SubmitApproval { params: SubmitApprovalParams },
-    SetMode { params: SetModeParams },
+    ReadFields {
+        params: ReadFieldsParams,
+    },
+    PlanChange {
+        params: PlanChangeParams,
+    },
+    SubmitApproval {
+        params: SubmitApprovalParams,
+    },
+    SetMode {
+        params: SetModeParams,
+    },
     BackupNow,
     ListBackups,
-    ApplyPlan { params: ApplyPlanParams },
-    Unlock { params: UnlockParams },
+    ApplyPlan {
+        params: ApplyPlanParams,
+    },
+    Unlock {
+        params: UnlockParams,
+    },
+    /// Returns token id + scopes for the presented bearer (gateway startup).
+    Whoami,
+    /// Simulator / test profile only (feature `sim-fault-triggers`).
+    #[cfg(feature = "sim-fault-triggers")]
+    SimTriggerBusy {
+        params: SimTriggerBusyParams,
+    },
+    /// Simulator / test profile only (feature `sim-fault-triggers`).
+    #[cfg(feature = "sim-fault-triggers")]
+    SimTriggerGoliathCopyFail,
+}
+
+impl RequestBody {
+    /// Mutating RPCs must not be resent after I/O failure: the daemon may have already
+    /// processed the request if the response was lost on the wire.
+    pub fn is_mutating(&self) -> bool {
+        match self {
+            RequestBody::Status
+            | RequestBody::ReadFields { .. }
+            | RequestBody::ListBackups
+            | RequestBody::Whoami => false,
+            RequestBody::PlanChange { .. }
+            | RequestBody::SubmitApproval { .. }
+            | RequestBody::SetMode { .. }
+            | RequestBody::BackupNow
+            | RequestBody::ApplyPlan { .. }
+            | RequestBody::Unlock { .. } => true,
+            #[cfg(feature = "sim-fault-triggers")]
+            RequestBody::SimTriggerBusy { .. } | RequestBody::SimTriggerGoliathCopyFail => true,
+        }
+    }
+}
+
+#[cfg(feature = "sim-fault-triggers")]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SimTriggerBusyParams {
+    pub frames: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WhoamiResult {
+    pub token_id: TokenId,
+    pub scopes: Vec<Scope>,
+}
+
+#[cfg(feature = "sim-fault-triggers")]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SimTriggerResult {
+    pub ok: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -198,6 +259,9 @@ pub struct RequestEnvelope {
     pub id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub auth: Option<RequestAuth>,
+    /// Logged-in web user or MCP agent label for audit only; never used for authorization.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub audit: Option<String>,
     #[serde(flatten)]
     pub body: RequestBody,
 }
@@ -215,6 +279,9 @@ pub enum ResponseResult {
     Job(JobRef),
     ApplyApprovalRequired(ApplyApprovalRequiredResult),
     Unlock(UnlockResult),
+    Whoami(WhoamiResult),
+    #[cfg(feature = "sim-fault-triggers")]
+    SimTrigger(SimTriggerResult),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

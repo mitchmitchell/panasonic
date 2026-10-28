@@ -3,7 +3,7 @@
 use crate::audit::{alert_mode_failure, AuditEntry, AuditKind, AuditLog};
 use crate::epoch_store;
 use crate::time::now_ms;
-use kxprov_api::{OperationalMode, Profile};
+use kxprov_api::{resolve_profile_data_dir, OperationalMode, Profile};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
@@ -55,20 +55,25 @@ pub struct ModeStore {
 }
 
 impl ModeStore {
-    pub fn new(data_dir: &Path, boot_profile: Profile) -> Self {
-        Self::new_with_epoch_root(data_dir, data_dir, boot_profile)
+    /// `state_base` is the daemon data root; profile payload under [`resolve_profile_data_dir`].
+    pub fn new(state_base: &Path, boot_profile: Profile) -> Self {
+        Self::new_with_epoch_root(
+            &resolve_profile_data_dir(state_base, boot_profile),
+            state_base,
+            boot_profile,
+        )
     }
 
     pub fn new_with_epoch_root(
-        data_dir: &Path,
+        profile_data_dir: &Path,
         provision_root: &Path,
         boot_profile: Profile,
     ) -> Self {
         Self {
-            mode_path: data_dir.join("mode.json"),
-            profile_path: data_dir.join("profile.json"),
+            mode_path: profile_data_dir.join("mode.json"),
+            profile_path: profile_data_dir.join("profile.json"),
             provision_root: provision_root.to_path_buf(),
-            audit: AuditLog::new(data_dir),
+            audit: AuditLog::new(profile_data_dir),
             boot_profile,
         }
     }
@@ -407,6 +412,25 @@ mod tests {
             restarted.effective(Profile::Test).operational,
             OperationalMode::Testing
         );
+    }
+
+    #[test]
+    fn corrupt_epoch_file_surfaces_mode_error_epoch_not_counter_corrupt() {
+        use crate::config::profile_epoch_counter_path;
+        let root = tempfile::tempdir().unwrap();
+        let sim_dir = root.path().join("sim");
+        std::fs::create_dir_all(&sim_dir).unwrap();
+        let counter = profile_epoch_counter_path(root.path(), Profile::Test);
+        std::fs::create_dir_all(counter.parent().unwrap()).unwrap();
+        std::fs::write(counter, "not-a-number\n").unwrap();
+        let store = ModeStore::new_with_epoch_root(&sim_dir, root.path(), Profile::Sim);
+        let err = store
+            .set_operational(OperationalMode::Testing, Profile::Test, true)
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            ModeError::Epoch(epoch_store::EpochError::Corrupt)
+        ));
     }
 
     #[test]
