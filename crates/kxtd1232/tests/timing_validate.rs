@@ -48,3 +48,18 @@ fn baud_above_max_rejected() {
     };
     assert!(t.validate().is_err());
 }
+
+#[test]
+fn line_rate_9600_accepted_and_9601_rejected() {
+    assert_eq!(MAX_LINK_BAUD, 9600);
+    let ok = Timing {
+        link_baud: 9600,
+        ..Timing::default()
+    };
+    assert!(ok.validate().is_ok());
+    let bad = Timing {
+        link_baud: 9601,
+        ..Timing::default()
+    };
+    assert!(bad.validate().is_err());
+}
