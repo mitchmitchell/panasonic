@@ -77,6 +77,7 @@ impl SmdrLine {
 pub struct LineSplitter {
     buf: Vec<u8>,
     after_cr: bool,
+    after_overflow: bool,
 }
 
 impl LineSplitter {
@@ -98,11 +99,15 @@ impl LineSplitter {
                 LF if after_cr => {}
                 CR | LF => {
                     self.after_cr = b == CR;
-                    out.push(SmdrLine::new(decode(&std::mem::take(&mut self.buf))));
+                    if !std::mem::replace(&mut self.after_overflow, false) {
+                        out.push(SmdrLine::new(decode(&std::mem::take(&mut self.buf))));
+                    }
                 }
                 _ => {
+                    self.after_overflow = false;
                     self.buf.push(b);
                     if self.buf.len() >= MAX_PENDING_BYTES {
+                        self.after_overflow = true;
                         out.push(SmdrLine::overflow(decode(&std::mem::take(&mut self.buf))));
                     }
                 }
@@ -114,6 +119,7 @@ impl LineSplitter {
     #[must_use]
     pub fn finish(&mut self) -> Option<SmdrLine> {
         self.after_cr = false;
+        self.after_overflow = false;
         if self.buf.is_empty() {
             None
         } else {

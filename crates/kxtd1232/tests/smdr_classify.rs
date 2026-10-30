@@ -241,3 +241,23 @@ fn record_width_counts_wire_bytes_so_a_high_byte_still_classifies() {
     assert_eq!(lines[0].raw().chars().count(), LINE_WIDTH);
     assert_eq!(lines[0].kind(), LineKind::Record);
 }
+
+#[test]
+fn terminator_right_after_an_overflow_flush_adds_no_blank_line() {
+    for term in [&b"\r\n"[..], b"\r", b"\n"] {
+        let mut bytes = vec![b'x'; MAX_PENDING_BYTES];
+        bytes.extend_from_slice(term);
+        bytes.extend_from_slice(b"next\r\n\r\n");
+        for chunk in [1, 2, MAX_PENDING_BYTES, bytes.len()] {
+            let lines = split_all(&bytes, chunk);
+            let kinds: Vec<LineKind> = lines.iter().map(SmdrLine::kind).collect();
+            assert_eq!(
+                kinds,
+                [LineKind::Unknown, LineKind::Unknown, LineKind::Blank],
+                "term {term:?} chunk {chunk}"
+            );
+            assert_eq!(lines[0].raw().len(), MAX_PENDING_BYTES);
+            assert_eq!(lines[1].raw(), "next");
+        }
+    }
+}
