@@ -1,0 +1,3 @@
+  Date     Time    Ext CO        Dial Number        Ring Duration  Acc code  CD 
+--------------------------------------------------------------------------------
+
