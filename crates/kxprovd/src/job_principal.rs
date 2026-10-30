@@ -15,7 +15,7 @@ impl JobPrincipal {
         match self {
             Self::Token(id) => Some(id.as_str().to_string()),
             Self::SyntheticLocal { uid } => Some(format!("local:{uid}")),
-            Self::SyntheticRoot => Some("root".into()),
+            Self::SyntheticRoot => Some(crate::queue::ROOT_RATE_KEY.into()),
         }
     }
 
