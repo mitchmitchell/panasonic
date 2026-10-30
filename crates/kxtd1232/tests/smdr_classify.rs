@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use kxtd1232::smdr::{
-    classify, LineKind, LineSplitter, SmdrLine, LINE_WIDTH, MODEM_INIT_WIDTH, SPEC_HEADER,
+    classify, LineKind, LineSplitter, SmdrLine, LINE_WIDTH, MAX_PENDING_BYTES, SPEC_HEADER,
 };
 
 fn fixture_dir() -> PathBuf {
@@ -49,15 +49,15 @@ fn every_v1_fixture_classifies_as_expected() {
             .collect();
         for chunk in [1, 2, 3, 79, 80, 81, bytes.len()] {
             let lines = split_all(&bytes, chunk);
-            let got: Vec<&str> = lines.iter().map(|l| kind_name(l.kind)).collect();
+            let got: Vec<&str> = lines.iter().map(|l| kind_name(l.kind())).collect();
             assert_eq!(got, want, "{name} chunk {chunk}");
             for (line, l) in lines.iter().zip(spec["lines"].as_array().expect("lines")) {
                 if let Some(len) = l["raw_len"].as_u64() {
-                    assert_eq!(line.raw.len() as u64, len, "{name}");
+                    assert_eq!(line.raw().len() as u64, len, "{name}");
                 }
-                if line.kind == LineKind::Record {
-                    assert_eq!(line.raw.len(), LINE_WIDTH, "{name}");
-                    assert_eq!(&line.raw[0..8], l["date"].as_str().expect("date"));
+                if line.kind() == LineKind::Record {
+                    assert_eq!(line.raw().len(), LINE_WIDTH, "{name}");
+                    assert_eq!(&line.raw()[0..8], l["date"].as_str().expect("date"));
                 }
             }
         }
@@ -85,7 +85,7 @@ fn page_header_title_matches_spec_and_block_is_skippable() {
     );
     assert_eq!(SPEC_HEADER.len(), LINE_WIDTH);
     assert!(lines[0].header_matches_spec());
-    assert!(lines.iter().all(|l| l.kind.is_page_header()));
+    assert!(lines.iter().all(|l| l.kind().is_page_header()));
     assert!(!LineKind::Record.is_page_header());
     assert!(!LineKind::Unknown.is_page_header());
 }
@@ -93,14 +93,15 @@ fn page_header_title_matches_spec_and_block_is_skippable() {
 #[test]
 fn shifted_header_is_header_but_not_spec() {
     let line = SmdrLine::new(" Date Time Ext CO Dial".to_string());
-    assert_eq!(line.kind, LineKind::Header);
+    assert_eq!(line.kind(), LineKind::Header);
     assert!(!line.header_matches_spec());
 }
 
 #[test]
 fn modem_init_is_recognised() {
-    let init = "AT".to_string() + &"0".repeat(MODEM_INIT_WIDTH - 2);
-    assert_eq!(classify(&init), LineKind::ModemInit);
+    for init in ["AT", "ATQ0E0V1X0S0=0&D0", "AT and anything after"] {
+        assert_eq!(classify(init), LineKind::ModemInit, "{init}");
+    }
 }
 
 #[test]
@@ -134,7 +135,7 @@ fn near_miss_lines_are_unknown() {
 fn crlf_is_one_terminator_but_double_cr_or_lf_is_a_blank_line() {
     let kinds: Vec<LineKind> = split_all(b"a\r\rb\n\nc\r\n\r\nd\r\n", 4096)
         .into_iter()
-        .map(|l| l.kind)
+        .map(|l| l.kind())
         .collect();
     use LineKind::{Blank, Unknown};
     assert_eq!(
@@ -152,9 +153,9 @@ fn control_bytes_are_stripped_and_high_bytes_kept_lossy() {
     bytes.extend_from_slice(&rec[40..]);
     bytes.extend_from_slice(b"x\xFFy\r\n");
     let lines = split_all(&bytes, 4096);
-    assert_eq!(lines[0].kind, LineKind::Record);
-    assert_eq!(lines[1].raw, "x\u{FFFD}y");
-    assert_eq!(lines[1].kind, LineKind::Unknown);
+    assert_eq!(lines[0].kind(), LineKind::Record);
+    assert_eq!(lines[1].raw(), "x\u{FFFD}y");
+    assert_eq!(lines[1].kind(), LineKind::Unknown);
 }
 
 #[test]
@@ -162,8 +163,8 @@ fn unterminated_tail_is_kept_by_finish() {
     let mut s = LineSplitter::new();
     assert!(s.push(b"partial").is_empty());
     let tail = s.finish().expect("tail kept");
-    assert_eq!(tail.raw, "partial");
-    assert_eq!(tail.kind, LineKind::Unknown);
+    assert_eq!(tail.raw(), "partial");
+    assert_eq!(tail.kind(), LineKind::Unknown);
     assert!(s.finish().is_none());
 }
 
@@ -179,14 +180,64 @@ fn no_input_panics_and_no_payload_byte_is_lost() {
             bytes.push(x.to_le_bytes()[0]);
         }
         let lines = split_all(&bytes, (x % 17) as usize + 1);
-        let kept: usize = lines.iter().map(|l| l.raw.chars().count()).sum();
+        let kept: usize = lines.iter().map(|l| l.raw().chars().count()).sum();
         let payload = bytes
             .iter()
             .filter(|b| !matches!(b, 0x00 | 0x11 | 0x13 | 0x0C | b'\r' | b'\n'))
             .count();
         assert_eq!(kept, payload);
         for l in &lines {
-            assert_eq!(l.kind, classify(&l.raw));
+            assert_eq!(l.kind(), classify(l.raw()));
         }
     }
+}
+
+#[test]
+fn stripped_byte_between_cr_and_lf_keeps_crlf_one_terminator() {
+    for ctl in [0x00u8, 0x11, 0x13, 0x0C] {
+        let bytes = [b'a', b'\r', ctl, b'\n', b'b', b'\r', b'\n'];
+        for chunk in [1, 2, 3, bytes.len()] {
+            let raws: Vec<String> = split_all(&bytes, chunk)
+                .into_iter()
+                .map(SmdrLine::into_raw)
+                .collect();
+            assert_eq!(raws, ["a", "b"], "ctl {ctl:#04x} chunk {chunk}");
+        }
+    }
+}
+
+#[test]
+fn unterminated_input_is_capped_and_kept_as_unknown() {
+    let rec = std::fs::read(fixture_dir().join("outgoing.txt")).expect("fixture");
+    let mut bytes = rec[..80].repeat(5);
+    bytes.extend_from_slice(b"\r\n");
+    let mut s = LineSplitter::new();
+    let lines = s.push(&bytes);
+    let kept: usize = lines.iter().map(|l| l.raw().len()).sum();
+    assert_eq!(kept, 400);
+    for l in &lines[..lines.len() - 1] {
+        assert_eq!(l.raw().len(), MAX_PENDING_BYTES);
+        assert_eq!(l.kind(), LineKind::Unknown);
+    }
+    assert!(lines.last().expect("tail").raw().len() < MAX_PENDING_BYTES);
+}
+
+#[test]
+fn overflow_chunk_starting_with_at_is_still_unknown() {
+    let mut s = LineSplitter::new();
+    let lines = s.push("AT".repeat(MAX_PENDING_BYTES).as_bytes());
+    assert_eq!(lines.len(), 2);
+    assert!(lines.iter().all(|l| l.kind() == LineKind::Unknown));
+}
+
+#[test]
+fn record_width_counts_wire_bytes_so_a_high_byte_still_classifies() {
+    let rec = std::fs::read(fixture_dir().join("outgoing.txt")).expect("fixture");
+    let mut bytes = rec[..80].to_vec();
+    bytes[70] = 0xB0;
+    bytes.extend_from_slice(b"\r\n");
+    let lines = split_all(&bytes, 4096);
+    assert_eq!(lines.len(), 1);
+    assert_eq!(lines[0].raw().chars().count(), LINE_WIDTH);
+    assert_eq!(lines[0].kind(), LineKind::Record);
 }

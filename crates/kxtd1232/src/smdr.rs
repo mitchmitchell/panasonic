@@ -1,6 +1,6 @@
 pub const LINE_WIDTH: usize = 80;
 
-pub const MODEM_INIT_WIDTH: usize = 17;
+pub const MAX_PENDING_BYTES: usize = 2 * LINE_WIDTH;
 
 pub const SPEC_HEADER: &str =
     "  Date     Time    Ext CO        Dial Number        Ring Duration  Acc code  CD ";
@@ -24,6 +24,7 @@ pub enum LineKind {
 }
 
 impl LineKind {
+    #[must_use]
     pub fn is_page_header(self) -> bool {
         matches!(self, LineKind::Header | LineKind::Rule | LineKind::Blank)
     }
@@ -31,11 +32,12 @@ impl LineKind {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SmdrLine {
-    pub kind: LineKind,
-    pub raw: String,
+    kind: LineKind,
+    raw: String,
 }
 
 impl SmdrLine {
+    #[must_use]
     pub fn new(raw: String) -> Self {
         Self {
             kind: classify(&raw),
@@ -43,6 +45,29 @@ impl SmdrLine {
         }
     }
 
+    fn overflow(raw: String) -> Self {
+        Self {
+            kind: LineKind::Unknown,
+            raw,
+        }
+    }
+
+    #[must_use]
+    pub fn kind(&self) -> LineKind {
+        self.kind
+    }
+
+    #[must_use]
+    pub fn raw(&self) -> &str {
+        &self.raw
+    }
+
+    #[must_use]
+    pub fn into_raw(self) -> String {
+        self.raw
+    }
+
+    #[must_use]
     pub fn header_matches_spec(&self) -> bool {
         self.kind == LineKind::Header && self.raw == SPEC_HEADER
     }
@@ -55,14 +80,19 @@ pub struct LineSplitter {
 }
 
 impl LineSplitter {
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
     // https://github.com/mitchmitchell/panasonic/issues/11
+    #[must_use]
     pub fn push(&mut self, bytes: &[u8]) -> Vec<SmdrLine> {
         let mut out = Vec::new();
         for &b in bytes {
+            if matches!(b, NUL | XON | XOFF | FF) {
+                continue;
+            }
             let after_cr = std::mem::replace(&mut self.after_cr, false);
             match b {
                 LF if after_cr => {}
@@ -70,13 +100,18 @@ impl LineSplitter {
                     self.after_cr = b == CR;
                     out.push(SmdrLine::new(decode(&std::mem::take(&mut self.buf))));
                 }
-                NUL | XON | XOFF | FF => {}
-                _ => self.buf.push(b),
+                _ => {
+                    self.buf.push(b);
+                    if self.buf.len() >= MAX_PENDING_BYTES {
+                        out.push(SmdrLine::overflow(decode(&std::mem::take(&mut self.buf))));
+                    }
+                }
             }
         }
         out
     }
 
+    #[must_use]
     pub fn finish(&mut self) -> Option<SmdrLine> {
         self.after_cr = false;
         if self.buf.is_empty() {
@@ -104,6 +139,7 @@ fn decode(bytes: &[u8]) -> String {
 // https://github.com/mitchmitchell/panasonic/issues/13
 // https://github.com/mitchmitchell/panasonic/issues/19
 // https://github.com/mitchmitchell/panasonic/issues/21
+#[must_use]
 pub fn classify(line: &str) -> LineKind {
     let trimmed = line.trim();
     if trimmed.is_empty() {
@@ -114,7 +150,7 @@ pub fn classify(line: &str) -> LineKind {
         LineKind::Header
     } else if trimmed.len() >= MIN_RULE_LEN && trimmed.bytes().all(|b| b == b'-') {
         LineKind::Rule
-    } else if line.len() == LINE_WIDTH && is_record(line) {
+    } else if line.chars().count() == LINE_WIDTH && is_record(line) {
         LineKind::Record
     } else {
         LineKind::Unknown
