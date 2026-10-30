@@ -232,6 +232,7 @@ pub struct SmdrRecord {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ParseError {
     NotRecord(LineKind),
     BadDate,

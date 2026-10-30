@@ -1,5 +1,7 @@
 use kxtd1232::smdr::{parse_line, DateOrder, LineSplitter, ParsedLine, SmdrRecord};
-use kxtd1232_sim::smdr::{BufferPolicy, LineEnding, SmdrEmitter, SyntheticCall};
+use kxtd1232_sim::smdr::{
+    BufferPolicy, LineEnding, SmdrEmitter, SyntheticCall, SyntheticCallError,
+};
 
 fn call(time: &str, number: &str) -> SyntheticCall {
     SyntheticCall {
@@ -47,7 +49,10 @@ fn synthetic_lines_round_trip_through_the_parser() {
             .join("../kxtd1232/tests/fixtures/smdr-v1/incoming_cid.txt"),
     )
     .expect("fixture");
-    assert_eq!(format!("{}\r\n", incoming.to_line()), fixture);
+    assert_eq!(
+        format!("{}\r\n", incoming.to_line().expect("line")),
+        fixture
+    );
 }
 
 #[test]
@@ -55,7 +60,7 @@ fn idle_calls_print_immediately_with_page_header() {
     for ending in [LineEnding::CrLf, LineEnding::Cr] {
         let mut e = SmdrEmitter::new(BufferPolicy::Drop, ending);
         e.page_header();
-        e.call_ended(&call("01:05PM", "5551230000"));
+        e.call_ended(&call("01:05PM", "5551230000")).expect("call");
         let recs = records(&e.take_output());
         assert_eq!(recs.len(), 1);
         assert_eq!(recs[0].number, "5551230000");
@@ -66,8 +71,8 @@ fn idle_calls_print_immediately_with_page_header() {
 fn replay_policy_buffers_during_programming_and_prints_after_bye() {
     let mut e = SmdrEmitter::new(BufferPolicy::ReplayAfterBye, LineEnding::CrLf);
     e.begin_programming();
-    e.call_ended(&call("01:05PM", "5551230000"));
-    e.call_ended(&call("01:06PM", "5551230001"));
+    e.call_ended(&call("01:05PM", "5551230000")).expect("call");
+    e.call_ended(&call("01:06PM", "5551230001")).expect("call");
     assert!(e.take_output().is_empty());
     assert_eq!(e.pending(), 2);
     e.end_programming();
@@ -83,11 +88,103 @@ fn drop_policy_loses_calls_during_programming() {
     let mut e = SmdrEmitter::new(BufferPolicy::Drop, LineEnding::CrLf);
     e.begin_programming();
     assert!(e.is_programming());
-    e.call_ended(&call("01:05PM", "5551230000"));
+    e.call_ended(&call("01:05PM", "5551230000")).expect("call");
     e.end_programming();
     assert!(e.take_output().is_empty());
     assert_eq!(e.dropped(), 1);
-    e.call_ended(&call("01:07PM", "5551230002"));
+    e.call_ended(&call("01:07PM", "5551230002")).expect("call");
     let recs = records(&e.take_output());
     assert_eq!(recs.len(), 1);
+}
+
+#[test]
+fn oversized_or_non_ascii_fields_are_rejected_not_misaligned() {
+    let ok = call("01:05PM", "5551230000");
+    assert_eq!(
+        ok.to_line().expect("line").len(),
+        kxtd1232::smdr::LINE_WIDTH
+    );
+    let cases = [
+        (
+            SyntheticCall {
+                ext: "1234".into(),
+                ..ok.clone()
+            },
+            "ext",
+            3,
+        ),
+        (
+            SyntheticCall {
+                ring: "10'00".into(),
+                ..ok.clone()
+            },
+            "ring",
+            4,
+        ),
+        (
+            SyntheticCall {
+                cd: "TRX".into(),
+                ..ok.clone()
+            },
+            "cd",
+            2,
+        ),
+        (
+            SyntheticCall {
+                time: "01:05 PM".into(),
+                ..ok.clone()
+            },
+            "time",
+            7,
+        ),
+        (
+            SyntheticCall {
+                acc_code: "\u{e9}".into(),
+                ..ok.clone()
+            },
+            "acc_code",
+            10,
+        ),
+        (
+            SyntheticCall {
+                number: "5".repeat(27),
+                ..ok.clone()
+            },
+            "dial",
+            26,
+        ),
+        (
+            SyntheticCall {
+                incoming: true,
+                number: "55512300001".into(),
+                ..ok.clone()
+            },
+            "number",
+            10,
+        ),
+        (
+            SyntheticCall {
+                incoming: true,
+                number: "555123".into(),
+                ..ok.clone()
+            },
+            "number",
+            10,
+        ),
+    ];
+    for (c, field, max) in cases {
+        assert_eq!(
+            c.to_line(),
+            Err(SyntheticCallError { field, max }),
+            "{field}"
+        );
+    }
+    let mut e = SmdrEmitter::new(BufferPolicy::Drop, LineEnding::CrLf);
+    assert!(e
+        .call_ended(&SyntheticCall {
+            ext: "1234".into(),
+            ..ok
+        })
+        .is_err());
+    assert!(e.take_output().is_empty());
 }
