@@ -1,0 +1,313 @@
+{
+  "outgoing.txt": {
+    "line_ending": "CRLF",
+    "lines": [
+      {
+        "kind": "record",
+        "date": "10/23/26",
+        "time": "01:05PM",
+        "ext": "101",
+        "co": "01",
+        "direction": "outgoing",
+        "number": "5551230000",
+        "cid_name": "",
+        "ring": "",
+        "duration": "00:02'14",
+        "acc_code": "",
+        "cd": ""
+      }
+    ]
+  },
+  "incoming_cid.txt": {
+    "line_ending": "CRLF",
+    "lines": [
+      {
+        "kind": "record",
+        "date": "10/23/26",
+        "time": "01:12PM",
+        "ext": "102",
+        "co": "02",
+        "direction": "incoming",
+        "number": "5559870000",
+        "cid_name": "DOE JOHN",
+        "ring": "0'07",
+        "duration": "00:00'41",
+        "acc_code": "",
+        "cd": ""
+      }
+    ]
+  },
+  "incoming_no_cid.txt": {
+    "line_ending": "CRLF",
+    "lines": [
+      {
+        "kind": "record",
+        "date": "10/23/26",
+        "time": "01:20PM",
+        "ext": "",
+        "co": "03",
+        "direction": "incoming",
+        "number": "5554440000",
+        "cid_name": "",
+        "ring": "0'12",
+        "duration": "",
+        "acc_code": "",
+        "cd": "NA"
+      }
+    ]
+  },
+  "account_code.txt": {
+    "line_ending": "CRLF",
+    "lines": [
+      {
+        "kind": "record",
+        "date": "10/23/26",
+        "time": "02:30PM",
+        "ext": "103",
+        "co": "01",
+        "direction": "outgoing",
+        "number": "5552220000",
+        "cid_name": "",
+        "ring": "",
+        "duration": "00:05'03",
+        "acc_code": "4321",
+        "cd": ""
+      }
+    ]
+  },
+  "transfer_cd.txt": {
+    "line_ending": "CRLF",
+    "lines": [
+      {
+        "kind": "record",
+        "date": "10/23/26",
+        "time": "01:09PM",
+        "ext": "",
+        "co": "02",
+        "direction": "incoming",
+        "number": "5559870000",
+        "cid_name": "SMITH JANE",
+        "ring": "0'07",
+        "duration": "",
+        "acc_code": "",
+        "cd": "TR"
+      }
+    ]
+  },
+  "page_header.txt": {
+    "line_ending": "CRLF",
+    "lines": [
+      {
+        "kind": "header"
+      },
+      {
+        "kind": "rule"
+      },
+      {
+        "kind": "blank"
+      }
+    ]
+  },
+  "eol_crlf.txt": {
+    "line_ending": "CRLF",
+    "lines": [
+      {
+        "kind": "record",
+        "date": "10/23/26",
+        "time": "01:05PM",
+        "ext": "101",
+        "co": "01",
+        "direction": "outgoing",
+        "number": "5551230000",
+        "cid_name": "",
+        "ring": "",
+        "duration": "00:02'14",
+        "acc_code": "",
+        "cd": ""
+      },
+      {
+        "kind": "record",
+        "date": "10/23/26",
+        "time": "01:12PM",
+        "ext": "102",
+        "co": "02",
+        "direction": "incoming",
+        "number": "5559870000",
+        "cid_name": "DOE JOHN",
+        "ring": "0'07",
+        "duration": "00:00'41",
+        "acc_code": "",
+        "cd": ""
+      }
+    ]
+  },
+  "eol_lf.txt": {
+    "line_ending": "LF",
+    "lines": [
+      {
+        "kind": "record",
+        "date": "10/23/26",
+        "time": "01:05PM",
+        "ext": "101",
+        "co": "01",
+        "direction": "outgoing",
+        "number": "5551230000",
+        "cid_name": "",
+        "ring": "",
+        "duration": "00:02'14",
+        "acc_code": "",
+        "cd": ""
+      },
+      {
+        "kind": "record",
+        "date": "10/23/26",
+        "time": "01:12PM",
+        "ext": "102",
+        "co": "02",
+        "direction": "incoming",
+        "number": "5559870000",
+        "cid_name": "DOE JOHN",
+        "ring": "0'07",
+        "duration": "00:00'41",
+        "acc_code": "",
+        "cd": ""
+      }
+    ]
+  },
+  "eol_cr.txt": {
+    "line_ending": "CR",
+    "lines": [
+      {
+        "kind": "record",
+        "date": "10/23/26",
+        "time": "01:05PM",
+        "ext": "101",
+        "co": "01",
+        "direction": "outgoing",
+        "number": "5551230000",
+        "cid_name": "",
+        "ring": "",
+        "duration": "00:02'14",
+        "acc_code": "",
+        "cd": ""
+      },
+      {
+        "kind": "record",
+        "date": "10/23/26",
+        "time": "01:12PM",
+        "ext": "102",
+        "co": "02",
+        "direction": "incoming",
+        "number": "5559870000",
+        "cid_name": "DOE JOHN",
+        "ring": "0'07",
+        "duration": "00:00'41",
+        "acc_code": "",
+        "cd": ""
+      }
+    ]
+  },
+  "malformed_short.txt": {
+    "line_ending": "CRLF",
+    "lines": [
+      {
+        "kind": "unknown",
+        "parse_ok": false,
+        "raw_len": 29
+      }
+    ]
+  },
+  "mixed_stream.txt": {
+    "line_ending": "CRLF",
+    "lines": [
+      {
+        "kind": "header"
+      },
+      {
+        "kind": "rule"
+      },
+      {
+        "kind": "blank"
+      },
+      {
+        "kind": "record",
+        "date": "10/23/26",
+        "time": "01:05PM",
+        "ext": "101",
+        "co": "01",
+        "direction": "outgoing",
+        "number": "5551230000",
+        "cid_name": "",
+        "ring": "",
+        "duration": "00:02'14",
+        "acc_code": "",
+        "cd": ""
+      },
+      {
+        "kind": "record",
+        "date": "10/23/26",
+        "time": "01:12PM",
+        "ext": "102",
+        "co": "02",
+        "direction": "incoming",
+        "number": "5559870000",
+        "cid_name": "DOE JOHN",
+        "ring": "0'07",
+        "duration": "00:00'41",
+        "acc_code": "",
+        "cd": ""
+      },
+      {
+        "kind": "record",
+        "date": "10/23/26",
+        "time": "01:09PM",
+        "ext": "",
+        "co": "02",
+        "direction": "incoming",
+        "number": "5559870000",
+        "cid_name": "SMITH JANE",
+        "ring": "0'07",
+        "duration": "",
+        "acc_code": "",
+        "cd": "TR"
+      },
+      {
+        "kind": "header"
+      },
+      {
+        "kind": "rule"
+      },
+      {
+        "kind": "blank"
+      },
+      {
+        "kind": "record",
+        "date": "10/23/26",
+        "time": "01:20PM",
+        "ext": "",
+        "co": "03",
+        "direction": "incoming",
+        "number": "5554440000",
+        "cid_name": "",
+        "ring": "0'12",
+        "duration": "",
+        "acc_code": "",
+        "cd": "NA"
+      },
+      {
+        "kind": "record",
+        "date": "10/23/26",
+        "time": "02:30PM",
+        "ext": "103",
+        "co": "01",
+        "direction": "outgoing",
+        "number": "5552220000",
+        "cid_name": "",
+        "ring": "",
+        "duration": "00:05'03",
+        "acc_code": "4321",
+        "cd": ""
+      }
+    ]
+  }
+}

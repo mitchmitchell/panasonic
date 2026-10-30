@@ -20,6 +20,7 @@ pub mod frame;
 pub mod plan;
 pub mod session;
 pub mod signon;
+pub mod smdr;
 pub mod tables;
 
 pub use client::{
