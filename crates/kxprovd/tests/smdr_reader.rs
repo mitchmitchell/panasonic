@@ -1,8 +1,10 @@
 use chrono::{DateTime, TimeZone, Utc};
-use kxprovd::smdr_reader::{ReaderEvent, ReceiveOnly, SmdrReader, SmdrSource};
+use kxprovd::smdr_reader::{
+    ReaderError, ReaderEvent, ReceiveOnly, SmdrReader, SmdrSink, SmdrSource,
+};
 use kxprovd::smdr_store::{IngestOutcome, SmdrStore};
 use kxtd1232::smdr::{DateOrder, SPEC_HEADER};
-use kxtd1232::{Transport, TransportError};
+use kxtd1232::{LinkDownError, Transport, TransportError};
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 
@@ -139,33 +141,62 @@ fn link_down_is_an_error_not_idle() {
     struct Down;
     impl SmdrSource for Down {
         fn recv(&mut self, _: u64) -> Result<Vec<u8>, TransportError> {
-            Err(TransportError::NothingWritten("down".into()))
+            Err(TransportError::LinkDown(LinkDownError {
+                detail: "down".into(),
+                bytes_sent: None,
+            }))
         }
     }
     let tmp = tempfile::tempdir().expect("tmp");
     let mut store = store(&tmp);
     let mut reader = SmdrReader::new(Down);
-    assert!(reader.poll_once(&mut store, 1, rx).is_err());
+    assert!(matches!(
+        reader.poll_once(&mut store, 1, rx),
+        Err(ReaderError::LinkDown(_))
+    ));
 }
 
-#[cfg(target_os = "linux")]
 #[test]
-fn device_source_opens_read_only_and_receives() {
-    use kxprovd::smdr_reader::DeviceSmdrSource;
-    use std::io::Write;
-    let tmp = tempfile::tempdir().expect("tmp");
-    let fifo = tmp.path().join("kxpbx");
-    nix::unistd::mkfifo(
-        &fifo,
-        nix::sys::stat::Mode::S_IRUSR | nix::sys::stat::Mode::S_IWUSR,
-    )
-    .expect("mkfifo");
-    let mut source = DeviceSmdrSource::open(&fifo).expect("open");
-    assert!(source.is_read_only());
-    let mut writer = std::fs::OpenOptions::new()
-        .write(true)
-        .open(&fifo)
-        .expect("writer");
-    writer.write_all(b"hello\r\n").expect("write");
-    assert_eq!(source.recv(1000).expect("recv"), b"hello\r\n");
+fn a_failed_ingest_keeps_the_rest_of_the_batch_for_the_next_poll() {
+    struct Flaky {
+        fail_at: usize,
+        seen: Vec<String>,
+    }
+    impl SmdrSink for Flaky {
+        fn ingest(
+            &mut self,
+            line: kxtd1232::smdr::SmdrLine,
+            _rx: DateTime<Utc>,
+        ) -> Result<IngestOutcome, kxprovd::smdr_store::SmdrStoreError> {
+            if self.seen.len() == self.fail_at {
+                self.fail_at = usize::MAX;
+                return Err(std::io::Error::other("disk full").into());
+            }
+            self.seen.push(line.raw().to_string());
+            Ok(IngestOutcome::Stored)
+        }
+    }
+    let bytes = std::fs::read(fixture_dir().join("eol_crlf.txt")).expect("fixture");
+    let mut chunks = VecDeque::new();
+    chunks.push_back(bytes.clone());
+    let mut reader = SmdrReader::new(ReceiveOnly::new(FakePort {
+        chunks,
+        ..FakePort::default()
+    }));
+    let mut sink = Flaky {
+        fail_at: 1,
+        seen: Vec::new(),
+    };
+    assert!(matches!(
+        reader.poll_once(&mut sink, 1, rx),
+        Err(ReaderError::Store(_))
+    ));
+    assert_eq!(reader.pending(), 1);
+    assert_eq!(
+        reader.poll_once(&mut sink, 1, rx).expect("retry"),
+        vec![ReaderEvent::Ingested(IngestOutcome::Stored)]
+    );
+    let text = String::from_utf8(bytes).expect("ascii");
+    let want: Vec<String> = text.lines().map(str::to_string).collect();
+    assert_eq!(sink.seen, want);
 }

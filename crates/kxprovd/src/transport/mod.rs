@@ -9,8 +9,6 @@ mod sim;
 pub use sim::SimTransportBridge;
 
 #[cfg(target_os = "linux")]
-pub(crate) use serial::recv_with_poll;
-#[cfg(target_os = "linux")]
 pub use serial::TokioSerialTransport;
 
 #[cfg(not(target_os = "linux"))]
