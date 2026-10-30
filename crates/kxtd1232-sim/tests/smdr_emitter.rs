@@ -188,3 +188,44 @@ fn oversized_or_non_ascii_fields_are_rejected_not_misaligned() {
         .is_err());
     assert!(e.take_output().is_empty());
 }
+
+#[test]
+fn every_v1_fixture_record_round_trips_from_expected_fields() {
+    let dir =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../kxtd1232/tests/fixtures/smdr-v1");
+    let expected: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(dir.join("expected.json")).expect("expected.json"),
+    )
+    .expect("json");
+    let mut checked = 0;
+    for (file, spec) in expected.as_object().expect("object") {
+        let bytes = std::fs::read(dir.join(file)).expect("fixture");
+        let mut s = LineSplitter::new();
+        let mut lines = s.push(&bytes);
+        lines.extend(s.finish());
+        let wanted = spec["lines"].as_array().expect("lines");
+        assert_eq!(lines.len(), wanted.len(), "{file}");
+        for (line, want) in lines.iter().zip(wanted) {
+            if want["kind"] != "record" {
+                continue;
+            }
+            let f = |k: &str| want[k].as_str().expect(k).to_string();
+            let call = SyntheticCall {
+                date: f("date"),
+                time: f("time"),
+                ext: f("ext"),
+                co: f("co"),
+                incoming: want["direction"] == "incoming",
+                number: f("number"),
+                cid_name: f("cid_name"),
+                ring: f("ring"),
+                duration: f("duration"),
+                acc_code: f("acc_code"),
+                cd: f("cd"),
+            };
+            assert_eq!(call.to_line().expect("line"), line.raw(), "{file}");
+            checked += 1;
+        }
+    }
+    assert_eq!(checked, 16);
+}
