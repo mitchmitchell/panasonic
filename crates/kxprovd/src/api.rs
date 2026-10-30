@@ -800,7 +800,7 @@ mod apply_plan_tests {
     #[tokio::test]
     async fn apply_plan_keeps_approval_when_enqueue_shuts_down() {
         let tmp = tempfile::tempdir().unwrap();
-        let (tx, rx) = mpsc::channel(4);
+        let (tx, rx) = mpsc::channel(8);
         drop(rx);
         let state = test_api_state(&tmp, Arc::new(JobQueue::new(tx)));
         let token = TokenId("writer".into());

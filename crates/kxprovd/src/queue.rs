@@ -63,8 +63,12 @@ pub enum JobOutcome {
     },
 }
 
+pub const ROOT_RATE_KEY: &str = "root";
+pub const ROOT_RESERVED_SLOTS: u32 = crate::rate_limit::QUEUE_DEPTH_MAX;
+
 pub struct JobQueue {
     tx: mpsc::Sender<JobRequest>,
+    non_root_slots: u32,
     pub jobs: Mutex<HashMap<String, JobState>>,
     token_rates: Mutex<HashMap<String, TokenRateState>>,
     /// Bumped when a token is revoked or reactivated (rotate); jobs with older epochs fail.
@@ -73,7 +77,9 @@ pub struct JobQueue {
 
 impl JobQueue {
     pub fn new(tx: mpsc::Sender<JobRequest>) -> Self {
+        let capacity = u32::try_from(tx.max_capacity()).unwrap_or(u32::MAX);
         Self {
+            non_root_slots: capacity.saturating_sub(ROOT_RESERVED_SLOTS),
             tx,
             jobs: Mutex::new(HashMap::new()),
             token_rates: Mutex::new(HashMap::new()),
@@ -111,6 +117,16 @@ impl JobQueue {
         if let Some(ref p) = principal {
             if let Some(key) = p.rate_limit_key() {
                 let mut rates = self.token_rates.lock().await;
+                if key != ROOT_RATE_KEY {
+                    let non_root_active: u32 = rates
+                        .iter()
+                        .filter(|(k, _)| k.as_str() != ROOT_RATE_KEY)
+                        .map(|(_, st)| st.active)
+                        .sum();
+                    if non_root_active >= self.non_root_slots {
+                        return Err(QueueError::RateLimit);
+                    }
+                }
                 let st = rates.entry(key).or_default();
                 st.try_reserve(now_ms).map_err(|e| match e {
                     RateLimitError::QueueDepth | RateLimitError::JobsPerMinute => {
@@ -275,6 +291,50 @@ mod tests {
         q.enqueue(kind(), Some(p200.clone()), now)
             .await
             .expect("uid 200 has its own bucket");
+    }
+
+    #[tokio::test]
+    async fn root_keeps_reserved_slots_when_capped_principals_fill_the_queue() {
+        let (tx, mut rx) = mpsc::channel(32);
+        let q = JobQueue::new(tx);
+        let now = 3_000_000u64;
+        let kind = || JobKind::ReadFields {
+            params: ReadFieldsParams {
+                kind: FieldKindWire::CidName,
+                first: 0,
+                count: 1,
+            },
+        };
+        let mut admitted = 0;
+        for uid in 0..8 {
+            let p = JobPrincipal::SyntheticLocal { uid };
+            for _ in 0..QUEUE_DEPTH_MAX {
+                if q.enqueue(kind(), Some(p.clone()), now).await.is_ok() {
+                    admitted += 1;
+                }
+            }
+        }
+        assert_eq!(admitted, 32 - ROOT_RESERVED_SLOTS);
+        for _ in 0..ROOT_RESERVED_SLOTS {
+            tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                q.enqueue(kind(), Some(JobPrincipal::SyntheticRoot), now),
+            )
+            .await
+            .expect("root send does not block")
+            .expect("root uses its reserve");
+        }
+        let p = JobPrincipal::SyntheticLocal { uid: 0 };
+        assert!(matches!(
+            q.enqueue(kind(), Some(JobPrincipal::SyntheticLocal { uid: 9 }), now)
+                .await,
+            Err(QueueError::RateLimit)
+        ));
+        rx.recv().await.expect("worker takes one job");
+        q.release_token(Some(&p)).await;
+        q.enqueue(kind(), Some(p), now)
+            .await
+            .expect("released slot is reusable");
     }
 
     #[tokio::test]
