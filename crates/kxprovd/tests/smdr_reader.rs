@@ -176,7 +176,7 @@ fn a_failed_ingest_keeps_the_rest_of_the_batch_for_the_next_poll() {
             Ok(IngestOutcome::Stored)
         }
     }
-    let bytes = std::fs::read(fixture_dir().join("eol_crlf.txt")).expect("fixture");
+    let bytes = std::fs::read(fixture_dir().join("mixed_stream.txt")).expect("fixture");
     let mut chunks = VecDeque::new();
     chunks.push_back(bytes.clone());
     let mut reader = SmdrReader::new(ReceiveOnly::new(FakePort {
@@ -184,17 +184,19 @@ fn a_failed_ingest_keeps_the_rest_of_the_batch_for_the_next_poll() {
         ..FakePort::default()
     }));
     let mut sink = Flaky {
-        fail_at: 1,
+        fail_at: 4,
         seen: Vec::new(),
     };
     assert!(matches!(
         reader.poll_once(&mut sink, 1, rx),
         Err(ReaderError::Store(_))
     ));
-    assert_eq!(reader.pending(), 1);
+    assert_eq!(reader.pending(), 7);
+    let retried = reader.poll_once(&mut sink, 1, rx).expect("retry");
     assert_eq!(
-        reader.poll_once(&mut sink, 1, rx).expect("retry"),
-        vec![ReaderEvent::Ingested(IngestOutcome::Stored)]
+        retried,
+        vec![ReaderEvent::Ingested(IngestOutcome::Stored); 11],
+        "events for lines ingested before the failure are kept"
     );
     let text = String::from_utf8(bytes).expect("ascii");
     let want: Vec<String> = text.lines().map(str::to_string).collect();

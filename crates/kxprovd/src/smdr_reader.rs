@@ -45,6 +45,7 @@ impl SmdrSink for SmdrStore {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ReaderEvent {
     Ingested(IngestOutcome),
     HeaderMismatch { rx: DateTime<Utc>, raw: String },
@@ -52,6 +53,7 @@ pub enum ReaderEvent {
 }
 
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum ReaderError {
     #[error("smdr link down: {0:?}")]
     LinkDown(TransportError),
@@ -63,6 +65,7 @@ pub struct SmdrReader<S: SmdrSource> {
     source: S,
     splitter: LineSplitter,
     pending: VecDeque<SmdrLine>,
+    undelivered: Vec<ReaderEvent>,
 }
 
 impl<S: SmdrSource> SmdrReader<S> {
@@ -71,6 +74,7 @@ impl<S: SmdrSource> SmdrReader<S> {
             source,
             splitter: LineSplitter::new(),
             pending: VecDeque::new(),
+            undelivered: Vec::new(),
         }
     }
 
@@ -82,6 +86,7 @@ impl<S: SmdrSource> SmdrReader<S> {
         self.source
     }
 
+    #[must_use = "events carry header mismatches and ingest outcomes"]
     pub fn poll_once<K: SmdrSink>(
         &mut self,
         sink: &mut K,
@@ -100,6 +105,7 @@ impl<S: SmdrSource> SmdrReader<S> {
         self.deliver(sink, now)
     }
 
+    #[must_use = "events carry header mismatches and ingest outcomes"]
     pub fn finish<K: SmdrSink>(
         &mut self,
         sink: &mut K,
@@ -114,7 +120,7 @@ impl<S: SmdrSource> SmdrReader<S> {
         sink: &mut K,
         now: impl Fn() -> DateTime<Utc>,
     ) -> Result<Vec<ReaderEvent>, ReaderError> {
-        let mut events = Vec::with_capacity(self.pending.len());
+        let mut events = std::mem::take(&mut self.undelivered);
         while let Some(line) = self.pending.pop_front() {
             let rx = now();
             let mismatch = (line.kind() == LineKind::Header && !line.header_matches_spec())
@@ -123,6 +129,7 @@ impl<S: SmdrSource> SmdrReader<S> {
                 Ok(outcome) => events.push(ReaderEvent::Ingested(outcome)),
                 Err(e) => {
                     self.pending.push_front(line);
+                    self.undelivered = events;
                     return Err(ReaderError::Store(e));
                 }
             }
