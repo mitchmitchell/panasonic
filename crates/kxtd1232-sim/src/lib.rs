@@ -5,6 +5,8 @@
 //! (dev/tests only; production binaries must not enable it). Virtual time models 9600-baud
 //! line delay for replies (see [`SimTransport::send`]).
 
+pub mod smdr;
+
 use kxtd1232::fields::{encode_cid_name, encode_cid_number, encode_ext_name};
 use kxtd1232::frame::{checksum, Cmd, BUSY_FRAME};
 use kxtd1232::tables;
