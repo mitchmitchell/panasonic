@@ -47,7 +47,7 @@ pub trait Transport {
 /// Minimum post-reply turnaround margin (Tester #2: 0 ms with high baud shrinks cutoff).
 pub const MIN_REPLY_GUARD_MS: u64 = 20;
 /// Upper bound for configured line rate (daemon rejects above this at startup).
-pub const MAX_LINK_BAUD: u32 = 115_200;
+pub const MAX_LINK_BAUD: u32 = 9600;
 
 /// Timing parameters (defaults until hardware test H5 measures them; design §9b).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
