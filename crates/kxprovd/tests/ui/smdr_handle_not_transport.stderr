@@ -1,0 +1,19 @@
+error[E0277]: the trait bound `SmdrHandle<SimTransport>: kxtd1232::Transport` is not satisfied
+  --> tests/ui/smdr_handle_not_transport.rs:13:21
+   |
+13 |     needs_transport(pm.smdr_handle());
+   |     --------------- ^^^^^^^^^^^^^^^^ the trait `kxtd1232::Transport` is not implemented for `SmdrHandle<SimTransport>`
+   |     |
+   |     required by a bound introduced by this call
+   |
+   = help: the following other types implement trait `kxtd1232::Transport`:
+             AnyTransport
+             ProgrammingLease<T>
+             SimTransport
+             SimTransportBridge
+             TokioSerialTransport
+note: required by a bound in `needs_transport`
+  --> tests/ui/smdr_handle_not_transport.rs:5:23
+   |
+5  | fn needs_transport<T: Transport>(_: T) {}
+   |                       ^^^^^^^^^ required by this bound in `needs_transport`

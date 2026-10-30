@@ -1,0 +1,5 @@
+error[E0599]: no method named `send` found for struct `SmdrHandle` in the current scope
+  --> tests/ui/smdr_handle_send.rs:11:12
+   |
+11 |     handle.send(b"BYE\r\n");
+   |            ^^^^ method not found in `SmdrHandle<SimTransport>`

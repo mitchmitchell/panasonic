@@ -49,6 +49,7 @@ rusqlite = { version = "0.37", features = ["bundled"] }
 tempfile = "3"
 kxprov = { path = "../kxprov" }
 serial_test = "3"
+trybuild = "1"
 
 [[test]]
 name = "daemon"
