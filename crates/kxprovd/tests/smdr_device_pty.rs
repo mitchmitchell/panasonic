@@ -683,3 +683,15 @@ fn no_lease_is_granted_during_an_in_flight_smdr_read() {
     );
     lease.release().unwrap();
 }
+
+#[cfg(feature = "test-util")]
+#[test]
+fn recv_starting_near_the_clock_maximum_reads_without_panicking() {
+    let mut pty = pty();
+    let mut dev = open_smdr_device(&pty.path, SmdrLineOptions::default()).unwrap();
+    pty.master.write_all(b"10/30/26 05:48PM 101\r\n").unwrap();
+    let got = dev
+        .recv_starting_at(kxprovd::deadline::latest_instant(), 1_000)
+        .unwrap();
+    assert!(got.starts_with(b"10/30/26"), "{got:?}");
+}
