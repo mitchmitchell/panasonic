@@ -336,8 +336,9 @@ fn smdr_resume_after_a_lease_reapplies_raw_termios() {
     let dirty = termios::tcgetattr(&pty.slave).unwrap();
     assert!(dirty.input_flags.contains(InputFlags::IXOFF));
     assert!(dirty.local_flags.contains(LocalFlags::ECHO));
-    let mut drain = [0u8; 64];
-    let _ = std::io::Read::read(&mut pty.master, &mut drain);
+    let mut sent_by_programming = [0u8; 64];
+    let n = std::io::Read::read(&mut pty.master, &mut sent_by_programming).unwrap();
+    assert_eq!(&sent_by_programming[..n], b"X");
     pty.master.write_all(b"10/30/26\r\n").unwrap();
     assert!(smdr.recv(1000).unwrap().starts_with(b"10/30/26"));
     let t = termios::tcgetattr(&pty.slave).unwrap();
@@ -424,4 +425,72 @@ fn a_termios_readback_mismatch_on_resume_fails_closed_without_reading() {
     ));
     smdr.set_resume_readback_hook(Box::new(|_| {}));
     assert!(smdr.recv(1000).unwrap().starts_with(b"10/30/26"));
+}
+
+#[cfg(feature = "test-util")]
+#[test]
+fn a_wrong_speed_readback_after_the_dtr_drop_is_a_speed_mismatch() {
+    use kxprovd::port::{DtrError, PortReleaseError};
+
+    let pty = pty();
+    let pm = manager();
+    let lease = pm
+        .request_lease("job-1", std::time::Duration::from_millis(50))
+        .unwrap();
+    let mut dev = pm
+        .open_programming_device(&lease, &pty.path, SmdrLineOptions::default())
+        .unwrap();
+    dev.set_restore_readback_hook(Box::new(|t| {
+        termios::cfsetospeed(t, BaudRate::B4800).unwrap();
+    }));
+    let result = dev.end(std::time::Duration::from_millis(100));
+    assert!(
+        matches!(
+            result,
+            Err(PortReleaseError::DropDtr(DtrError::SpeedMismatch { .. }))
+        ),
+        "{result:?}"
+    );
+}
+
+#[cfg(feature = "test-util")]
+fn resume_fails_closed_with(hook: kxprovd::port::device::ReadbackHook, expected: &'static str) {
+    let mut pty = pty();
+    let pm = manager();
+    let mut smdr = pm
+        .open_smdr_device(&pty.path, SmdrLineOptions::default())
+        .unwrap();
+    cycle_a_lease(&pm);
+    smdr.set_resume_readback_hook(hook);
+    pty.master.write_all(b"10/30/26\r\n").unwrap();
+    let result = smdr.resume_after_lease();
+    assert!(
+        matches!(result, Err(DeviceError::TermiosNotApplied(name)) if name == expected),
+        "{result:?}"
+    );
+    assert!(matches!(
+        smdr.recv(200),
+        Err(kxtd1232::TransportError::LinkDown(_))
+    ));
+}
+
+#[cfg(feature = "test-util")]
+#[test]
+fn a_wrong_speed_readback_on_resume_fails_closed() {
+    resume_fails_closed_with(
+        Box::new(|t| termios::cfsetspeed(t, BaudRate::B4800).unwrap()),
+        "ospeed",
+    );
+}
+
+#[cfg(feature = "test-util")]
+#[test]
+fn a_missing_cs8_readback_on_resume_fails_closed() {
+    resume_fails_closed_with(
+        Box::new(|t| {
+            t.control_flags.remove(ControlFlags::CSIZE);
+            t.control_flags.insert(ControlFlags::CS7);
+        }),
+        "CS8",
+    );
 }

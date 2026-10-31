@@ -184,6 +184,12 @@ pub const CLEARED_LOCAL_FLAGS: [(&str, LocalFlags); 8] = [
     ("ICANON", LocalFlags::ICANON),
 ];
 
+pub const REQUIRED_CONTROL_FLAGS: [(&str, ControlFlags); 3] = [
+    ("CS8", ControlFlags::CS8),
+    ("CREAD", ControlFlags::CREAD),
+    ("CLOCAL", ControlFlags::CLOCAL),
+];
+
 fn verify_smdr_termios(t: &Termios, options: SmdrLineOptions) -> Result<(), DeviceError> {
     for (name, flag) in CLEARED_INPUT_FLAGS {
         if t.input_flags.contains(flag) {
@@ -197,6 +203,17 @@ fn verify_smdr_termios(t: &Termios, options: SmdrLineOptions) -> Result<(), Devi
     }
     if t.control_flags.contains(ControlFlags::CRTSCTS) != options.rtscts {
         return Err(DeviceError::TermiosNotApplied("CRTSCTS"));
+    }
+    for (name, flag) in REQUIRED_CONTROL_FLAGS {
+        if !t.control_flags.contains(flag) {
+            return Err(DeviceError::TermiosNotApplied(name));
+        }
+    }
+    if termios::cfgetospeed(t) != SMDR_BAUD {
+        return Err(DeviceError::TermiosNotApplied("ospeed"));
+    }
+    if termios::cfgetispeed(t) != SMDR_BAUD {
+        return Err(DeviceError::TermiosNotApplied("ispeed"));
     }
     Ok(())
 }
@@ -315,6 +332,8 @@ pub struct ProgrammingDevice<'lease> {
     _smdr: Option<Arc<Mutex<SmdrDevice>>>,
     session: super::SessionMode,
     ended: bool,
+    #[cfg(feature = "test-util")]
+    restore_readback_hook: Option<ReadbackHook>,
     _lease: PhantomData<&'lease ()>,
 }
 
@@ -347,8 +366,15 @@ impl ProgrammingDevice<'_> {
             _smdr: smdr,
             session: super::SessionMode::SignedOut,
             ended: false,
+            #[cfg(feature = "test-util")]
+            restore_readback_hook: None,
             _lease: PhantomData,
         })
+    }
+
+    #[cfg(feature = "test-util")]
+    pub fn set_restore_readback_hook(&mut self, hook: ReadbackHook) {
+        self.restore_readback_hook = Some(hook);
     }
 
     pub fn holds_own_flock(&self) -> bool {
@@ -415,16 +441,38 @@ impl super::PortRelease for ProgrammingDevice<'_> {
             .and_then(|()| termios::tcsetattr(fd, SetArg::TCSANOW, &t))
             .map_err(|e| super::DtrError::Hangup(e.to_string()))?;
         std::thread::sleep(super::DTR_LOW_PERIOD);
-        restore_line_speed(fd)
+        #[cfg(feature = "test-util")]
+        let hook = self.restore_readback_hook.as_mut();
+        #[cfg(not(feature = "test-util"))]
+        let hook: Option<&mut ReadbackHook> = None;
+        restore_line_speed(self.file.file(), hook)
     }
 }
 
-fn restore_line_speed(fd: &File) -> Result<(), super::DtrError> {
+#[cfg(not(feature = "test-util"))]
+type ReadbackHook = std::convert::Infallible;
+
+#[cfg(feature = "test-util")]
+fn apply_readback_hook(hook: Option<&mut ReadbackHook>, t: &mut Termios) {
+    if let Some(hook) = hook {
+        hook(t);
+    }
+}
+
+#[cfg(not(feature = "test-util"))]
+fn apply_readback_hook(hook: Option<&mut ReadbackHook>, _t: &mut Termios) {
+    if let Some(never) = hook {
+        match *never {}
+    }
+}
+
+fn restore_line_speed(fd: &File, hook: Option<&mut ReadbackHook>) -> Result<(), super::DtrError> {
     let mut t = termios::tcgetattr(fd).map_err(|e| super::DtrError::Restore(e.to_string()))?;
     termios::cfsetspeed(&mut t, SMDR_BAUD)
         .and_then(|()| termios::tcsetattr(fd, SetArg::TCSANOW, &t))
         .map_err(|e| super::DtrError::Restore(e.to_string()))?;
-    let back = termios::tcgetattr(fd).map_err(|e| super::DtrError::Restore(e.to_string()))?;
+    let mut back = termios::tcgetattr(fd).map_err(|e| super::DtrError::Restore(e.to_string()))?;
+    apply_readback_hook(hook, &mut back);
     let (ispeed, ospeed) = (termios::cfgetispeed(&back), termios::cfgetospeed(&back));
     if ispeed != SMDR_BAUD || ospeed != SMDR_BAUD {
         return Err(super::DtrError::SpeedMismatch {
