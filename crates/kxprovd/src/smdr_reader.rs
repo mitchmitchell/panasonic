@@ -11,14 +11,6 @@ pub trait SmdrSource {
 /// ```compile_fail
 /// use kxprovd::smdr_reader::ReceiveOnly;
 /// use kxtd1232::Transport;
-/// fn leak<T: Transport>(r: ReceiveOnly<T>) -> T {
-///     r.into_inner()
-/// }
-/// ```
-///
-/// ```compile_fail
-/// use kxprovd::smdr_reader::ReceiveOnly;
-/// use kxtd1232::Transport;
 /// fn write<T: Transport>(r: &mut ReceiveOnly<T>) {
 ///     let _ = r.send(b"x");
 /// }
@@ -36,14 +28,6 @@ pub struct ReceiveOnly<T: Transport>(T);
 impl<T: Transport> ReceiveOnly<T> {
     pub fn new(transport: T) -> Self {
         Self(transport)
-    }
-
-    #[allow(
-        dead_code,
-        reason = "crate-private escape hatch kept for in-crate port handback; not reachable from outside the crate"
-    )]
-    pub(crate) fn into_inner(self) -> T {
-        self.0
     }
 }
 
