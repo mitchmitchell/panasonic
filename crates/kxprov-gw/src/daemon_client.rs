@@ -120,6 +120,8 @@ fn map_remote_error(code: &str, message: &str) -> BackendError {
         "gate" if lower.contains("live_write") => BackendError::LiveWritesBlocked,
         "locked" => BackendError::ForbiddenScope,
         "transition_blocked" => BackendError::ForbiddenScope,
+        "transport" => BackendError::PbxTransport,
+        "protocol" => BackendError::PbxProtocol,
         _ if lower.contains("live write") || lower.contains("live_write") => {
             BackendError::LiveWritesBlocked
         }
@@ -363,6 +365,22 @@ mod tests {
     use kxprov_mock::BackendError;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+
+    #[test]
+    fn transport_and_protocol_job_errors_map_to_pbx_errors() {
+        assert!(matches!(
+            map_remote_error("transport", "No such file or directory"),
+            BackendError::PbxTransport
+        ));
+        assert!(matches!(
+            map_remote_error("protocol", "timeout waiting for reply"),
+            BackendError::PbxProtocol
+        ));
+        assert!(matches!(
+            map_remote_error("range", "record range out of bounds"),
+            BackendError::BadRequest("daemon")
+        ));
+    }
 
     #[test]
     fn mutating_requests_are_classified() {

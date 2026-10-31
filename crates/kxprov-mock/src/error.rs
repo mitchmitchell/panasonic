@@ -33,4 +33,8 @@ pub enum BackendError {
     JobNotFound,
     #[error("invalid request: {0}")]
     BadRequest(&'static str),
+    #[error("phone system port unavailable")]
+    PbxTransport,
+    #[error("phone system did not complete the exchange")]
+    PbxProtocol,
 }

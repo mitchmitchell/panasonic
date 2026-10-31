@@ -39,6 +39,17 @@ pub enum JobKind {
     },
 }
 
+impl JobKind {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::ReadFields { .. } => "read_fields",
+            Self::PlanChange { .. } => "plan_change",
+            Self::BackupNow { .. } => "backup_now",
+            Self::ApplyPlan { .. } => "apply_plan",
+        }
+    }
+}
+
 pub struct JobRequest {
     pub id: String,
     pub kind: JobKind,
