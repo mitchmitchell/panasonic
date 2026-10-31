@@ -140,7 +140,10 @@ fn lease_events_are_journaled_with_utc_time_job_id_and_gap_link() {
     let lease = pm
         .request_lease("job-7", Duration::from_millis(50))
         .unwrap();
-    let _ = pm.request_lease("job-8", Duration::from_millis(10));
+    assert!(matches!(
+        pm.request_lease("job-8", Duration::from_millis(10)),
+        Err(LeaseError::Timeout { .. })
+    ));
     lease.release().unwrap();
     let path = dir.path().join("lease.jsonl");
     let records = LeaseJournal::new(&path).read_all().unwrap();

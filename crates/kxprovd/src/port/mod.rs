@@ -9,6 +9,16 @@ use kxtd1232_sim::SimTransport;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
+const POISON_RECOVERY_REASON: &str = "each port critical section only swaps the transport Option, the holder and the waiter count, so a panic cannot leave a half-applied update; refusing every later lease and read would take the port down for nothing";
+
+fn recover_from_poison<G>(poisoned: std::sync::PoisonError<G>) -> G {
+    tracing::warn!(
+        reason = POISON_RECOVERY_REASON,
+        "port lock was poisoned; continuing"
+    );
+    poisoned.into_inner()
+}
+
 pub const DEFAULT_MAX_LEASE_WAITERS: usize = 4;
 pub const DEFAULT_LEASE_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -56,15 +66,13 @@ struct Shared<T> {
 
 impl<T> Shared<T> {
     fn lock(&self) -> MutexGuard<'_, State<T>> {
-        self.state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        self.state.lock().unwrap_or_else(recover_from_poison)
     }
 
     fn record(&self, event: LeaseEvent, job_id: &str) -> std::io::Result<()> {
         self.journal
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .unwrap_or_else(recover_from_poison)
             .append(event, job_id)
     }
 }
@@ -123,7 +131,7 @@ impl<T: SimRelease> PortManager<T> {
             .shared
             .returned
             .wait_timeout_while(state, timeout, |s| s.transport.is_none())
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+            .unwrap_or_else(recover_from_poison);
         state.waiters -= 1;
         let Some(transport) = state.transport.take().filter(|_| !wait.timed_out()) else {
             drop(state);
@@ -240,7 +248,7 @@ impl<T: SimRelease> SmdrSource for SmdrHandle<T> {
             .wait_timeout_while(state, Duration::from_millis(timeout_ms), |s| {
                 s.transport.is_none()
             })
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+            .unwrap_or_else(recover_from_poison);
         match state.transport.as_mut() {
             Some(t) => t.recv(timeout_ms),
             None => Err(TransportError::Timeout),
