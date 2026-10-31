@@ -1,7 +1,11 @@
 use std::time::{Duration, Instant};
 
 pub fn recv_deadline(now: Instant, timeout_ms: u64) -> Option<Instant> {
-    now.checked_add(Duration::from_millis(timeout_ms))
+    deadline_after(now, Duration::from_millis(timeout_ms))
+}
+
+pub fn deadline_after(now: Instant, timeout: Duration) -> Option<Instant> {
+    now.checked_add(timeout)
 }
 
 pub fn remaining(deadline: Option<Instant>, now: Instant) -> Duration {
@@ -23,7 +27,7 @@ pub fn latest_instant() -> Instant {
 
 #[cfg(test)]
 mod tests {
-    use super::{latest_instant, recv_deadline, remaining};
+    use super::{deadline_after, latest_instant, recv_deadline, remaining};
     use std::time::{Duration, Instant};
 
     #[test]
@@ -31,6 +35,7 @@ mod tests {
         let latest = latest_instant();
         assert_eq!(recv_deadline(latest, 1_000), None);
         assert_eq!(recv_deadline(latest, u64::MAX), None);
+        assert_eq!(deadline_after(latest, Duration::from_secs(1)), None);
         assert_eq!(remaining(None, latest), Duration::MAX);
     }
 
