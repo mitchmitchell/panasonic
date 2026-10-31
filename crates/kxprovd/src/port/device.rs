@@ -524,14 +524,41 @@ impl ProgrammingLine {
     }
 
     fn hangup_flush_restore(&mut self) -> Result<(), super::DtrError> {
+        hang_up_then_restore(self, super::DTR_LOW_PERIOD)
+    }
+}
+
+pub(crate) trait HangupLine {
+    fn hang_up(&mut self) -> Result<(), super::DtrError>;
+    fn flush_input(&mut self) -> Result<(), super::DtrError>;
+    fn restore_speed(&mut self) -> Result<(), super::DtrError>;
+}
+
+pub(crate) fn hang_up_then_restore<L: HangupLine>(
+    line: &mut L,
+    low_period: std::time::Duration,
+) -> Result<(), super::DtrError> {
+    line.hang_up()?;
+    std::thread::sleep(low_period);
+    line.flush_input()?;
+    line.restore_speed()
+}
+
+impl HangupLine for ProgrammingLine {
+    fn hang_up(&mut self) -> Result<(), super::DtrError> {
         let fd = self.file.file();
         let mut t = termios::tcgetattr(fd).map_err(|e| super::DtrError::Hangup(e.to_string()))?;
         termios::cfsetspeed(&mut t, BaudRate::B0)
             .and_then(|()| termios::tcsetattr(fd, SetArg::TCSANOW, &t))
-            .map_err(|e| super::DtrError::Hangup(e.to_string()))?;
-        std::thread::sleep(super::DTR_LOW_PERIOD);
-        termios::tcflush(fd, termios::FlushArg::TCIFLUSH)
-            .map_err(|e| super::DtrError::Flush(e.to_string()))?;
+            .map_err(|e| super::DtrError::Hangup(e.to_string()))
+    }
+
+    fn flush_input(&mut self) -> Result<(), super::DtrError> {
+        termios::tcflush(self.file.file(), termios::FlushArg::TCIFLUSH)
+            .map_err(|e| super::DtrError::Flush(e.to_string()))
+    }
+
+    fn restore_speed(&mut self) -> Result<(), super::DtrError> {
         #[cfg(feature = "test-util")]
         let hook = self.restore_readback_hook.as_mut();
         #[cfg(not(feature = "test-util"))]
@@ -735,8 +762,55 @@ fn restore_line_speed(fd: &File, hook: Option<&mut ReadbackHook>) -> Result<(), 
 
 #[cfg(test)]
 mod tests {
-    use super::{read_slice_ms, SMDR_READ_SLICE_MS};
+    use super::{hang_up_then_restore, read_slice_ms, HangupLine, SMDR_READ_SLICE_MS};
+    use crate::port::DtrError;
     use std::time::Duration;
+
+    #[derive(Default)]
+    struct RecordingLine {
+        ops: Vec<&'static str>,
+        fail_flush: bool,
+    }
+
+    impl HangupLine for RecordingLine {
+        fn hang_up(&mut self) -> Result<(), DtrError> {
+            self.ops.push("b0_dtr_low");
+            Ok(())
+        }
+
+        fn flush_input(&mut self) -> Result<(), DtrError> {
+            self.ops.push("tciflush");
+            if self.fail_flush {
+                return Err(DtrError::Flush("flush failed".into()));
+            }
+            Ok(())
+        }
+
+        fn restore_speed(&mut self) -> Result<(), DtrError> {
+            self.ops.push("9600_dtr_high");
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn hangup_flushes_input_before_dtr_rises() {
+        let mut line = RecordingLine::default();
+        assert!(hang_up_then_restore(&mut line, Duration::ZERO).is_ok());
+        assert_eq!(line.ops, ["b0_dtr_low", "tciflush", "9600_dtr_high"]);
+    }
+
+    #[test]
+    fn a_failed_flush_leaves_dtr_low() {
+        let mut line = RecordingLine {
+            fail_flush: true,
+            ..RecordingLine::default()
+        };
+        assert!(matches!(
+            hang_up_then_restore(&mut line, Duration::ZERO),
+            Err(DtrError::Flush(_))
+        ));
+        assert_eq!(line.ops, ["b0_dtr_low", "tciflush"]);
+    }
 
     #[test]
     fn read_slice_rounds_up_and_clamps() {

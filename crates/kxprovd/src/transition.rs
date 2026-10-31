@@ -138,9 +138,9 @@ pub fn live_caller_id_digest(config: &Config, holder: &str) -> Result<String, Tr
     Ok(caller_id_wire_digest(&wire))
 }
 
-/// N2: entering Production — compare live 0x24/0x25 to latest **Production-mode** backup.
 pub const SET_MODE_HOLDER: &str = "set-mode-production-verify";
 
+/// N2: entering Production — compare live 0x24/0x25 to latest **Production-mode** backup.
 pub fn verify_enter_production(
     config: &Config,
     backups: &BackupStore,

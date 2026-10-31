@@ -158,3 +158,23 @@ fn serial_open_leases_the_port_under_the_callers_job_id() {
         "{records:?}"
     );
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn serial_open_refuses_a_link_baud_other_than_9600_before_leasing() {
+    let d = tempfile::tempdir().unwrap();
+    let s = d.path().join("signon.toml");
+    write_mode(&s, FIXTURE_SIGNON, 0o600);
+    let mut cfg = Config::load_from_etc(etc(d.path(), "serial", Some(&s))).unwrap();
+    let p = nix::pty::openpty(None, None).unwrap();
+    let _master = std::fs::File::from(p.master);
+    cfg.serial_device = nix::unistd::ttyname(&p.slave).unwrap();
+    std::fs::create_dir_all(&cfg.data_dir).unwrap();
+    cfg.timing.link_baud = 19_200;
+
+    let Err(err) = kxprovd::transport::open(&cfg, "job-baud") else {
+        panic!("a 19200 link_baud opened the shared port");
+    };
+    assert!(err.contains("link_baud 19200"), "{err}");
+    assert!(!cfg.data_dir.join("port-lease.jsonl").exists());
+}

@@ -52,6 +52,10 @@ serial_test = "3"
 trybuild = "1"
 
 [[test]]
+name = "leased_release_order_pty"
+required-features = ["test-util"]
+
+[[test]]
 name = "daemon"
 required-features = ["test-util"]
 
