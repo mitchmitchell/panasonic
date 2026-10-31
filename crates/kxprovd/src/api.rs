@@ -514,6 +514,8 @@ async fn submit_approval(
     }))
 }
 
+pub const APPLY_PREFLIGHT_HOLDER: &str = "apply-preflight-diff-verify";
+
 async fn set_mode(
     state: &ApiState,
     cred: crate::peer::PeerCred,
@@ -584,6 +586,7 @@ async fn apply_plan(
 
     verify_live_diff_hash(
         &state.config,
+        APPLY_PREFLIGHT_HOLDER,
         profile,
         &state.plans,
         &params.plan_id,
@@ -807,7 +810,7 @@ mod apply_plan_tests {
         let kind = FieldKind::CidName;
         let pwd = state.config.password.clone();
         let rec = {
-            let transport = open(&state.config).unwrap();
+            let transport = open(&state.config, "api-test").unwrap();
             let mut client = crate::transport::client(&state.config, transport, Access::ReadOnly);
             client.login(&pwd).unwrap();
             let base = client.read_table(kind.table()).unwrap();
@@ -860,7 +863,7 @@ mod apply_plan_tests {
         let kind = FieldKind::CidName;
         let pwd = state.config.password.clone();
         let rec = {
-            let transport = open(&state.config).unwrap();
+            let transport = open(&state.config, "api-test").unwrap();
             let mut client = crate::transport::client(&state.config, transport, Access::ReadOnly);
             client.login(&pwd).unwrap();
             let base = client.read_table(kind.table()).unwrap();

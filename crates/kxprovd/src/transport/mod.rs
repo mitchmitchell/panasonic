@@ -68,7 +68,7 @@ impl Transport for AnyTransport {
     }
 }
 
-pub fn open(config: &Config) -> Result<AnyTransport, String> {
+pub fn open(config: &Config, job_id: &str) -> Result<AnyTransport, String> {
     match config.transport {
         TransportKind::Sim => {
             #[cfg(feature = "inprocess-sim")]
@@ -84,16 +84,16 @@ pub fn open(config: &Config) -> Result<AnyTransport, String> {
                 Err("in-process sim transport not enabled in this build".into())
             }
         }
-        TransportKind::Serial => open_serial(config),
+        TransportKind::Serial => open_serial(config, job_id),
     }
 }
 
 #[cfg(target_os = "linux")]
-fn open_serial(config: &Config) -> Result<AnyTransport, String> {
+fn open_serial(config: &Config, job_id: &str) -> Result<AnyTransport, String> {
     open_leased(
         &config.serial_device,
         &config.data_dir.join("port-lease.jsonl"),
-        &crate::queue::next_job_id(),
+        job_id,
         config.timing.link_baud,
         config.timing.send_bound_ms,
     )
@@ -101,7 +101,7 @@ fn open_serial(config: &Config) -> Result<AnyTransport, String> {
 }
 
 #[cfg(not(target_os = "linux"))]
-fn open_serial(_config: &Config) -> Result<AnyTransport, String> {
+fn open_serial(_config: &Config, _job_id: &str) -> Result<AnyTransport, String> {
     Err("serial transport requires Linux".into())
 }
 

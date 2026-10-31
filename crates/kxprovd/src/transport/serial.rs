@@ -1,5 +1,3 @@
-//! Linux serial transport via `tokio-serial` (blocking read in the worker task).
-
 use crate::port::device::{LeasedDevice, SmdrLineOptions};
 use crate::port::journal::LeaseJournal;
 use crate::port::{DeviceLine, PortManager, DEFAULT_LEASE_TIMEOUT, DEFAULT_MAX_LEASE_WAITERS};

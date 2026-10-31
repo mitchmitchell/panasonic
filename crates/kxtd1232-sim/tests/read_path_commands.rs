@@ -62,7 +62,5 @@ fn a_full_read_session_sends_only_read_clock_probe_and_end_binary_commands() {
             "read path sent command outside 01/03/08/0B: {f:02X?}"
         );
     }
-    for f in text {
-        assert_eq!(f.as_slice(), b"BYE\r\n", "after end-binary: {f:02X?}");
-    }
+    assert_eq!(text, [b"BYE\r\n".to_vec()], "after end-binary");
 }

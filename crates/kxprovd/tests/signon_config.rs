@@ -4,7 +4,7 @@
 )]
 
 use kxprov_api::{DiffHash, PlanId, Profile, TokenId};
-use kxprovd::apply::{run_apply, ApplyError};
+use kxprovd::apply::{run_apply, ApplyError, ApplyJob};
 use kxprovd::backup::BackupStore;
 use kxprovd::config::{Config, ConfigError, TransportKind};
 use kxprovd::plan_store::PlanStore;
@@ -114,10 +114,47 @@ fn apply_is_refused_on_the_serial_transport_before_any_io() {
         Profile::Prod,
         &plans,
         &backups,
-        &PlanId("0".repeat(32)),
-        &DiffHash("0".repeat(64)),
-        &TokenId("t".into()),
+        ApplyJob {
+            job_id: "job-test",
+            plan_id: &PlanId("0".repeat(32)),
+            diff_hash: &DiffHash("0".repeat(64)),
+            token: &TokenId("t".into()),
+        },
     )
     .unwrap_err();
     assert!(matches!(err, ApplyError::NotSim), "{err}");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn serial_open_leases_the_port_under_the_callers_job_id() {
+    use kxprovd::port::journal::{LeaseEvent, LeaseJournal};
+    let d = tempfile::tempdir().unwrap();
+    let s = d.path().join("signon.toml");
+    write_mode(&s, FIXTURE_SIGNON, 0o600);
+    let mut cfg = Config::load_from_etc(etc(d.path(), "serial", Some(&s))).unwrap();
+    let p = nix::pty::openpty(None, None).unwrap();
+    let _master = std::fs::File::from(p.master);
+    cfg.serial_device = nix::unistd::ttyname(&p.slave).unwrap();
+    std::fs::create_dir_all(&cfg.data_dir).unwrap();
+    let journal = cfg.data_dir.join("port-lease.jsonl");
+
+    let transport = kxprovd::transport::open(&cfg, "job-worker-42").unwrap();
+    drop(transport);
+
+    let records = LeaseJournal::new(&journal).read_all().unwrap();
+    let granted: Vec<_> = records
+        .iter()
+        .filter(|r| r.event == LeaseEvent::Granted)
+        .map(|r| r.job_id.as_str())
+        .collect();
+    assert_eq!(granted, ["job-worker-42"]);
+    assert!(
+        records.iter().any(|r| r.event == LeaseEvent::Released),
+        "{records:?}"
+    );
+    assert!(
+        records.iter().all(|r| r.job_id == "job-worker-42"),
+        "{records:?}"
+    );
 }
