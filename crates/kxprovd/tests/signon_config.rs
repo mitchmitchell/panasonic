@@ -1,4 +1,7 @@
-#![allow(clippy::unwrap_used)] // tests: a panic is the failure report
+#![allow(
+    clippy::unwrap_used,
+    reason = "a failed test setup step should panic the test"
+)]
 
 use kxprov_api::{DiffHash, PlanId, Profile, TokenId};
 use kxprovd::apply::{run_apply, ApplyError};

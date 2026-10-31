@@ -51,10 +51,28 @@ pub trait Transport {
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum LineLevel {
+    High,
+    Low,
+    #[default]
+    Unknown,
+}
+
+impl LineLevel {
+    pub fn from_read<E>(read: Result<bool, E>) -> Self {
+        match read {
+            Ok(true) => Self::High,
+            Ok(false) => Self::Low,
+            Err(_) => Self::Unknown,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ModemLines {
-    pub dsr: Option<bool>,
-    pub cts: Option<bool>,
-    pub dcd: Option<bool>,
+    pub dsr: LineLevel,
+    pub cts: LineLevel,
+    pub dcd: LineLevel,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]

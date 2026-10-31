@@ -1,17 +1,20 @@
-#![allow(clippy::unwrap_used)] // tests: a panic is the failure report
+#![allow(
+    clippy::unwrap_used,
+    reason = "a failed test setup step should panic the test"
+)]
 
 use kxtd1232::frame::Access;
 use kxtd1232::session::{Login, LoginState, XON};
-use kxtd1232::{Client, Error, ModemLines, SignOn, Timing, Transport, TransportError};
+use kxtd1232::{Client, Error, LineLevel, ModemLines, SignOn, Timing, Transport, TransportError};
 use std::collections::VecDeque;
 
 const PROMPT: &str = "<FIXTURE_PROMPT>";
 const MODE_START: &str = "<FIXTURE_MODE_START>";
 const PASSWORD: &str = "<FIXTURE_PW>";
 const LINES: ModemLines = ModemLines {
-    dsr: Some(true),
-    cts: Some(false),
-    dcd: None,
+    dsr: LineLevel::High,
+    cts: LineLevel::Low,
+    dcd: LineLevel::Unknown,
 };
 
 fn fixture_signon() -> SignOn {
@@ -224,4 +227,15 @@ fn wake_is_only_pending_before_xon() {
     assert_eq!(l.state(), &LoginState::WaitPrompt);
     assert!(!l.wake_pending());
     assert_eq!(l.wake(), b"");
+}
+
+#[test]
+fn line_level_maps_read_errors_to_unknown() {
+    assert_eq!(LineLevel::from_read::<()>(Ok(true)), LineLevel::High);
+    assert_eq!(LineLevel::from_read::<()>(Ok(false)), LineLevel::Low);
+    assert_eq!(
+        LineLevel::from_read(Err("ioctl failed")),
+        LineLevel::Unknown
+    );
+    assert_eq!(ModemLines::default().dsr, LineLevel::Unknown);
 }

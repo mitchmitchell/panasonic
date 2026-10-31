@@ -1,6 +1,6 @@
 //! Linux serial transport via `tokio-serial` (blocking read in the worker task).
 
-use kxtd1232::ModemLines;
+use kxtd1232::{LineLevel, ModemLines};
 use kxtd1232::{LinkDownError, Transport, TransportError};
 use std::io::{Read, Write};
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
@@ -35,7 +35,9 @@ impl TokioSerialTransport {
             .open_native_async()
             .map_err(|e| e.to_string())?;
         if !port.exclusive() {
-            return Err("serial: exclusive open (TIOCEXCL and flock) not in effect".into());
+            return Err(
+                "serial: TIOCEXCL not in effect after open (flock tracked in #64 item 1)".into(),
+            );
         }
         Ok(Self {
             port,
@@ -119,23 +121,39 @@ impl Transport for TokioSerialTransport {
     }
 
     fn cycle_dtr(&mut self) -> Result<bool, TransportError> {
-        self.port
-            .write_data_terminal_ready(false)
-            .map_err(Self::line_error)?;
-        std::thread::sleep(Duration::from_millis(DTR_DROP_MS));
-        self.port
-            .write_data_terminal_ready(true)
-            .map_err(Self::line_error)?;
+        cycle_dtr_port(&mut self.port, DTR_DROP_MS).map_err(Self::line_error)?;
         Ok(true)
     }
 
     fn modem_lines(&mut self) -> ModemLines {
         ModemLines {
-            dsr: self.port.read_data_set_ready().ok(),
-            cts: self.port.read_clear_to_send().ok(),
-            dcd: self.port.read_carrier_detect().ok(),
+            dsr: LineLevel::from_read(self.port.read_data_set_ready()),
+            cts: LineLevel::from_read(self.port.read_clear_to_send()),
+            dcd: LineLevel::from_read(self.port.read_carrier_detect()),
         }
     }
+}
+
+pub(crate) trait DtrPort {
+    fn set_dtr(&mut self, level: bool) -> tokio_serial::Result<()>;
+    fn flush_input(&mut self) -> tokio_serial::Result<()>;
+}
+
+impl DtrPort for tokio_serial::SerialStream {
+    fn set_dtr(&mut self, level: bool) -> tokio_serial::Result<()> {
+        self.write_data_terminal_ready(level)
+    }
+
+    fn flush_input(&mut self) -> tokio_serial::Result<()> {
+        self.clear(tokio_serial::ClearBuffer::Input)
+    }
+}
+
+pub(crate) fn cycle_dtr_port<P: DtrPort>(port: &mut P, hold_ms: u64) -> tokio_serial::Result<()> {
+    port.set_dtr(false)?;
+    std::thread::sleep(Duration::from_millis(hold_ms));
+    port.set_dtr(true)?;
+    port.flush_input()
 }
 
 pub(crate) fn port_holders(
@@ -214,7 +232,10 @@ pub(crate) fn recv_with_poll<R: Read>(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[allow(
+    clippy::unwrap_used,
+    reason = "a failed test setup step should panic the test"
+)]
 mod tests {
     use super::*;
     use std::io::{ErrorKind, Read, Write};
@@ -254,6 +275,47 @@ mod tests {
         fn flush(&mut self) -> std::io::Result<()> {
             Ok(())
         }
+    }
+
+    #[derive(Default)]
+    struct RecordingPort {
+        ops: Vec<&'static str>,
+        fail_flush: bool,
+    }
+
+    impl DtrPort for RecordingPort {
+        fn set_dtr(&mut self, level: bool) -> tokio_serial::Result<()> {
+            self.ops.push(if level { "dtr_high" } else { "dtr_low" });
+            Ok(())
+        }
+
+        fn flush_input(&mut self) -> tokio_serial::Result<()> {
+            self.ops.push("tcflush_input");
+            if self.fail_flush {
+                return Err(tokio_serial::Error::new(
+                    tokio_serial::ErrorKind::Unknown,
+                    "flush failed",
+                ));
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn dtr_cycle_flushes_input_after_dtr_rises() {
+        let mut port = RecordingPort::default();
+        cycle_dtr_port(&mut port, 0).unwrap();
+        assert_eq!(port.ops, ["dtr_low", "dtr_high", "tcflush_input"]);
+    }
+
+    #[test]
+    fn dtr_cycle_reports_a_failed_flush() {
+        let mut port = RecordingPort {
+            fail_flush: true,
+            ..RecordingPort::default()
+        };
+        assert!(cycle_dtr_port(&mut port, 0).is_err());
+        assert_eq!(port.ops, ["dtr_low", "dtr_high", "tcflush_input"]);
     }
 
     #[test]

@@ -16,7 +16,7 @@
 
 After XON, login sends the normal CR LF that is part of the sign-on flow. The wake is different: it is only for a line that stays silent.
 
-1. Every sign-on starts with a DTR drop (250 ms) and rise (spec §2.2 amendment 3), even if the line isn't silent.
+1. Every sign-on starts with a DTR drop (250 ms) and rise (spec §2.2 amendment 3), even if the line isn't silent. After the rise, input is flushed (tcflush TCIFLUSH), so the trace counts only this sign-on's bytes.
 2. The client then waits `wake_interval_ms` (1.5 s) for XON.
 3. If that fresh DTR edge brings no XON, it sends **one** unsolicited CR LF, then waits the normal reply timeout. It never sends another: an extra CR LF may count as an empty password attempt.
 
@@ -28,13 +28,13 @@ When login fails, `Client::login_trace` records:
 - bytes received;
 - whether XON arrived;
 - whether DTR was cycled and the wake sent;
-- DSR, CTS and DCD, where the port reports them.
+- DSR, CTS and DCD, each `High`, `Low` or `Unknown` (`LineLevel`; a failed modem-line read is `Unknown`).
 
 kxprovd logs these as `login failed`. The trace holds no sent bytes, so the password is never logged.
 
 ## Port exclusivity
 
-Before opening, kxprovd refuses the device if any other process holds it, found by a /proc fd scan like fuser. It then opens with TIOCEXCL and an exclusive flock (serialport `exclusive(true)`) and checks that exclusivity is in effect. The S5 PortManager lease replaces the pre-open scan; that is tracked in #63.
+Before opening, kxprovd refuses the device if any other process holds it, found by a /proc fd scan like fuser. It then opens with TIOCEXCL (serialport `exclusive(true)`) and checks that TIOCEXCL is in effect. Adding a real flock is #64 item 1. The S5 PortManager lease replaces the pre-open scan; that is tracked in #63.
 
 ## Apply stays simulator-only
 
