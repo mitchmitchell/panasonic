@@ -50,6 +50,36 @@ pub trait PortRelease: Transport {
     fn drop_dtr(&mut self) -> Result<(), DtrError>;
 }
 
+pub trait LeaseLine {
+    fn end_lease(
+        &mut self,
+        mode: SessionMode,
+        step_timeout: Duration,
+    ) -> Result<(), PortReleaseError>;
+}
+
+impl<T: PortRelease> LeaseLine for T {
+    fn end_lease(
+        &mut self,
+        mode: SessionMode,
+        step_timeout: Duration,
+    ) -> Result<(), PortReleaseError> {
+        end_session(self, mode, step_timeout)
+    }
+}
+
+impl LeaseLine for () {
+    fn end_lease(
+        &mut self,
+        _mode: SessionMode,
+        _step_timeout: Duration,
+    ) -> Result<(), PortReleaseError> {
+        Ok(())
+    }
+}
+
+pub type DeviceArbiter = PortManager<()>;
+
 impl PortRelease for SimTransport {
     fn drop_dtr(&mut self) -> Result<(), DtrError> {
         self.reconnect();
@@ -189,30 +219,6 @@ pub enum LeasedOpenError {
     Device(device::DeviceError),
 }
 
-pub struct DeviceLine;
-
-impl Transport for DeviceLine {
-    fn send(&mut self, _data: &[u8]) -> Result<(), TransportError> {
-        Err(TransportError::NothingWritten(
-            "the lease only arbitrates the device; bytes go through the leased device".into(),
-        ))
-    }
-
-    fn recv(&mut self, _timeout_ms: u64) -> Result<Vec<u8>, TransportError> {
-        Err(TransportError::Timeout)
-    }
-
-    fn now_ms(&mut self) -> u64 {
-        0
-    }
-}
-
-impl PortRelease for DeviceLine {
-    fn drop_dtr(&mut self) -> Result<(), DtrError> {
-        Ok(())
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PortMode {
     Smdr,
@@ -267,11 +273,11 @@ impl<T> Shared<T> {
     }
 }
 
-pub struct PortManager<T: PortRelease> {
+pub struct PortManager<T: LeaseLine> {
     shared: Arc<Shared<T>>,
 }
 
-impl<T: PortRelease> PortManager<T> {
+impl<T: LeaseLine> PortManager<T> {
     pub fn new(transport: T, journal: impl LeaseLog + 'static, max_waiters: usize) -> Self {
         Self::with_release_step_timeout(
             transport,
@@ -444,8 +450,10 @@ impl<T: PortRelease> PortManager<T> {
         device::ProgrammingLine::open(path, options, lock, device::PROGRAMMING_SEND_BOUND_MS)
             .map(device::ProgrammingDevice::new)
     }
+}
 
-    #[cfg(target_os = "linux")]
+#[cfg(target_os = "linux")]
+impl DeviceArbiter {
     pub fn open_leased_device(
         &self,
         job_id: &str,
@@ -453,7 +461,7 @@ impl<T: PortRelease> PortManager<T> {
         path: &std::path::Path,
         options: device::SmdrLineOptions,
         send_bound_ms: u64,
-    ) -> Result<device::LeasedDevice<T>, LeasedOpenError> {
+    ) -> Result<device::LeasedDevice, LeasedOpenError> {
         let lease = self
             .request_lease(job_id, timeout)
             .map_err(LeasedOpenError::Lease)?;
@@ -474,14 +482,14 @@ impl<T: PortRelease> PortManager<T> {
     }
 }
 
-pub struct ProgrammingLease<T: PortRelease> {
+pub struct ProgrammingLease<T: LeaseLine> {
     shared: Arc<Shared<T>>,
     transport: Option<T>,
     job_id: String,
     session: SessionMode,
 }
 
-impl<T: PortRelease> ProgrammingLease<T> {
+impl<T: LeaseLine> ProgrammingLease<T> {
     pub fn session_mode(&self) -> SessionMode {
         self.session
     }
@@ -498,11 +506,7 @@ impl<T: PortRelease> ProgrammingLease<T> {
         let Some(mut transport) = self.transport.take() else {
             return Ok(());
         };
-        let cycled = end_session(
-            &mut transport,
-            self.session,
-            self.shared.release_step_timeout,
-        );
+        let cycled = transport.end_lease(self.session, self.shared.release_step_timeout);
         self.session = SessionMode::SignedOut;
         self.shared.restore(transport);
         let journaled = self
@@ -543,7 +547,7 @@ impl<T: PortRelease> Transport for ProgrammingLease<T> {
     }
 }
 
-impl<T: PortRelease> Drop for ProgrammingLease<T> {
+impl<T: LeaseLine> Drop for ProgrammingLease<T> {
     fn drop(&mut self) {
         if let Err(e) = self.release_inner() {
             tracing::error!(job_id = %self.job_id, error = %e, "programming lease release failed");
@@ -595,7 +599,7 @@ pub enum PortReleaseError {
     Journal(std::io::Error),
 }
 
-pub struct SmdrHandle<T: PortRelease> {
+pub struct SmdrHandle<T: LeaseLine> {
     shared: Arc<Shared<T>>,
 }
 

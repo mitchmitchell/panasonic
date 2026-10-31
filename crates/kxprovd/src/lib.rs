@@ -226,8 +226,10 @@ impl Daemon {
             TransportKind::Serial => "serial".into(),
         };
 
+        let port = transport::device_arbiter(&config);
         let worker_ctx = Arc::new(worker::WorkerCtx {
             config: config.clone(),
+            port: Arc::clone(&port),
             profile: Arc::clone(&profile),
             plans: PlanStore::new(config.data_dir.join("plans"))?,
             backups: BackupStore::new(config.data_dir.join("backups"))?,
@@ -242,6 +244,7 @@ impl Daemon {
         let q = Arc::clone(&queue);
         let api_state = Arc::new(ApiState {
             config: config.clone(),
+            port,
             profile: Arc::clone(&profile),
             transport_label,
             gates,
@@ -401,8 +404,10 @@ impl Daemon {
             TransportKind::Serial => "serial".into(),
         };
 
+        let port = transport::device_arbiter(&config);
         let worker_ctx = Arc::new(worker::WorkerCtx {
             config: config.clone(),
+            port: Arc::clone(&port),
             profile: Arc::clone(&profile),
             plans: PlanStore::new(config.data_dir.join("plans"))?,
             backups: BackupStore::new(config.data_dir.join("backups"))?,
@@ -417,6 +422,7 @@ impl Daemon {
         let q = Arc::clone(&queue);
         let api_state = Arc::new(ApiState {
             config: config.clone(),
+            port,
             profile: Arc::clone(&profile),
             transport_label,
             gates,

@@ -1,46 +1,17 @@
 use crate::port::device::{LeasedDevice, SmdrLineOptions};
-use crate::port::journal::LeaseJournal;
-use crate::port::{DeviceLine, PortManager, DEFAULT_LEASE_TIMEOUT, DEFAULT_MAX_LEASE_WAITERS};
+use crate::port::{DeviceArbiter, DEFAULT_LEASE_TIMEOUT};
 use kxtd1232::{LinkDownError, TransportError};
-use std::collections::HashMap;
 use std::io::{Read, Write};
-use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 pub const SHARED_PORT_BAUD: u32 = 9600;
 
-pub type SerialTransport = LeasedDevice<DeviceLine>;
-
-type Registry = Mutex<HashMap<PathBuf, Arc<PortManager<DeviceLine>>>>;
-
-fn registry() -> &'static Registry {
-    static PORTS: OnceLock<Registry> = OnceLock::new();
-    PORTS.get_or_init(Registry::default)
-}
-
-const REGISTRY_POISON_REASON: &str = "the registry critical section only inserts or clones an Arc, so a panic cannot leave a half-applied entry";
-
-pub fn port_manager(device: &Path, journal: &Path) -> Arc<PortManager<DeviceLine>> {
-    let mut ports = registry().lock().unwrap_or_else(|poisoned| {
-        tracing::warn!(
-            reason = REGISTRY_POISON_REASON,
-            "port registry lock was poisoned; continuing"
-        );
-        poisoned.into_inner()
-    });
-    Arc::clone(ports.entry(device.to_path_buf()).or_insert_with(|| {
-        Arc::new(PortManager::new(
-            DeviceLine,
-            LeaseJournal::new(journal),
-            DEFAULT_MAX_LEASE_WAITERS,
-        ))
-    }))
-}
+pub type SerialTransport = LeasedDevice;
 
 pub fn open_leased(
+    port: &DeviceArbiter,
     device: &Path,
-    journal: &Path,
     job_id: &str,
     baud: u32,
     send_bound_ms: u64,
@@ -50,15 +21,14 @@ pub fn open_leased(
             "serial: link_baud {baud} is not {SHARED_PORT_BAUD}, the speed the shared SMDR and programming port runs at"
         ));
     }
-    port_manager(device, journal)
-        .open_leased_device(
-            job_id,
-            DEFAULT_LEASE_TIMEOUT,
-            device,
-            SmdrLineOptions::default(),
-            send_bound_ms,
-        )
-        .map_err(|e| format!("serial: {}: {e}", device.display()))
+    port.open_leased_device(
+        job_id,
+        DEFAULT_LEASE_TIMEOUT,
+        device,
+        SmdrLineOptions::default(),
+        send_bound_ms,
+    )
+    .map_err(|e| format!("serial: {}: {e}", device.display()))
 }
 
 pub(crate) fn send_all_port<W: Write>(

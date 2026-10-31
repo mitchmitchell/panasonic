@@ -8,8 +8,7 @@ error[E0277]: the trait bound `SmdrHandle<SimTransport>: kxtd1232::Transport` is
    |
    = help: the following other types implement trait `kxtd1232::Transport`:
              AnyTransport
-             DeviceLine
-             LeasedDevice<T>
+             LeasedDevice
              ProgrammingDevice<'_>
              ProgrammingLease<T>
              ProgrammingLine
