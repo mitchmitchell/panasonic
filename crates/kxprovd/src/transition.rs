@@ -128,7 +128,7 @@ pub fn caller_id_wire_digest(wire: &std::collections::HashMap<u8, Vec<u8>>) -> S
 pub fn live_caller_id_digest(config: &Config) -> Result<String, TransitionError> {
     let transport = open(config).map_err(TransitionError::Transport)?;
     let mut client = crate::transport::client(config, transport, kxtd1232::frame::Access::ReadOnly);
-    client.login(&config.password)?;
+    crate::transport::login(&mut client, &config.password)?;
     let mut wire = std::collections::HashMap::new();
     for t in CALLER_ID_TABLES {
         let _ = spec(t).ok_or(TransitionError::Mismatch)?;

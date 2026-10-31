@@ -144,7 +144,7 @@ async fn run_read(ctx: &WorkerCtx, params: kxprov_api::ReadFieldsParams) -> JobO
     let first = params.first;
     let count = params.count;
     let rows = match with_client(ctx, |c| {
-        c.login(&pwd)?;
+        crate::transport::login(c, &pwd)?;
         let raw = c.read_records(kind.table(), first, count)?;
         let _ = c.end_binary();
         Ok(raw)
@@ -197,7 +197,7 @@ async fn run_plan(
     }
     let pwd = ctx.config.password.clone();
     let plan = match with_client(ctx, |c| {
-        c.login(&pwd)?;
+        crate::transport::login(c, &pwd)?;
         let base = c.read_table(kind.table())?;
         let plan = build_plan(kind.table(), &base, &[patch], Granularity::Chunk)?;
         let _ = c.end_binary();

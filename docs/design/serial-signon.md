@@ -14,7 +14,27 @@
 
 ## CR LF wake
 
-Login normally sends CR LF after the PBX's XON (DTR edge). If nothing arrives for `wake_interval_ms` (1.5 s) before the password prompt, the client sends an unsolicited CR LF, at most `wake_attempts` (3) times, and then waits the normal reply timeout. Both values are defaults in `kxtd1232::Timing`.
+After XON, login sends the normal CR LF that is part of the sign-on flow. The wake is different: it is only for a line that stays silent.
+
+1. After the port opens, the client waits `wake_interval_ms` (1.5 s) for XON.
+2. If no XON arrives, it drops DTR for 250 ms, raises it again, and waits another `wake_interval_ms`.
+3. If that fresh DTR edge also brings no XON, it sends **one** unsolicited CR LF, then waits the normal reply timeout. It never sends another: an extra CR LF may count as an empty password attempt.
+
+A transport that can't drive DTR (`Transport::cycle_dtr` returns `false`) never sends the wake. Confirming this on the real unit is tracked in #62.
+
+## Login timeout trace
+
+When login fails, `Client::login_trace` records:
+- bytes received;
+- whether XON arrived;
+- whether DTR was cycled and the wake sent;
+- DSR, CTS and DCD, where the port reports them.
+
+kxprovd logs these as `login failed`. The trace holds no sent bytes, so the password is never logged.
+
+## Port exclusivity
+
+Before opening, kxprovd refuses the device if any other process holds it, found by a /proc fd scan like fuser. It then opens with TIOCEXCL and an exclusive flock (serialport `exclusive(true)`) and checks that exclusivity is in effect. The S5 PortManager lease replaces the pre-open scan; that is tracked in #63.
 
 ## Apply stays simulator-only
 

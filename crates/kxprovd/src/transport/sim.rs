@@ -36,4 +36,12 @@ impl Transport for SimTransportBridge {
     fn now_ms(&mut self) -> u64 {
         self.inner.now_ms()
     }
+
+    fn cycle_dtr(&mut self) -> Result<bool, TransportError> {
+        self.inner.cycle_dtr()
+    }
+
+    fn modem_lines(&mut self) -> kxtd1232::ModemLines {
+        self.inner.modem_lines()
+    }
 }

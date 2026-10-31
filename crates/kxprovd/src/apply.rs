@@ -63,7 +63,7 @@ pub fn run_apply(
     let pwd = config.password.clone();
     let transport = open(config).map_err(ApplyError::Transport)?;
     let mut client = crate::transport::client(config, transport, Access::ReadWrite);
-    client.login(&pwd)?;
+    crate::transport::login(&mut client, &pwd)?;
     for w in &writes {
         apply_one_write(&mut client, w)?;
     }

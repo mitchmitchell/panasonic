@@ -32,6 +32,13 @@ pub enum TransportError {
     NothingWritten(String),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WakeStep {
+    CycleDtr,
+    CrLf,
+    Done,
+}
+
 /// Byte transport plus clock. Implemented by the simulator and (A3) the daemon's port.
 pub trait Transport {
     /// Write all of `data`. Return [`TransportError::NothingWritten`] only when no byte
@@ -42,6 +49,28 @@ pub trait Transport {
     fn recv(&mut self, timeout_ms: u64) -> Result<Vec<u8>, TransportError>;
     /// Monotonic time in milliseconds.
     fn now_ms(&mut self) -> u64;
+    fn cycle_dtr(&mut self) -> Result<bool, TransportError> {
+        Ok(false)
+    }
+    fn modem_lines(&mut self) -> ModemLines {
+        ModemLines::default()
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ModemLines {
+    pub dsr: Option<bool>,
+    pub cts: Option<bool>,
+    pub dcd: Option<bool>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LoginTrace {
+    pub bytes_received: usize,
+    pub xon_seen: bool,
+    pub dtr_cycled: bool,
+    pub wake_sent: bool,
+    pub lines: ModemLines,
 }
 
 /// Minimum post-reply turnaround margin (Tester #2: 0 ms with high baud shrinks cutoff).
@@ -78,7 +107,6 @@ pub struct Timing {
     /// Upper bound for a single serial [`Transport::send`] (daemon maps to line I/O).
     pub send_bound_ms: u64,
     pub wake_interval_ms: u64,
-    pub wake_attempts: u32,
 }
 
 /// Shortest reply frame (an ack), for the post-send cutoff.
@@ -144,7 +172,6 @@ impl Default for Timing {
             reply_guard_ms: MIN_REPLY_GUARD_MS,
             send_bound_ms: 5_000,
             wake_interval_ms: 1_500,
-            wake_attempts: 3,
         }
     }
 }
@@ -203,6 +230,7 @@ pub struct Client<T: Transport> {
     /// drain cannot finish, so a late ack is never matched to the end-binary request.
     needs_drain: bool,
     signon: SignOn,
+    login_trace: Option<LoginTrace>,
 }
 
 impl<T: Transport> Client<T> {
@@ -222,6 +250,7 @@ impl<T: Transport> Client<T> {
             drained: Vec::new(),
             needs_drain: false,
             signon: SignOn::default(),
+            login_trace: None,
         }
     }
 
@@ -229,6 +258,10 @@ impl<T: Transport> Client<T> {
     pub fn with_signon(mut self, signon: SignOn) -> Self {
         self.signon = signon;
         self
+    }
+
+    pub fn login_trace(&self) -> Option<&LoginTrace> {
+        self.login_trace.as_ref()
     }
 
     fn require_session(&self) -> Result<(), Error> {
@@ -309,16 +342,26 @@ impl<T: Transport> Client<T> {
     /// Text login to binary mode, within `login_timeout_ms` overall and at most
     /// [`crate::session::MAX_LINES`] lines.
     pub fn login(&mut self, password: &str) -> Result<(), Error> {
+        let mut trace = LoginTrace::default();
+        let result = self.login_traced(password, &mut trace);
+        if result.is_err() {
+            trace.lines = self.t.modem_lines();
+        }
+        self.login_trace = Some(trace);
+        result
+    }
+
+    fn login_traced(&mut self, password: &str, trace: &mut LoginTrace) -> Result<(), Error> {
         let mut sm = Login::with_signon(password, self.signon.clone()).map_err(Error::Login)?;
         let start = self.t.now_ms();
         let limit = self.timing.login_timeout_ms;
-        let mut wakes = 0u32;
+        let mut wake = WakeStep::CycleDtr;
         while !sm.state().is_terminal() {
             let elapsed = self.t.now_ms().saturating_sub(start);
             if elapsed >= limit {
                 return Err(Error::Login(LoginFailure::TimedOut { ms: limit }));
             }
-            let can_wake = sm.wake_pending() && wakes < self.timing.wake_attempts;
+            let can_wake = sm.wake_pending() && wake != WakeStep::Done;
             let wait = if can_wake {
                 self.timing.wake_interval_ms
             } else {
@@ -327,14 +370,34 @@ impl<T: Transport> Client<T> {
             let data = match self.recv(wait.min(limit - elapsed)) {
                 Ok(d) => d,
                 Err(Error::Timeout) if can_wake => {
-                    wakes += 1;
-                    let out = sm.wake();
-                    self.send(&out)?;
+                    wake = match wake {
+                        WakeStep::CycleDtr => {
+                            let cycled = self.t.cycle_dtr().map_err(|e| match e {
+                                TransportError::Timeout => Error::Timeout,
+                                TransportError::LinkDown(e) => Error::LinkDown(e.detail),
+                                TransportError::NothingWritten(s) => Error::LinkDown(s),
+                            })?;
+                            trace.dtr_cycled = cycled;
+                            if cycled {
+                                WakeStep::CrLf
+                            } else {
+                                WakeStep::Done
+                            }
+                        }
+                        WakeStep::CrLf | WakeStep::Done => {
+                            let out = sm.wake();
+                            self.send(&out)?;
+                            trace.wake_sent = true;
+                            WakeStep::Done
+                        }
+                    };
                     continue;
                 }
                 Err(e) => return Err(e),
             };
+            trace.bytes_received += data.len();
             let out = sm.feed(&data);
+            trace.xon_seen |= data.contains(&crate::session::XON);
             if !out.is_empty() {
                 self.send(&out)?;
             }

@@ -50,6 +50,22 @@ impl Transport for AnyTransport {
             Self::Serial(t) => t.now_ms(),
         }
     }
+
+    fn cycle_dtr(&mut self) -> Result<bool, kxtd1232::TransportError> {
+        match self {
+            #[cfg(feature = "inprocess-sim")]
+            Self::Sim(t) => t.as_mut().cycle_dtr(),
+            Self::Serial(t) => t.cycle_dtr(),
+        }
+    }
+
+    fn modem_lines(&mut self) -> kxtd1232::ModemLines {
+        match self {
+            #[cfg(feature = "inprocess-sim")]
+            Self::Sim(t) => t.as_mut().modem_lines(),
+            Self::Serial(t) => t.modem_lines(),
+        }
+    }
 }
 
 pub fn open(config: &Config) -> Result<AnyTransport, String> {
@@ -75,6 +91,24 @@ pub fn open(config: &Config) -> Result<AnyTransport, String> {
         )
         .map(AnyTransport::Serial),
     }
+}
+
+pub fn login(client: &mut Client<AnyTransport>, password: &str) -> Result<(), kxtd1232::Error> {
+    let result = client.login(password);
+    if let (Err(e), Some(t)) = (&result, client.login_trace()) {
+        tracing::warn!(
+            error = %e,
+            bytes_received = t.bytes_received,
+            xon_seen = t.xon_seen,
+            dtr_cycled = t.dtr_cycled,
+            wake_sent = t.wake_sent,
+            dsr = ?t.lines.dsr,
+            cts = ?t.lines.cts,
+            dcd = ?t.lines.dcd,
+            "login failed"
+        );
+    }
+    result
 }
 
 pub fn client(config: &Config, transport: AnyTransport, access: Access) -> Client<AnyTransport> {

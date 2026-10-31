@@ -82,7 +82,7 @@ impl Login {
     }
 
     pub fn wake_pending(&self) -> bool {
-        matches!(self.state, LoginState::WaitXon | LoginState::WaitPrompt)
+        self.state == LoginState::WaitXon
     }
 
     pub fn wake(&mut self) -> Vec<u8> {

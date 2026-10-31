@@ -18,9 +18,7 @@ pub fn verify_live_diff_hash(
     }
     let transport = open(config).map_err(|_| PlanError::NotFound)?;
     let mut client = crate::transport::client(config, transport, kxtd1232::frame::Access::ReadOnly);
-    client
-        .login(&config.password)
-        .map_err(|_| PlanError::NotFound)?;
+    crate::transport::login(&mut client, &config.password).map_err(|_| PlanError::NotFound)?;
     let table = client
         .read_table(rec.table)
         .map_err(|_| PlanError::NotFound)?;
