@@ -95,9 +95,23 @@ async fn execute_job(ctx: &WorkerCtx, job_id: &str, kind: JobKind) -> JobOutcome
     let label = kind.label();
     let outcome = execute_job_inner(ctx, job_id, kind).await;
     if let JobOutcome::Err { code, message } = &outcome {
-        tracing::warn!(job_id, job = label, code, message, "job failed");
+        log_job_failure(job_id, label, code, message);
     }
     outcome
+}
+
+pub(crate) fn log_job_failure(job_id: &str, label: &str, code: &str, message: &str) {
+    tracing::warn!(
+        job_id,
+        job = label,
+        code,
+        message_bytes = message.len(),
+        "job failed"
+    );
+}
+
+pub(crate) fn log_pbx_error(e: &kxtd1232::Error) {
+    tracing::warn!(error_kind = e.kind(), "pbx error");
 }
 
 async fn execute_job_inner(ctx: &WorkerCtx, job_id: &str, kind: JobKind) -> JobOutcome {
@@ -126,9 +140,12 @@ fn with_client<T>(
     f: impl FnOnce(&mut Client<AnyTransport>) -> Result<T, kxtd1232::Error>,
 ) -> Result<T, JobOutcome> {
     let mut client = open_client(ctx, Access::ReadOnly)?;
-    f(&mut client).map_err(|e| JobOutcome::Err {
-        code: "protocol".into(),
-        message: e.to_string(),
+    f(&mut client).map_err(|e| {
+        log_pbx_error(&e);
+        JobOutcome::Err {
+            code: "protocol".into(),
+            message: e.to_string(),
+        }
     })
 }
 
@@ -537,5 +554,64 @@ mod prod_gate_tests {
         let tmp = tempfile::tempdir().unwrap();
         let ctx = test_worker_ctx(&tmp, true);
         assert!(apply_job_prod_gate(&ctx, Profile::Sim).is_none());
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    reason = "a failed test setup step should panic the test"
+)]
+mod log_redaction_tests {
+    use super::{log_job_failure, log_pbx_error};
+    use std::io::Write;
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Clone, Default)]
+    struct Capture(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for Capture {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn captured(f: impl FnOnce()) -> String {
+        let cap = Capture::default();
+        let writer = cap.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_writer(move || writer.clone())
+            .finish();
+        tracing::subscriber::with_default(subscriber, f);
+        let out = cap.0.lock().unwrap().clone();
+        String::from_utf8(out).unwrap()
+    }
+
+    #[test]
+    fn reply_bearing_error_logs_no_payload_bytes() {
+        let payload = vec![0xDEu8, 0xAD, 0xBE, 0xEF, 0x31, 0x32, 0x33, 0x34];
+        let err = kxtd1232::Error::UnexpectedReply(format!("{payload:?}"));
+        let message = err.to_string();
+        let out = captured(|| {
+            log_pbx_error(&err);
+            log_job_failure("job-1", "read_fields", "protocol", &message);
+        });
+        assert!(out.contains("pbx error"), "{out}");
+        assert!(out.contains("error_kind=\"UnexpectedReply\""), "{out}");
+        assert!(out.contains("job failed"), "{out}");
+        assert!(out.contains("code=\"protocol\""), "{out}");
+        assert!(
+            out.contains(&format!("message_bytes={}", message.len())),
+            "{out}"
+        );
+        assert!(!out.contains(&message), "{out}");
+        assert!(!out.contains("222"), "{out}");
+        assert!(!out.contains("173"), "{out}");
+        assert!(!out.contains("unexpected reply"), "{out}");
     }
 }

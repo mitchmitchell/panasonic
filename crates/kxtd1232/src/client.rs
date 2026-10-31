@@ -54,8 +54,9 @@ pub trait Transport {
 pub enum LineLevel {
     High,
     Low,
+    ReadFailed,
     #[default]
-    Unknown,
+    NotReported,
 }
 
 impl LineLevel {
@@ -63,7 +64,7 @@ impl LineLevel {
         match read {
             Ok(true) => Self::High,
             Ok(false) => Self::Low,
-            Err(_) => Self::Unknown,
+            Err(_) => Self::ReadFailed,
         }
     }
 }

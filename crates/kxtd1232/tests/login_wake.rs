@@ -14,7 +14,7 @@ const PASSWORD: &str = "<FIXTURE_PW>";
 const LINES: ModemLines = ModemLines {
     dsr: LineLevel::High,
     cts: LineLevel::Low,
-    dcd: LineLevel::Unknown,
+    dcd: LineLevel::ReadFailed,
 };
 
 fn fixture_signon() -> SignOn {
@@ -229,12 +229,12 @@ fn wake_is_only_pending_before_xon() {
 }
 
 #[test]
-fn line_level_maps_read_errors_to_unknown() {
+fn line_level_maps_read_errors_to_read_failed() {
     assert_eq!(LineLevel::from_read::<()>(Ok(true)), LineLevel::High);
     assert_eq!(LineLevel::from_read::<()>(Ok(false)), LineLevel::Low);
     assert_eq!(
         LineLevel::from_read(Err("ioctl failed")),
-        LineLevel::Unknown
+        LineLevel::ReadFailed
     );
-    assert_eq!(ModemLines::default().dsr, LineLevel::Unknown);
+    assert_eq!(ModemLines::default().dsr, LineLevel::NotReported);
 }

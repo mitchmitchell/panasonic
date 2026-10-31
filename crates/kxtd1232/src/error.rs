@@ -326,6 +326,37 @@ impl fmt::Display for PlanError {
     }
 }
 
+impl Error {
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Frame(_) => "Frame",
+            Self::NotAllowed(_) => "NotAllowed",
+            Self::Field(_) => "Field",
+            Self::Login(_) => "Login",
+            Self::LinkDown(_) => "LinkDown",
+            Self::SessionLost => "SessionLost",
+            Self::Timeout => "Timeout",
+            Self::BusyTimeout => "BusyTimeout",
+            Self::Garbled(_) => "Garbled",
+            Self::MismatchedReply { .. } => "MismatchedReply",
+            Self::Nak { .. } => "Nak",
+            Self::Refused { .. } => "Refused",
+            Self::UnexpectedReply(_) => "UnexpectedReply",
+            Self::PreSend(_) => "PreSend",
+            Self::ExtraFrame => "ExtraFrame",
+            Self::Unacked(_) => "Unacked",
+            Self::VerifyPending => "VerifyPending",
+            Self::EndBinaryHeld => "EndBinaryHeld",
+            Self::LineNotQuiet => "LineNotQuiet",
+            Self::Locked => "Locked",
+            Self::Plan(_) => "Plan",
+            Self::BadState { .. } => "BadState",
+            Self::NotPendingBlock => "NotPendingBlock",
+            Self::ByeNotConfirmed(_) => "ByeNotConfirmed",
+        }
+    }
+}
+
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

@@ -97,7 +97,7 @@ pub fn login(client: &mut Client<AnyTransport>, password: &str) -> Result<(), kx
     let result = client.login(password);
     if let (Err(e), Some(t)) = (&result, client.login_trace()) {
         tracing::warn!(
-            error = %e,
+            error_kind = e.kind(),
             bytes_received = t.bytes_received,
             xon_seen = t.xon_seen,
             dtr_cycled = t.dtr_cycled,

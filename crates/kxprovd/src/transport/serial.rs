@@ -35,9 +35,7 @@ impl TokioSerialTransport {
             .open_native_async()
             .map_err(|e| e.to_string())?;
         if !port.exclusive() {
-            return Err(
-                "serial: TIOCEXCL not in effect after open (flock tracked in #64 item 1)".into(),
-            );
+            return Err("serial: exclusive open (TIOCEXCL and flock) not in effect".into());
         }
         Ok(Self {
             port,
