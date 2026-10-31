@@ -91,3 +91,79 @@ fn drop_keeps_smdr_paused_until_the_dtr_drop_and_flush_finish() {
 fn end_keeps_smdr_paused_until_the_dtr_drop_and_flush_finish() {
     release_keeps_smdr_paused_until_dtr_drop_and_flush(Release::End);
 }
+
+enum HoldPath {
+    Cycle,
+    Drop,
+    End,
+}
+
+fn line_speed_reads_b0_during_the_hold(path_kind: HoldPath) {
+    use nix::sys::termios::{cfgetospeed, tcgetattr, BaudRate};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let dir = tempfile::tempdir().unwrap();
+    let p = nix::pty::openpty(None, None).unwrap();
+    let path = nix::unistd::ttyname(&p.slave).unwrap();
+    let _master = std::fs::File::from(p.master);
+    let slave = Arc::new(p.slave);
+    let pm = PortManager::new(
+        DeviceLine,
+        LeaseJournal::new(dir.path().join("lease.jsonl")),
+        1,
+    );
+    let mut dev = pm
+        .open_leased_device(
+            "job-b0",
+            Duration::from_secs(2),
+            &path,
+            SmdrLineOptions::default(),
+            2_000,
+        )
+        .unwrap();
+    let started = Arc::new(AtomicBool::new(false));
+    let watcher = {
+        let slave = Arc::clone(&slave);
+        let started = Arc::clone(&started);
+        std::thread::spawn(move || {
+            started.store(true, Ordering::SeqCst);
+            let deadline = Instant::now() + Duration::from_secs(3);
+            while Instant::now() < deadline {
+                let speed = cfgetospeed(&tcgetattr(&*slave).unwrap());
+                if speed == BaudRate::B0 {
+                    return true;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            false
+        })
+    };
+    while !started.load(Ordering::SeqCst) {
+        std::thread::yield_now();
+    }
+    match path_kind {
+        HoldPath::Cycle => assert!(dev.cycle_dtr().unwrap()),
+        HoldPath::Drop => drop(dev),
+        HoldPath::End => dev.end(Duration::from_millis(200)).unwrap(),
+    }
+    assert!(
+        watcher.join().unwrap(),
+        "line never read B0 during the DTR hold"
+    );
+    let after = cfgetospeed(&tcgetattr(&*slave).unwrap());
+    assert_eq!(after, BaudRate::B9600);
+}
+
+#[test]
+fn sign_on_dtr_cycle_holds_the_line_at_b0() {
+    line_speed_reads_b0_during_the_hold(HoldPath::Cycle);
+}
+
+#[test]
+fn drop_release_holds_the_line_at_b0() {
+    line_speed_reads_b0_during_the_hold(HoldPath::Drop);
+}
+
+#[test]
+fn end_release_holds_the_line_at_b0() {
+    line_speed_reads_b0_during_the_hold(HoldPath::End);
+}
