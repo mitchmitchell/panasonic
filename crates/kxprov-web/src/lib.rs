@@ -8,7 +8,7 @@ mod static_files;
 mod templates;
 
 use askama::Template;
-use axum::extract::{ConnectInfo, Extension, Form, Path, State};
+use axum::extract::{ConnectInfo, Extension, Form, Path, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
@@ -78,6 +78,16 @@ pub fn operational_mode_banner_label(mode: OperationalMode) -> &'static str {
     }
 }
 
+pub fn environment_banner(profile: Profile, mode: OperationalMode) -> (&'static str, &'static str) {
+    match profile {
+        Profile::Sim => ("SIMULATOR \u{b7} no phone system connected", "sim"),
+        Profile::Test | Profile::Prod => (
+            operational_mode_banner_label(mode),
+            operational_mode_banner_class(mode),
+        ),
+    }
+}
+
 pub fn operational_mode_banner_class(mode: OperationalMode) -> &'static str {
     match mode {
         OperationalMode::Testing => "testing",
@@ -108,6 +118,7 @@ fn empty_dashboard(csrf: &str) -> DashboardTemplate {
         queue_depth: 0,
         table_value,
         record_value,
+        record_help: fields::record_range_help(),
         field_value,
         new_value_value,
         show_read_form_error: false,
@@ -149,8 +160,9 @@ async fn fill_dashboard_from_status(
 ) {
     if let Ok(status) = state.backend.status(caller).await {
         tpl.show_mode_banner = true;
-        tpl.mode_banner = operational_mode_banner_label(status.operational_mode).into();
-        tpl.mode_banner_class = operational_mode_banner_class(status.operational_mode).into();
+        let (banner, banner_class) = environment_banner(status.profile, status.operational_mode);
+        tpl.mode_banner = banner.into();
+        tpl.mode_banner_class = banner_class.into();
         tpl.show_profile_badge = true;
         let (badge, badge_class) = profile_badge_label(status.profile);
         tpl.profile_badge = badge;
@@ -161,17 +173,36 @@ async fn fill_dashboard_from_status(
     }
 }
 
-fn apply_plan_result(tpl: &mut DashboardTemplate, summary: &PlanSummary, mode: OperationalMode) {
+pub const EMPTY_VALUE_LABEL: &str = "(empty)";
+
+fn display_value(value: &str) -> String {
+    if value.trim().is_empty() {
+        EMPTY_VALUE_LABEL.into()
+    } else {
+        value.to_string()
+    }
+}
+
+pub fn shows_production_plan_hint(profile: Profile, mode: OperationalMode) -> bool {
+    profile != Profile::Sim && mode == OperationalMode::Production
+}
+
+fn apply_plan_result(
+    tpl: &mut DashboardTemplate,
+    summary: &PlanSummary,
+    profile: Profile,
+    mode: OperationalMode,
+) {
     tpl.show_plan = true;
     tpl.plan_id_hex = summary.plan_id.0.clone();
     tpl.diff_hash_hex = summary.diff_hash.0.clone();
     tpl.plan_summary = summary.summary.clone();
     tpl.plan_table = summary.table;
-    tpl.plan_record = summary.record;
+    tpl.plan_record = fields::record_label(summary.table, summary.record);
     tpl.plan_field = summary.field.clone();
-    tpl.plan_old_value = summary.old_value.clone();
-    tpl.plan_new_value = summary.new_value.clone();
-    if mode == OperationalMode::Production {
+    tpl.plan_old_value = display_value(&summary.old_value);
+    tpl.plan_new_value = display_value(&summary.new_value);
+    if shows_production_plan_hint(profile, mode) {
         tpl.plan_id_prefix = summary.plan_id.0.chars().take(8).collect();
         tpl.plan_expires_at_iso = summary.expires_at.clone();
         tpl.plan_expires_at_chicago = expiry::format_expiry_chicago(&summary.expires_at);
@@ -182,8 +213,13 @@ fn apply_plan_result(tpl: &mut DashboardTemplate, summary: &PlanSummary, mode: O
     }
 }
 
-fn plan_error_message(err: BackendError) -> String {
+fn plan_error_message(err: BackendError, form: &PlanForm) -> String {
     match err {
+        BackendError::RecordNotFound { .. } => format!(
+            "Table {}, record {} could not be read from the phone system, so no plan was created. Check the record number and try again.",
+            form.table.trim(),
+            form.record.trim()
+        ),
         BackendError::ForbiddenScope => {
             "You don't have permission to create plans with this session.".into()
         }
@@ -239,21 +275,63 @@ fn login_rate_limited_response(message: &str, retry_after: std::time::Duration) 
     resp
 }
 
-async fn login_form(session: Session) -> impl IntoResponse {
+const RENDER_FALLBACK_REASON: &str =
+    "askama render fails only on a template bug; answer with plain text instead of panicking the handler";
+
+fn render_page<T: Template>(tpl: &T) -> Html<String> {
+    Html(tpl.render().unwrap_or_else(|err| {
+        tracing::warn!(reason = RENDER_FALLBACK_REASON, %err, "page render failed");
+        "This page could not be shown. Reload to try again.".into()
+    }))
+}
+
+pub fn error_page(status: StatusCode, title: &str, message: &str, next_step: &str) -> Response {
+    let html = templates::ErrorTemplate {
+        page_title: title.into(),
+        message: message.into(),
+        next_step: next_step.into(),
+    }
+    .render()
+    .unwrap_or_else(|err| {
+        tracing::warn!(reason = RENDER_FALLBACK_REASON, %err, "error page render failed");
+        format!("{title}. {message} {next_step}")
+    });
+    (status, Html(html)).into_response()
+}
+
+pub fn stale_form_page() -> Response {
+    error_page(
+        StatusCode::FORBIDDEN,
+        "Your session needs a refresh",
+        "This form came from an old or different page, so nothing was changed.",
+        "Go back to the home page and try again. If it keeps happening, sign in again.",
+    )
+}
+
+pub const LOGIN_FAILED_MESSAGE: &str = "That password isn't correct. Try again.";
+
+#[derive(Deserialize)]
+struct LoginQuery {
+    #[serde(default)]
+    error: Option<String>,
+}
+
+async fn login_form(session: Session, Query(query): Query<LoginQuery>) -> impl IntoResponse {
+    let show_error = query.error.is_some();
     let token = csrf::token_for_session(&session).await;
     let cookie = csrf::csrf_set_cookie_value(&token);
     (
         [(header::SET_COOKIE, cookie)],
-        Html(
-            templates::LoginTemplate {
-                page_title: sign_in_page_title().into(),
-                show_error: false,
-                error: String::new(),
-                csrf_token: token,
-            }
-            .render()
-            .unwrap_or_default(),
-        ),
+        render_page(&templates::LoginTemplate {
+            page_title: sign_in_page_title().into(),
+            show_error,
+            error: if show_error {
+                LOGIN_FAILED_MESSAGE.into()
+            } else {
+                String::new()
+            },
+            csrf_token: token,
+        }),
     )
 }
 
@@ -364,7 +442,9 @@ async fn logout(session: Session, headers: HeaderMap, Form(form): Form<LogoutFor
 
 #[derive(Deserialize)]
 pub struct TableRecordForm {
+    #[serde(default)]
     table: String,
+    #[serde(default)]
     record: String,
     #[serde(default, rename = "_csrf")]
     pub _csrf: String,
@@ -372,9 +452,13 @@ pub struct TableRecordForm {
 
 #[derive(Deserialize)]
 pub struct PlanForm {
+    #[serde(default)]
     table: String,
+    #[serde(default)]
     record: String,
+    #[serde(default)]
     field: String,
+    #[serde(default)]
     new_value: String,
     #[serde(default, rename = "_csrf")]
     pub _csrf: String,
@@ -382,7 +466,7 @@ pub struct PlanForm {
 
 fn parse_table_record(form: &TableRecordForm) -> Result<(u8, u16), String> {
     let table = fields::parse_table_input(&form.table)?;
-    let record = fields::parse_record_input(&form.record)?;
+    let record = fields::parse_record_input(table, &form.record)?;
     Ok((table, record))
 }
 
@@ -407,7 +491,7 @@ async fn read_record(
         Err(msg) => {
             tpl.show_read_form_error = true;
             tpl.read_form_error = msg;
-            return Html(tpl.render().unwrap_or_default()).into_response();
+            return render_page(&tpl).into_response();
         }
     };
 
@@ -419,13 +503,13 @@ async fn read_record(
         Ok(resp) => {
             tpl.show_read_result = true;
             tpl.read_table = table;
-            tpl.read_record = record;
+            tpl.read_record = fields::record_label(table, record);
             tpl.read_fields = resp
                 .fields
                 .into_iter()
                 .map(|f| ReadFieldRow {
                     name: f.name,
-                    value: f.value,
+                    value: display_value(&f.value),
                 })
                 .collect();
         }
@@ -435,7 +519,7 @@ async fn read_record(
         }
     }
 
-    Html(tpl.render().unwrap_or_default()).into_response()
+    render_page(&tpl).into_response()
 }
 
 async fn dashboard(State(state): State<WebState>, session: Session) -> impl IntoResponse {
@@ -444,10 +528,7 @@ async fn dashboard(State(state): State<WebState>, session: Session) -> impl Into
     let caller = caller_from_session(&session);
     let mut tpl = empty_dashboard(&token);
     fill_dashboard_from_status(&mut tpl, &state, &caller).await;
-    (
-        [(header::SET_COOKIE, cookie)],
-        Html(tpl.render().unwrap_or_default()),
-    )
+    ([(header::SET_COOKIE, cookie)], render_page(&tpl))
 }
 
 fn parse_plan_form(form: &PlanForm) -> Result<PlanChangeRequest, String> {
@@ -485,14 +566,14 @@ async fn plan_change(
     tpl.new_value_value = form.new_value.clone();
     fill_dashboard_from_status(&mut tpl, &state, &caller).await;
 
-    let mode = match state.backend.status(&caller).await {
-        Ok(status) => status.operational_mode,
+    let (profile, mode) = match state.backend.status(&caller).await {
+        Ok(status) => (status.profile, status.operational_mode),
         Err(_) => {
             tpl.show_plan_form_error = true;
             tpl.plan_form_error =
                 "Could not read daemon status. Planning is unavailable until status succeeds."
                     .into();
-            return Html(tpl.render().unwrap_or_default()).into_response();
+            return render_page(&tpl).into_response();
         }
     };
 
@@ -501,19 +582,19 @@ async fn plan_change(
         Err(msg) => {
             tpl.show_plan_form_error = true;
             tpl.plan_form_error = msg;
-            return Html(tpl.render().unwrap_or_default()).into_response();
+            return render_page(&tpl).into_response();
         }
     };
 
     match state.backend.plan_change(&caller, request).await {
-        Ok(summary) => apply_plan_result(&mut tpl, &summary, mode),
+        Ok(summary) => apply_plan_result(&mut tpl, &summary, profile, mode),
         Err(err) => {
             tpl.show_plan_form_error = true;
-            tpl.plan_form_error = plan_error_message(err);
+            tpl.plan_form_error = plan_error_message(err, &form);
         }
     }
 
-    Html(tpl.render().unwrap_or_default()).into_response()
+    render_page(&tpl).into_response()
 }
 
 #[cfg(test)]
@@ -532,5 +613,62 @@ mod client_ip_tests {
         let peer = "10.0.0.2:443".parse().unwrap();
         assert_eq!(client_ip(&headers, Some(peer), true, true), "203.0.113.5");
         assert_eq!(client_ip(&headers, Some(peer), false, false), "10.0.0.2");
+    }
+}
+
+#[cfg(test)]
+mod display_value_tests {
+    use super::*;
+
+    #[test]
+    fn blank_values_show_empty_label() {
+        assert_eq!(display_value(""), EMPTY_VALUE_LABEL);
+        assert_eq!(display_value("   "), EMPTY_VALUE_LABEL);
+        assert_eq!(display_value("5550100"), "5550100");
+    }
+
+    #[test]
+    fn production_hint_only_off_sim_in_production_mode() {
+        assert!(!shows_production_plan_hint(
+            Profile::Sim,
+            OperationalMode::Production
+        ));
+        assert!(shows_production_plan_hint(
+            Profile::Prod,
+            OperationalMode::Production
+        ));
+        assert!(shows_production_plan_hint(
+            Profile::Test,
+            OperationalMode::Production
+        ));
+        assert!(!shows_production_plan_hint(
+            Profile::Prod,
+            OperationalMode::Testing
+        ));
+    }
+}
+
+#[cfg(test)]
+mod plan_error_message_tests {
+    use super::*;
+
+    #[test]
+    fn record_not_found_names_the_form_label_and_says_no_plan() {
+        let form = PlanForm {
+            table: "36".into(),
+            record: "12".into(),
+            field: "cid_name".into(),
+            new_value: "X".into(),
+            _csrf: String::new(),
+        };
+        let msg = plan_error_message(
+            BackendError::RecordNotFound {
+                table: 36,
+                record: 11,
+            },
+            &form,
+        );
+        assert!(msg.contains("Table 36, record 12"), "{msg}");
+        assert!(msg.contains("no plan was created"), "{msg}");
     }
 }

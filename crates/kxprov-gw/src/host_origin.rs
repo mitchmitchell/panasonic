@@ -37,7 +37,7 @@ pub async fn host_origin_middleware(
         .and_then(|v| v.to_str().ok())
     {
         if !origin_matches(&cfg.allowed_origins, origin) {
-            return (StatusCode::FORBIDDEN, "origin not allowed").into_response();
+            return kxprov_web::stale_form_page();
         }
     }
     next.run(req).await

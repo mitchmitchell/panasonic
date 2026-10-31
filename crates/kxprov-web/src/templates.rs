@@ -28,6 +28,7 @@ pub struct DashboardTemplate {
     pub queue_depth: u32,
     pub table_value: String,
     pub record_value: String,
+    pub record_help: String,
     pub field_value: String,
     pub new_value_value: String,
     pub show_read_form_error: bool,
@@ -53,4 +54,12 @@ pub struct DashboardTemplate {
     pub plan_expires_at_chicago: String,
     pub plan_expires_at_ms: String,
     pub csrf_token: String,
+}
+
+#[derive(Template)]
+#[template(path = "error.html")]
+pub struct ErrorTemplate {
+    pub page_title: String,
+    pub message: String,
+    pub next_step: String,
 }

@@ -1503,6 +1503,7 @@ dependencies = [
  "tokio",
  "tower",
  "tower-sessions",
+ "tracing",
  "uuid",
 ]
 

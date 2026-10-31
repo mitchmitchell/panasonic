@@ -1,8 +1,8 @@
 use axum::body::Body;
 use axum::extract::{Request, State};
-use axum::http::{header, Method, StatusCode};
+use axum::http::{header, Method};
 use axum::middleware::Next;
-use axum::response::{IntoResponse, Response};
+use axum::response::Response;
 
 use kxprov_web::is_n1_unregistered_web_path;
 
@@ -25,7 +25,7 @@ pub async fn post_origin_middleware(
     if origin_allowed(&cfg, req.headers()) {
         return next.run(req).await;
     }
-    (StatusCode::FORBIDDEN, "origin not allowed").into_response()
+    kxprov_web::stale_form_page()
 }
 
 fn referer_origin(referer: &str) -> Option<String> {
