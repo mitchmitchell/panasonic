@@ -10,4 +10,9 @@ fn main() {
         .unwrap_or_else(|| "unknown".into());
     println!("cargo:rustc-env=KXPROV_BUILD_HASH={hash}");
     println!("cargo:rerun-if-changed=../../.git/HEAD");
+    println!("cargo::rustc-check-cfg=cfg(kxprov_api_sim)");
+    println!("cargo::rerun-if-env-changed=DEP_KXPROV_API_SIM_FAULT_TRIGGERS");
+    if std::env::var_os("DEP_KXPROV_API_SIM_FAULT_TRIGGERS").is_some() {
+        println!("cargo::rustc-cfg=kxprov_api_sim");
+    }
 }

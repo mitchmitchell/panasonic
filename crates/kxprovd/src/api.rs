@@ -199,12 +199,12 @@ async fn dispatch(
         RequestBody::SimTriggerGoliathCopyFail => {
             sim_trigger_goliath_copy_fail(state, cred, role, &env.auth).await
         }
-        #[cfg(not(feature = "sim-fault-triggers"))]
-        #[allow(
-            unreachable_patterns,
-            reason = "only reachable when another workspace crate turns on kxprov-api/sim-fault-triggers and this daemon was built without it"
-        )]
-        other => Err(method_not_built(other)),
+        #[cfg(all(kxprov_api_sim, not(feature = "sim-fault-triggers")))]
+        RequestBody::SimTriggerBusy { .. } => Err(method_not_built("sim_trigger_busy")),
+        #[cfg(all(kxprov_api_sim, not(feature = "sim-fault-triggers")))]
+        RequestBody::SimTriggerGoliathCopyFail => {
+            Err(method_not_built("sim_trigger_goliath_copy_fail"))
+        }
     };
 
     match result {
@@ -218,12 +218,8 @@ async fn dispatch(
     }
 }
 
-#[cfg(not(feature = "sim-fault-triggers"))]
-fn method_not_built(body: &RequestBody) -> ApiErrorBody {
-    let method = serde_json::to_value(body)
-        .ok()
-        .and_then(|v| v.get("method").and_then(|m| m.as_str()).map(str::to_owned))
-        .unwrap_or_default();
+#[cfg(all(kxprov_api_sim, not(feature = "sim-fault-triggers")))]
+fn method_not_built(method: &str) -> ApiErrorBody {
     api_err(
         "bad_request",
         &format!("unknown method {method:?}: not built into this daemon"),
@@ -982,24 +978,103 @@ mod apply_plan_tests {
     }
 }
 
-#[cfg(all(test, not(feature = "sim-fault-triggers")))]
-mod tests {
-    use super::*;
+#[cfg(all(test, kxprov_api_sim, not(feature = "sim-fault-triggers")))]
+mod unbuilt_sim_trigger_tests {
+    #![allow(
+        clippy::unwrap_used,
+        reason = "test setup failures should panic with the underlying error"
+    )]
 
-    #[test]
-    fn sim_trigger_methods_are_bad_requests_on_a_daemon_built_without_them() {
-        for line in [
-            r#"{"method":"sim_trigger_goliath_copy_fail"}"#,
-            r#"{"method":"sim_trigger_busy","params":{"frames":4}}"#,
-        ] {
-            match serde_json::from_str::<RequestBody>(line) {
-                Err(_) => {}
-                Ok(body) => {
-                    let err = method_not_built(&body);
-                    assert_eq!(err.code, "bad_request");
-                    assert!(err.message.contains("sim_trigger_"), "{}", err.message);
-                }
-            }
+    use super::*;
+    use crate::approval::ApprovalBook;
+    use crate::backup::BackupStore;
+    use crate::config::Config;
+    use crate::gates::GateState;
+    use crate::goliath::GoliathQueue;
+    use crate::mode::ModeStore;
+    use crate::peer::PeerCred;
+    use crate::plan_store::PlanStore;
+    use kxprov_api::{
+        hash_bearer_secret, Profile, Scope, SimTriggerBusyParams, TokenEntry, TokenId, TokensFile,
+    };
+    use std::sync::Arc;
+    use tokio::sync::{mpsc, RwLock};
+
+    fn api_state(tmp: &tempfile::TempDir) -> ApiState {
+        let data = tmp.path().to_path_buf();
+        std::fs::create_dir_all(data.join("plans")).unwrap();
+        std::fs::create_dir_all(data.join("backups")).unwrap();
+        let cfg = Config::sim_test(data.clone(), data.join("kxprovd.sock"), 1000);
+        let tokens = TokensFile {
+            approver_token_id: TokenId("approver".into()),
+            tokens: vec![TokenEntry {
+                id: TokenId("approver".into()),
+                secret_hash: hash_bearer_secret("approver-secret"),
+                scopes: vec![Scope::Read, Scope::Approve],
+                expires_at_ms: u64::MAX / 2,
+                revoked: false,
+            }],
+        };
+        std::fs::write(&cfg.tokens_path, serde_json::to_vec(&tokens).unwrap()).unwrap();
+        let (tx, _rx) = mpsc::channel(4);
+        ApiState {
+            config: cfg.clone(),
+            profile: Arc::new(RwLock::new(Profile::Sim)),
+            transport_label: "sim".into(),
+            gates: Arc::new(RwLock::new(GateState { config: cfg.gates })),
+            peer_policy: cfg.peer_policy.clone(),
+            tokens: TokenStore::load_insecure(cfg.tokens_path.clone()).unwrap(),
+            queue: Arc::new(JobQueue::new(tx)),
+            backups: BackupStore::new(data.join("backups")).unwrap(),
+            plans: PlanStore::new(data.join("plans")).unwrap(),
+            approvals: ApprovalBook::new(&data),
+            locked: LockedStore::new(&data),
+            goliath: GoliathQueue::new(data.join("goliath")).unwrap(),
+            mode: ModeStore::new(&data, Profile::Sim),
+            transition: crate::transition::TransitionBlockStore::new(&data),
         }
+    }
+
+    async fn refused(state: &ApiState, body: RequestBody, method: &str) {
+        let env = RequestEnvelope {
+            id: "1".into(),
+            auth: None,
+            audit: None,
+            body,
+        };
+        let cred = PeerCred {
+            uid: 1000,
+            gid: 1000,
+            pid: 1,
+        };
+        let resp = dispatch(state, cred, &env).await;
+        assert!(!resp.ok);
+        assert!(resp.result.is_none());
+        let err = resp.error.unwrap();
+        assert_eq!(err.code, "bad_request");
+        assert_eq!(
+            err.message,
+            format!("unknown method {method:?}: not built into this daemon")
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_refuses_sim_triggers_on_a_daemon_built_without_them() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = api_state(&tmp);
+        refused(
+            &state,
+            RequestBody::SimTriggerBusy {
+                params: SimTriggerBusyParams { frames: 4 },
+            },
+            "sim_trigger_busy",
+        )
+        .await;
+        refused(
+            &state,
+            RequestBody::SimTriggerGoliathCopyFail,
+            "sim_trigger_goliath_copy_fail",
+        )
+        .await;
     }
 }
