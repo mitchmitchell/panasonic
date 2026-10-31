@@ -1,26 +1,17 @@
-//! Non-Linux stub: serial is unavailable in CI/dev on non-Linux hosts.
-
 use kxtd1232::{Transport, TransportError};
-use std::path::Path;
 
-pub struct TokioSerialTransport;
+pub enum SerialTransport {}
 
-impl TokioSerialTransport {
-    pub fn open(_path: &Path, _baud: u32) -> Result<Self, String> {
-        Err("serial transport requires Linux".into())
-    }
-}
-
-impl Transport for TokioSerialTransport {
+impl Transport for SerialTransport {
     fn send(&mut self, _data: &[u8]) -> Result<(), TransportError> {
-        Err(TransportError::NothingWritten("no serial".into()))
+        match *self {}
     }
 
     fn recv(&mut self, _timeout_ms: u64) -> Result<Vec<u8>, TransportError> {
-        Err(TransportError::NothingWritten("no serial".into()))
+        match *self {}
     }
 
     fn now_ms(&mut self) -> u64 {
-        0
+        match *self {}
     }
 }

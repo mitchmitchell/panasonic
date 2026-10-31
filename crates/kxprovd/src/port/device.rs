@@ -447,21 +447,22 @@ pub(crate) enum FlockCover {
     Own,
 }
 
-pub struct ProgrammingDevice<'lease> {
+pub struct ProgrammingLine {
     file: OpenedPort,
     _smdr: Option<Arc<Mutex<SmdrDevice>>>,
     session: super::SessionMode,
     ended: bool,
+    send_bound_ms: u64,
     #[cfg(feature = "test-util")]
     restore_readback_hook: Option<ReadbackHook>,
-    _lease: PhantomData<&'lease ()>,
 }
 
-impl ProgrammingDevice<'_> {
+impl ProgrammingLine {
     pub(crate) fn open(
         path: &Path,
         options: SmdrLineOptions,
         cover: FlockCover,
+        send_bound_ms: u64,
     ) -> Result<Self, DeviceError> {
         let (file, smdr) = match cover {
             FlockCover::HeldBySmdr(smdr) => {
@@ -486,9 +487,9 @@ impl ProgrammingDevice<'_> {
             _smdr: smdr,
             session: super::SessionMode::SignedOut,
             ended: false,
+            send_bound_ms,
             #[cfg(feature = "test-util")]
             restore_readback_hook: None,
-            _lease: PhantomData,
         })
     }
 
@@ -521,20 +522,41 @@ impl ProgrammingDevice<'_> {
         self.session = super::SessionMode::SignedOut;
         super::end_session(self, mode, step_timeout)
     }
+
+    fn hangup_flush_restore(&mut self) -> Result<(), super::DtrError> {
+        let fd = self.file.file();
+        let mut t = termios::tcgetattr(fd).map_err(|e| super::DtrError::Hangup(e.to_string()))?;
+        termios::cfsetspeed(&mut t, BaudRate::B0)
+            .and_then(|()| termios::tcsetattr(fd, SetArg::TCSANOW, &t))
+            .map_err(|e| super::DtrError::Hangup(e.to_string()))?;
+        std::thread::sleep(super::DTR_LOW_PERIOD);
+        termios::tcflush(fd, termios::FlushArg::TCIFLUSH)
+            .map_err(|e| super::DtrError::Flush(e.to_string()))?;
+        #[cfg(feature = "test-util")]
+        let hook = self.restore_readback_hook.as_mut();
+        #[cfg(not(feature = "test-util"))]
+        let hook: Option<&mut ReadbackHook> = None;
+        restore_line_speed(self.file.file(), hook)
+    }
 }
 
-impl Drop for ProgrammingDevice<'_> {
+impl Drop for ProgrammingLine {
     fn drop(&mut self) {
         if let Err(e) = self.end_inner(super::DEFAULT_RELEASE_STEP_TIMEOUT) {
             tracing::error!(error = %e, "programming device release failed");
         }
+        if let OpenedPort::Own(file) = &self.file {
+            if let Err(e) = rustix::termios::ioctl_tiocnxcl(&**file) {
+                tracing::error!(error = %e, "clearing TIOCEXCL on the programming close failed");
+            }
+        }
     }
 }
 
-impl Transport for ProgrammingDevice<'_> {
+impl Transport for ProgrammingLine {
     fn send(&mut self, data: &[u8]) -> Result<(), TransportError> {
         let mut writer: &File = self.file.file();
-        let sent = crate::transport::send_all_port(&mut writer, data, PROGRAMMING_SEND_BOUND_MS);
+        let sent = crate::transport::send_all_port(&mut writer, data, self.send_bound_ms);
         if sent.is_ok() {
             self.session = self.session.after_send(data);
         }
@@ -551,21 +573,129 @@ impl Transport for ProgrammingDevice<'_> {
             .duration_since(UNIX_EPOCH)
             .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
     }
+
+    fn cycle_dtr(&mut self) -> Result<bool, TransportError> {
+        self.hangup_flush_restore().map_err(|e| {
+            TransportError::LinkDown(kxtd1232::LinkDownError {
+                detail: format!("serial: DTR cycle: {e}"),
+                bytes_sent: Some(0),
+            })
+        })?;
+        Ok(true)
+    }
+}
+
+impl super::PortRelease for ProgrammingLine {
+    fn drop_dtr(&mut self) -> Result<(), super::DtrError> {
+        self.hangup_flush_restore()
+    }
+}
+
+pub struct ProgrammingDevice<'lease> {
+    line: ProgrammingLine,
+    _lease: PhantomData<&'lease ()>,
+}
+
+impl ProgrammingDevice<'_> {
+    pub(crate) fn new(line: ProgrammingLine) -> Self {
+        Self {
+            line,
+            _lease: PhantomData,
+        }
+    }
+
+    #[cfg(feature = "test-util")]
+    pub fn set_restore_readback_hook(&mut self, hook: ReadbackHook) {
+        self.line.set_restore_readback_hook(hook);
+    }
+
+    pub fn holds_own_flock(&self) -> bool {
+        self.line.holds_own_flock()
+    }
+
+    pub fn session_mode(&self) -> super::SessionMode {
+        self.line.session_mode()
+    }
+
+    pub fn end(self, step_timeout: std::time::Duration) -> Result<(), super::PortReleaseError> {
+        self.line.end(step_timeout)
+    }
+}
+
+impl Transport for ProgrammingDevice<'_> {
+    fn send(&mut self, data: &[u8]) -> Result<(), TransportError> {
+        self.line.send(data)
+    }
+
+    fn recv(&mut self, timeout_ms: u64) -> Result<Vec<u8>, TransportError> {
+        self.line.recv(timeout_ms)
+    }
+
+    fn now_ms(&mut self) -> u64 {
+        self.line.now_ms()
+    }
+
+    fn cycle_dtr(&mut self) -> Result<bool, TransportError> {
+        self.line.cycle_dtr()
+    }
 }
 
 impl super::PortRelease for ProgrammingDevice<'_> {
     fn drop_dtr(&mut self) -> Result<(), super::DtrError> {
-        let fd = self.file.file();
-        let mut t = termios::tcgetattr(fd).map_err(|e| super::DtrError::Hangup(e.to_string()))?;
-        termios::cfsetspeed(&mut t, BaudRate::B0)
-            .and_then(|()| termios::tcsetattr(fd, SetArg::TCSANOW, &t))
-            .map_err(|e| super::DtrError::Hangup(e.to_string()))?;
-        std::thread::sleep(super::DTR_LOW_PERIOD);
-        #[cfg(feature = "test-util")]
-        let hook = self.restore_readback_hook.as_mut();
-        #[cfg(not(feature = "test-util"))]
-        let hook: Option<&mut ReadbackHook> = None;
-        restore_line_speed(self.file.file(), hook)
+        self.line.drop_dtr()
+    }
+}
+
+pub struct LeasedDevice<T: super::PortRelease> {
+    line: ProgrammingLine,
+    lease: super::ProgrammingLease<T>,
+}
+
+impl<T: super::PortRelease> LeasedDevice<T> {
+    pub(crate) fn new(line: ProgrammingLine, lease: super::ProgrammingLease<T>) -> Self {
+        Self { line, lease }
+    }
+
+    #[cfg(feature = "test-util")]
+    pub fn set_restore_readback_hook(&mut self, hook: ReadbackHook) {
+        self.line.set_restore_readback_hook(hook);
+    }
+
+    pub fn job_id(&self) -> &str {
+        self.lease.job_id()
+    }
+
+    pub fn holds_own_flock(&self) -> bool {
+        self.line.holds_own_flock()
+    }
+
+    pub fn session_mode(&self) -> super::SessionMode {
+        self.line.session_mode()
+    }
+
+    pub fn end(self, step_timeout: std::time::Duration) -> Result<(), super::PortReleaseError> {
+        let Self { line, lease } = self;
+        let ended = line.end(step_timeout);
+        let released = lease.release();
+        ended.and(released)
+    }
+}
+
+impl<T: super::PortRelease> Transport for LeasedDevice<T> {
+    fn send(&mut self, data: &[u8]) -> Result<(), TransportError> {
+        self.line.send(data)
+    }
+
+    fn recv(&mut self, timeout_ms: u64) -> Result<Vec<u8>, TransportError> {
+        self.line.recv(timeout_ms)
+    }
+
+    fn now_ms(&mut self) -> u64 {
+        self.line.now_ms()
+    }
+
+    fn cycle_dtr(&mut self) -> Result<bool, TransportError> {
+        self.line.cycle_dtr()
     }
 }
 
