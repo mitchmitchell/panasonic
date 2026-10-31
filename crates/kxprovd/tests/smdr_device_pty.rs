@@ -83,15 +83,6 @@ fn handle_is_opened_read_only_and_receives_bytes() {
 }
 
 #[test]
-fn recv_with_a_u64_max_timeout_waits_without_panicking() {
-    let mut pty = pty();
-    let mut dev = open_smdr_device(&pty.path, SmdrLineOptions::default()).unwrap();
-    pty.master.write_all(b"10/30/26 05:48PM 101\r\n").unwrap();
-    let got = dev.recv(u64::MAX).unwrap();
-    assert!(got.starts_with(b"10/30/26"), "{got:?}");
-}
-
-#[test]
 fn a_regular_file_is_refused_as_not_a_tty() {
     let f = tempfile::NamedTempFile::new().unwrap();
     assert!(matches!(
@@ -691,4 +682,16 @@ fn no_lease_is_granted_during_an_in_flight_smdr_read() {
         "a lease was granted while an SMDR read held the port"
     );
     lease.release().unwrap();
+}
+
+#[cfg(feature = "test-util")]
+#[test]
+fn recv_starting_near_the_clock_maximum_reads_without_panicking() {
+    let mut pty = pty();
+    let mut dev = open_smdr_device(&pty.path, SmdrLineOptions::default()).unwrap();
+    pty.master.write_all(b"10/30/26 05:48PM 101\r\n").unwrap();
+    let got = dev
+        .recv_starting_at(kxprovd::deadline::latest_instant(), 1_000)
+        .unwrap();
+    assert!(got.starts_with(b"10/30/26"), "{got:?}");
 }

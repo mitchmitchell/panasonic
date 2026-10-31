@@ -199,11 +199,18 @@ pub(crate) fn recv_with_poll<R: Read>(
     port: &mut R,
     timeout_ms: u64,
 ) -> Result<Vec<u8>, TransportError> {
-    let deadline = Instant::now().checked_add(Duration::from_millis(timeout_ms));
+    recv_with_poll_from(port, Instant::now(), timeout_ms)
+}
+
+fn recv_with_poll_from<R: Read>(
+    port: &mut R,
+    start: Instant,
+    timeout_ms: u64,
+) -> Result<Vec<u8>, TransportError> {
+    let deadline = crate::deadline::recv_deadline(start, timeout_ms);
     let mut buf = [0u8; 256];
     loop {
-        let now = Instant::now();
-        let remaining = deadline.map_or(Duration::MAX, |d| d.saturating_duration_since(now));
+        let remaining = crate::deadline::remaining(deadline, Instant::now());
         if remaining.is_zero() {
             return Err(TransportError::Timeout);
         }
@@ -360,12 +367,17 @@ mod tests {
     }
 
     #[test]
-    fn a_wait_forever_timeout_does_not_overflow_the_deadline() {
-        let read_plan = Arc::new(Mutex::new(vec![Err(ErrorKind::WouldBlock.into()), Ok(1)]));
+    fn a_start_near_the_clock_maximum_reads_without_a_deadline_overflow() {
+        let read_plan = Arc::new(Mutex::new(vec![
+            Err(ErrorKind::WouldBlock.into()),
+            Err(ErrorKind::WouldBlock.into()),
+            Ok(1),
+        ]));
         let mut port = MockPort {
             read_plan: Arc::clone(&read_plan),
         };
-        let out = recv_with_poll(&mut port, u64::MAX).expect("u64::MAX timeout reads a byte");
+        let out = recv_with_poll_from(&mut port, crate::deadline::latest_instant(), 1_000)
+            .expect("a past-range deadline waits for the byte");
         assert_eq!(out, b"X");
     }
 
