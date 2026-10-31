@@ -199,6 +199,12 @@ async fn dispatch(
         RequestBody::SimTriggerGoliathCopyFail => {
             sim_trigger_goliath_copy_fail(state, cred, role, &env.auth).await
         }
+        #[cfg(not(feature = "sim-fault-triggers"))]
+        #[allow(
+            unreachable_patterns,
+            reason = "only reachable when another workspace crate turns on kxprov-api/sim-fault-triggers and this daemon was built without it"
+        )]
+        other => Err(method_not_built(other)),
     };
 
     match result {
@@ -210,6 +216,18 @@ async fn dispatch(
         },
         Err(e) => err_response(id, e),
     }
+}
+
+#[cfg(not(feature = "sim-fault-triggers"))]
+fn method_not_built(body: &RequestBody) -> ApiErrorBody {
+    let method = serde_json::to_value(body)
+        .ok()
+        .and_then(|v| v.get("method").and_then(|m| m.as_str()).map(str::to_owned))
+        .unwrap_or_default();
+    api_err(
+        "bad_request",
+        &format!("unknown method {method:?}: not built into this daemon"),
+    )
 }
 
 fn err_response(id: String, e: ApiErrorBody) -> Response {
@@ -961,5 +979,27 @@ mod apply_plan_tests {
             approval_blocks, 1,
             "second concurrent apply must not enqueue"
         );
+    }
+}
+
+#[cfg(all(test, not(feature = "sim-fault-triggers")))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sim_trigger_methods_are_bad_requests_on_a_daemon_built_without_them() {
+        for line in [
+            r#"{"method":"sim_trigger_goliath_copy_fail"}"#,
+            r#"{"method":"sim_trigger_busy","params":{"frames":4}}"#,
+        ] {
+            match serde_json::from_str::<RequestBody>(line) {
+                Err(_) => {}
+                Ok(body) => {
+                    let err = method_not_built(&body);
+                    assert_eq!(err.code, "bad_request");
+                    assert!(err.message.contains("sim_trigger_"), "{}", err.message);
+                }
+            }
+        }
     }
 }
