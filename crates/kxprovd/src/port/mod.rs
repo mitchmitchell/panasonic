@@ -123,13 +123,22 @@ fn wait_for(
     timeout: Duration,
     done: impl Fn(&[u8]) -> bool,
 ) -> Result<(), (WaitFailure, Vec<u8>)> {
-    let deadline = Instant::now() + timeout;
+    wait_for_from(t, Instant::now(), timeout, done)
+}
+
+fn wait_for_from(
+    t: &mut impl Transport,
+    start: Instant,
+    timeout: Duration,
+    done: impl Fn(&[u8]) -> bool,
+) -> Result<(), (WaitFailure, Vec<u8>)> {
+    let deadline = crate::deadline::deadline_after(start, timeout);
     let mut got = Vec::new();
     loop {
         if done(&got) {
             return Ok(());
         }
-        let remaining = deadline.saturating_duration_since(Instant::now());
+        let remaining = crate::deadline::remaining(deadline, Instant::now());
         if remaining.is_zero() {
             return Err((WaitFailure::NoAck, got));
         }
@@ -605,9 +614,24 @@ pub struct SmdrHandle<T: LeaseLine> {
 
 impl<T: PortRelease> SmdrSource for SmdrHandle<T> {
     fn recv(&mut self, timeout_ms: u64) -> Result<Vec<u8>, TransportError> {
-        let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+        self.recv_from(Instant::now(), timeout_ms)
+    }
+}
+
+impl<T: PortRelease> SmdrHandle<T> {
+    #[cfg(feature = "test-util")]
+    pub fn recv_starting_at(
+        &mut self,
+        now: Instant,
+        timeout_ms: u64,
+    ) -> Result<Vec<u8>, TransportError> {
+        self.recv_from(now, timeout_ms)
+    }
+
+    fn recv_from(&mut self, now: Instant, timeout_ms: u64) -> Result<Vec<u8>, TransportError> {
+        let deadline = crate::deadline::recv_deadline(now, timeout_ms);
         loop {
-            let remaining = deadline.saturating_duration_since(Instant::now());
+            let remaining = crate::deadline::remaining(deadline, Instant::now());
             let state = self.shared.lock();
             let (mut state, _) = self
                 .shared
@@ -623,11 +647,69 @@ impl<T: PortRelease> SmdrSource for SmdrHandle<T> {
             let slice = remaining.min(SMDR_RECV_SLICE);
             let slice_ms = u64::try_from(slice.as_millis()).unwrap_or(u64::MAX);
             match t.recv(slice_ms) {
-                Err(TransportError::Timeout) if Instant::now() < deadline => {}
+                Err(TransportError::Timeout) if deadline.is_none_or(|d| Instant::now() < d) => {}
                 other => return other,
             }
             drop(state);
             self.shared.returned.notify_all();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::journal::LeaseJournal;
+    use super::{has_ok_line, wait_for_from, DtrError, PortManager, PortRelease};
+    use crate::deadline::latest_instant;
+    use kxtd1232::{Transport, TransportError};
+    use std::time::Duration;
+
+    struct Replies(Vec<Vec<u8>>);
+
+    impl Transport for Replies {
+        fn send(&mut self, _data: &[u8]) -> Result<(), TransportError> {
+            Ok(())
+        }
+
+        fn recv(&mut self, _timeout_ms: u64) -> Result<Vec<u8>, TransportError> {
+            if self.0.is_empty() {
+                return Err(TransportError::Timeout);
+            }
+            Ok(self.0.remove(0))
+        }
+
+        fn now_ms(&mut self) -> u64 {
+            0
+        }
+    }
+
+    impl PortRelease for Replies {
+        fn drop_dtr(&mut self) -> Result<(), DtrError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn an_smdr_read_starting_near_the_clock_maximum_returns_the_bytes() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let pm = PortManager::new(
+            Replies(vec![b"10/30/26".to_vec()]),
+            LeaseJournal::new(dir.path().join("lease.jsonl")),
+            1,
+        );
+        let got = pm.smdr_handle().recv_from(latest_instant(), 1_000);
+        assert_eq!(got.ok().as_deref(), Some(&b"10/30/26"[..]));
+    }
+
+    #[test]
+    fn a_release_wait_starting_near_the_clock_maximum_reads_the_ack() {
+        let mut t = Replies(vec![b"O".to_vec(), b"K\r\n".to_vec()]);
+        let got = wait_for_from(
+            &mut t,
+            latest_instant(),
+            Duration::from_secs(1),
+            has_ok_line,
+        );
+        assert!(got.is_ok());
     }
 }
