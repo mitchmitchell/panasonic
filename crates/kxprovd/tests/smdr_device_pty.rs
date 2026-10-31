@@ -128,3 +128,147 @@ fn one_manager_refuses_a_second_open() {
         Err(DeviceError::AlreadyOpen)
     ));
 }
+
+const PROGRAMMING_CHILD_ENV: &str = "KXPROVD_PROGRAMMING_LOCK_CHILD_PATH";
+
+#[test]
+fn programming_lock_child_probe() {
+    if let Ok(path) = std::env::var(PROGRAMMING_CHILD_ENV) {
+        let pm = manager();
+        let lease = pm
+            .request_lease("child-job", std::time::Duration::from_millis(50))
+            .unwrap();
+        let code =
+            match pm.open_programming_device(&lease, path.as_ref(), SmdrLineOptions::default()) {
+                Err(DeviceError::Locked) => 0,
+                Ok(_) => 10,
+                Err(_) => 11,
+            };
+        std::process::exit(code);
+    }
+}
+
+#[test]
+fn a_programming_open_fails_closed_while_another_process_holds_the_port() {
+    let pty = pty();
+    let _smdr = open_smdr_device(&pty.path, SmdrLineOptions::default()).unwrap();
+    let status = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "programming_lock_child_probe", "--nocapture"])
+        .env(PROGRAMMING_CHILD_ENV, &pty.path)
+        .status()
+        .unwrap();
+    assert_eq!(status.code(), Some(0));
+}
+
+#[test]
+fn a_programming_open_fails_closed_while_another_open_file_holds_the_flock() {
+    let pty = pty();
+    let other = nix::fcntl::Flock::lock(
+        std::fs::File::open(&pty.path).unwrap(),
+        nix::fcntl::FlockArg::LockExclusiveNonblock,
+    )
+    .map_err(|(_, e)| e)
+    .unwrap();
+    let pm = manager();
+    let lease = pm
+        .request_lease("job-1", std::time::Duration::from_millis(50))
+        .unwrap();
+    assert!(matches!(
+        pm.open_programming_device(&lease, &pty.path, SmdrLineOptions::default()),
+        Err(DeviceError::Locked)
+    ));
+    drop(other);
+    let dev = pm
+        .open_programming_device(&lease, &pty.path, SmdrLineOptions::default())
+        .unwrap();
+    assert!(dev.holds_own_flock());
+}
+
+#[test]
+fn a_programming_open_needs_this_managers_lease() {
+    let pty = pty();
+    let pm = manager();
+    let other = manager();
+    let foreign = other
+        .request_lease("job-other", std::time::Duration::from_millis(50))
+        .unwrap();
+    assert!(matches!(
+        pm.open_programming_device(&foreign, &pty.path, SmdrLineOptions::default()),
+        Err(DeviceError::NoLease)
+    ));
+}
+
+#[test]
+fn a_programming_open_under_the_smdr_flock_pauses_smdr_reads_and_writes_to_the_port() {
+    use kxtd1232::Transport;
+    use std::io::Read;
+
+    let mut pty = pty();
+    let pm = manager();
+    let mut smdr = pm
+        .open_smdr_device(&pty.path, SmdrLineOptions::default())
+        .unwrap();
+    let lease = pm
+        .request_lease("job-1", std::time::Duration::from_millis(50))
+        .unwrap();
+    let mut dev = pm
+        .open_programming_device(&lease, &pty.path, SmdrLineOptions::default())
+        .unwrap();
+    assert!(!dev.holds_own_flock());
+    pty.master.write_all(b"OK\r\n").unwrap();
+    assert!(matches!(
+        smdr.recv(100),
+        Err(kxtd1232::TransportError::Timeout)
+    ));
+    assert_eq!(dev.recv(1000).unwrap(), b"OK\r\n");
+    dev.send(b"PRG\r\n").unwrap();
+    let mut buf = [0u8; 16];
+    let n = pty.master.read(&mut buf).unwrap();
+    assert_eq!(&buf[..n], b"PRG\r\n");
+    assert!(matches!(
+        dev.end(std::time::Duration::from_millis(100)),
+        Err(kxprovd::port::PortReleaseError::EndBinaryNotAcked { .. })
+    ));
+    lease.release().unwrap();
+    pty.master.write_all(b"10/30/26\r\n").unwrap();
+    assert!(smdr.recv(1000).unwrap().starts_with(b"10/30/26"));
+}
+
+#[test]
+fn a_programming_device_ends_binary_before_bye_then_drops_dtr() {
+    use kxprovd::port::{SessionMode, END_BINARY, END_BINARY_ACK, PRG};
+    use kxtd1232::Transport;
+    use std::io::Read;
+
+    let mut pty = pty();
+    let pm = manager();
+    let lease = pm
+        .request_lease("job-1", std::time::Duration::from_millis(50))
+        .unwrap();
+    let mut dev = pm
+        .open_programming_device(&lease, &pty.path, SmdrLineOptions::default())
+        .unwrap();
+    dev.send(PRG).unwrap();
+    assert_eq!(dev.session_mode(), SessionMode::Binary);
+    let mut buf = [0u8; 16];
+    let n = pty.master.read(&mut buf).unwrap();
+    assert_eq!(&buf[..n], PRG);
+    let pbx = std::thread::spawn(move || {
+        let mut seen = Vec::new();
+        let mut buf = [0u8; 16];
+        while !seen.ends_with(&END_BINARY) {
+            let n = pty.master.read(&mut buf).unwrap();
+            seen.extend_from_slice(&buf[..n]);
+        }
+        pty.master.write_all(&END_BINARY_ACK).unwrap();
+        while !seen.ends_with(b"BYE\r\n") {
+            let n = pty.master.read(&mut buf).unwrap();
+            seen.extend_from_slice(&buf[..n]);
+        }
+        pty.master.write_all(b"OK\r\n").unwrap();
+        (seen, pty)
+    });
+    dev.end(std::time::Duration::from_secs(2)).unwrap();
+    let (seen, _pty) = pbx.join().unwrap();
+    assert_eq!(seen, [&END_BINARY[..], b"BYE\r\n"].concat());
+}

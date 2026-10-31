@@ -6,6 +6,7 @@ use crate::smdr_reader::SmdrSource;
 use journal::{LeaseEvent, LeaseLog};
 use kxtd1232::{Transport, TransportError};
 use kxtd1232_sim::SimTransport;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
@@ -22,17 +23,104 @@ fn recover_from_poison<G>(poisoned: std::sync::PoisonError<G>) -> G {
 pub const DEFAULT_MAX_LEASE_WAITERS: usize = 4;
 pub const DEFAULT_LEASE_TIMEOUT: Duration = Duration::from_secs(30);
 pub const SMDR_RECV_SLICE: Duration = Duration::from_millis(50);
+pub const DEFAULT_RELEASE_STEP_TIMEOUT: Duration = Duration::from_secs(3);
 
-pub trait SimRelease: Transport {
-    fn bye_and_dtr_cycle(&mut self) -> Result<(), TransportError>;
+pub const END_BINARY: [u8; 3] = [0x02, 0x0B, 0x0D];
+pub const END_BINARY_ACK: [u8; 4] = [0x03, 0x0B, 0x00, 0x0E];
+pub const BYE: &[u8] = b"BYE\r\n";
+pub const PRG: &[u8] = b"PRG\r\n";
+pub const ECS_OF: &[u8] = b"ECS OF\r\n";
+
+pub trait PortRelease: Transport {
+    fn drop_dtr(&mut self) -> Result<(), TransportError>;
 }
 
-impl SimRelease for SimTransport {
-    fn bye_and_dtr_cycle(&mut self) -> Result<(), TransportError> {
-        let sent = self.send(b"BYE\r\n");
+impl PortRelease for SimTransport {
+    fn drop_dtr(&mut self) -> Result<(), TransportError> {
         self.reconnect();
-        sent
+        Ok(())
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionMode {
+    SignedOut,
+    Text,
+    Binary,
+}
+
+impl SessionMode {
+    pub(crate) fn after_send(self, data: &[u8]) -> Self {
+        if data == ECS_OF {
+            Self::Text
+        } else if data == PRG {
+            Self::Binary
+        } else if data == END_BINARY {
+            Self::Text
+        } else if data == BYE {
+            Self::SignedOut
+        } else {
+            self
+        }
+    }
+}
+
+fn wait_for(
+    t: &mut impl Transport,
+    timeout: Duration,
+    done: impl Fn(&[u8]) -> bool,
+) -> Result<(), Vec<u8>> {
+    let deadline = Instant::now() + timeout;
+    let mut got = Vec::new();
+    loop {
+        if done(&got) {
+            return Ok(());
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(got);
+        }
+        let ms = u64::try_from(remaining.as_millis()).unwrap_or(u64::MAX);
+        match t.recv(ms) {
+            Ok(bytes) => got.extend(bytes),
+            Err(_) => return Err(got),
+        }
+    }
+}
+
+fn has_ok_line(text: &[u8]) -> bool {
+    String::from_utf8_lossy(text)
+        .split('\n')
+        .any(|l| l.trim() == "OK")
+}
+
+pub(crate) fn end_session(
+    t: &mut impl PortRelease,
+    mode: SessionMode,
+    step_timeout: Duration,
+) -> Result<(), PortReleaseError> {
+    let logged_out = match mode {
+        SessionMode::SignedOut => Ok(()),
+        SessionMode::Binary => end_binary(t, step_timeout).and_then(|()| bye(t, step_timeout)),
+        SessionMode::Text => bye(t, step_timeout),
+    };
+    let dtr = t.drop_dtr().map_err(PortReleaseError::DropDtr);
+    logged_out.and(dtr)
+}
+
+fn end_binary(t: &mut impl Transport, step_timeout: Duration) -> Result<(), PortReleaseError> {
+    t.send(&END_BINARY)
+        .map_err(PortReleaseError::EndBinarySend)?;
+    wait_for(t, step_timeout, |got| {
+        got.windows(END_BINARY_ACK.len())
+            .any(|w| w == END_BINARY_ACK)
+    })
+    .map_err(|got| PortReleaseError::EndBinaryNotAcked { got })
+}
+
+fn bye(t: &mut impl Transport, step_timeout: Duration) -> Result<(), PortReleaseError> {
+    t.send(BYE).map_err(PortReleaseError::ByeSend)?;
+    wait_for(t, step_timeout, has_ok_line).map_err(|got| PortReleaseError::ByeNotAcked { got })
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -63,6 +151,8 @@ struct Shared<T> {
     returned: Condvar,
     journal: Mutex<Box<dyn LeaseLog>>,
     max_waiters: usize,
+    release_step_timeout: Duration,
+    leased: Arc<AtomicBool>,
     #[cfg(target_os = "linux")]
     device: Mutex<Option<Arc<Mutex<device::SmdrDevice>>>>,
 }
@@ -91,16 +181,31 @@ impl<T> Shared<T> {
             state.transport = Some(transport);
             state.holder = None;
         }
+        self.leased.store(false, Ordering::SeqCst);
         self.returned.notify_all();
     }
 }
 
-pub struct PortManager<T: SimRelease> {
+pub struct PortManager<T: PortRelease> {
     shared: Arc<Shared<T>>,
 }
 
-impl<T: SimRelease> PortManager<T> {
+impl<T: PortRelease> PortManager<T> {
     pub fn new(transport: T, journal: impl LeaseLog + 'static, max_waiters: usize) -> Self {
+        Self::with_release_step_timeout(
+            transport,
+            journal,
+            max_waiters,
+            DEFAULT_RELEASE_STEP_TIMEOUT,
+        )
+    }
+
+    pub fn with_release_step_timeout(
+        transport: T,
+        journal: impl LeaseLog + 'static,
+        max_waiters: usize,
+        release_step_timeout: Duration,
+    ) -> Self {
         Self {
             shared: Arc::new(Shared {
                 state: Mutex::new(State {
@@ -111,6 +216,8 @@ impl<T: SimRelease> PortManager<T> {
                 returned: Condvar::new(),
                 journal: Mutex::new(Box::new(journal)),
                 max_waiters,
+                release_step_timeout,
+                leased: Arc::new(AtomicBool::new(false)),
                 #[cfg(target_os = "linux")]
                 device: Mutex::new(None),
             }),
@@ -163,6 +270,7 @@ impl<T: SimRelease> PortManager<T> {
             });
         };
         state.holder = Some(job_id.to_string());
+        self.shared.leased.store(true, Ordering::SeqCst);
         drop(state);
         if let Err(e) = self
             .shared
@@ -176,6 +284,7 @@ impl<T: SimRelease> PortManager<T> {
             shared: Arc::clone(&self.shared),
             transport: Some(transport),
             job_id: job_id.to_string(),
+            session: SessionMode::SignedOut,
         })
     }
 
@@ -203,17 +312,47 @@ impl<T: SimRelease> PortManager<T> {
         }
         let opened = Arc::new(Mutex::new(device::SmdrDevice::open(path, options)?));
         *slot = Some(Arc::clone(&opened));
-        Ok(device::SmdrDeviceHandle::new(opened))
+        Ok(device::SmdrDeviceHandle::new(
+            opened,
+            Arc::clone(&self.shared.leased),
+        ))
+    }
+
+    #[cfg(target_os = "linux")]
+    pub fn open_programming_device<'lease>(
+        &self,
+        lease: &'lease ProgrammingLease<T>,
+        path: &std::path::Path,
+        options: device::SmdrLineOptions,
+    ) -> Result<device::ProgrammingDevice<'lease>, device::DeviceError> {
+        if !Arc::ptr_eq(&self.shared, &lease.shared) || lease.transport.is_none() {
+            return Err(device::DeviceError::NoLease);
+        }
+        let slot = self
+            .shared
+            .device
+            .lock()
+            .unwrap_or_else(recover_from_poison);
+        let lock = match slot.as_ref() {
+            Some(smdr) => device::FlockCover::HeldBySmdr(Arc::clone(smdr)),
+            None => device::FlockCover::Own,
+        };
+        device::ProgrammingDevice::open(path, options, lock)
     }
 }
 
-pub struct ProgrammingLease<T: SimRelease> {
+pub struct ProgrammingLease<T: PortRelease> {
     shared: Arc<Shared<T>>,
     transport: Option<T>,
     job_id: String,
+    session: SessionMode,
 }
 
-impl<T: SimRelease> ProgrammingLease<T> {
+impl<T: PortRelease> ProgrammingLease<T> {
+    pub fn session_mode(&self) -> SessionMode {
+        self.session
+    }
+
     pub fn job_id(&self) -> &str {
         &self.job_id
     }
@@ -226,24 +365,35 @@ impl<T: SimRelease> ProgrammingLease<T> {
         let Some(mut transport) = self.transport.take() else {
             return Ok(());
         };
-        let cycled = transport.bye_and_dtr_cycle();
+        let cycled = end_session(
+            &mut transport,
+            self.session,
+            self.shared.release_step_timeout,
+        );
+        self.session = SessionMode::SignedOut;
         self.shared.restore(transport);
         let journaled = self
             .shared
             .record(LeaseEvent::Released, &self.job_id)
             .and_then(|()| self.shared.record(LeaseEvent::ReaderResumed, &self.job_id));
         match (cycled, journaled) {
-            (Err(e), _) => Err(PortReleaseError::Bye(e)),
+            (Err(e), _) => Err(e),
             (Ok(()), Err(e)) => Err(PortReleaseError::Journal(e)),
             (Ok(()), Ok(())) => Ok(()),
         }
     }
 }
 
-impl<T: SimRelease> Transport for ProgrammingLease<T> {
+impl<T: PortRelease> Transport for ProgrammingLease<T> {
     fn send(&mut self, data: &[u8]) -> Result<(), TransportError> {
         match self.transport.as_mut() {
-            Some(t) => t.send(data),
+            Some(t) => {
+                let sent = t.send(data);
+                if sent.is_ok() {
+                    self.session = self.session.after_send(data);
+                }
+                sent
+            }
             None => Err(TransportError::NothingWritten("lease released".into())),
         }
     }
@@ -260,7 +410,7 @@ impl<T: SimRelease> Transport for ProgrammingLease<T> {
     }
 }
 
-impl<T: SimRelease> Drop for ProgrammingLease<T> {
+impl<T: PortRelease> Drop for ProgrammingLease<T> {
     fn drop(&mut self) {
         if let Err(e) = self.release_inner() {
             tracing::error!(job_id = %self.job_id, error = %e, "programming lease release failed");
@@ -271,17 +421,25 @@ impl<T: SimRelease> Drop for ProgrammingLease<T> {
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum PortReleaseError {
-    #[error("BYE/DTR release failed: {0:?}")]
-    Bye(TransportError),
+    #[error("end-binary 02 0B 0D not sent: {0:?}")]
+    EndBinarySend(TransportError),
+    #[error("end-binary not acknowledged with 03 0B 00 0E; got {got:02X?}")]
+    EndBinaryNotAcked { got: Vec<u8> },
+    #[error("BYE not sent: {0:?}")]
+    ByeSend(TransportError),
+    #[error("BYE not acknowledged with OK; got {got:02X?}")]
+    ByeNotAcked { got: Vec<u8> },
+    #[error("DTR drop failed: {0:?}")]
+    DropDtr(TransportError),
     #[error("lease journal: {0}")]
     Journal(std::io::Error),
 }
 
-pub struct SmdrHandle<T: SimRelease> {
+pub struct SmdrHandle<T: PortRelease> {
     shared: Arc<Shared<T>>,
 }
 
-impl<T: SimRelease> SmdrSource for SmdrHandle<T> {
+impl<T: PortRelease> SmdrSource for SmdrHandle<T> {
     fn recv(&mut self, timeout_ms: u64) -> Result<Vec<u8>, TransportError> {
         let deadline = Instant::now() + Duration::from_millis(timeout_ms);
         loop {

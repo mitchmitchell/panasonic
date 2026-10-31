@@ -3,7 +3,10 @@
     reason = "a failed test setup step should panic the test"
 )]
 use kxprovd::port::journal::{LeaseEvent, LeaseJournal, LeaseLog, GAP_TRACKING_ISSUE};
-use kxprovd::port::{LeaseError, PortManager, PortMode};
+use kxprovd::port::{
+    LeaseError, PortManager, PortMode, PortReleaseError, ProgrammingLease, SessionMode, BYE,
+    ECS_OF, END_BINARY, PRG,
+};
 use kxprovd::smdr_reader::SmdrSource;
 use kxtd1232::Transport;
 use kxtd1232_sim::{SimPbx, SimTransport};
@@ -17,6 +20,30 @@ fn manager(dir: &tempfile::TempDir, max: usize) -> PortManager<SimTransport> {
         LeaseJournal::new(dir.path().join("lease.jsonl")),
         max,
     )
+}
+
+fn read_until(lease: &mut ProgrammingLease<SimTransport>, want: &[u8]) {
+    let mut got = Vec::new();
+    while !got.windows(want.len()).any(|w| w == want) {
+        got.extend(lease.recv(500).unwrap());
+    }
+}
+
+fn login(lease: &mut ProgrammingLease<SimTransport>) {
+    lease.send(b"\r\n").unwrap();
+    let signon = kxtd1232::SignOn::default();
+    read_until(lease, signon.password_prompt.as_bytes());
+    lease.send(b"1234\r").unwrap();
+    read_until(lease, signon.mode_start.as_bytes());
+    lease.send(ECS_OF).unwrap();
+    read_until(lease, b"OK");
+    lease.send(PRG).unwrap();
+    read_until(lease, b"OK");
+    assert_eq!(lease.session_mode(), SessionMode::Binary);
+}
+
+fn position(hay: &[u8], needle: &[u8]) -> Option<usize> {
+    hay.windows(needle.len()).position(|w| w == needle)
 }
 
 fn events(dir: &tempfile::TempDir) -> Vec<(LeaseEvent, String)> {
@@ -51,7 +78,7 @@ fn lease_switches_mode_and_release_returns_to_smdr() {
 }
 
 #[test]
-fn release_sends_bye_then_cycles_dtr_on_the_simulator() {
+fn release_ends_binary_then_bye_then_drops_dtr() {
     let dir = tempfile::tempdir().unwrap();
     let pm = manager(&dir, 1);
     let mut handle = pm.smdr_handle();
@@ -60,24 +87,93 @@ fn release_sends_bye_then_cycles_dtr_on_the_simulator() {
     let mut lease = pm
         .request_lease("job-1", Duration::from_millis(50))
         .unwrap();
+    login(&mut lease);
+    lease.release().unwrap();
+    let sent = pm.inspect_transport(|t| t.sent.clone()).unwrap();
+    let end = position(&sent, &END_BINARY).expect("end-binary sent");
+    let bye = position(&sent, BYE).expect("BYE sent");
+    assert!(end < bye, "BYE before end-binary: {sent:02X?}");
+    assert!(sent.ends_with(BYE), "{sent:?}");
+    assert_eq!(handle.recv(100).unwrap(), greeting);
+}
+
+#[test]
+fn unacked_end_binary_never_sends_bye_and_still_drops_dtr() {
+    let dir = tempfile::tempdir().unwrap();
+    let pm = PortManager::with_release_step_timeout(
+        SimTransport::new(SimPbx::new(Default::default(), "1234")),
+        LeaseJournal::new(dir.path().join("lease.jsonl")),
+        1,
+        Duration::from_millis(200),
+    );
+    let mut handle = pm.smdr_handle();
+    let greeting = handle.recv(100).unwrap();
+    let mut lease = pm
+        .request_lease("job-1", Duration::from_millis(50))
+        .unwrap();
+    lease.send(PRG).unwrap();
+    assert_eq!(lease.session_mode(), SessionMode::Binary);
+    assert!(matches!(
+        lease.release(),
+        Err(PortReleaseError::EndBinaryNotAcked { .. })
+    ));
+    let sent = pm.inspect_transport(|t| t.sent.clone()).unwrap();
+    assert!(sent.ends_with(&END_BINARY), "{sent:02X?}");
+    assert_eq!(position(&sent, BYE), None);
+    assert_eq!(pm.mode(), PortMode::Smdr);
+    assert_eq!(handle.recv(100).unwrap(), greeting);
+}
+
+#[test]
+fn unconfirmed_bye_is_a_typed_error_and_still_drops_dtr() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut pbx = SimPbx::new(Default::default(), "1234");
+    pbx.silent_bye = true;
+    let pm = PortManager::with_release_step_timeout(
+        SimTransport::new(pbx),
+        LeaseJournal::new(dir.path().join("lease.jsonl")),
+        1,
+        Duration::from_millis(200),
+    );
+    let mut handle = pm.smdr_handle();
+    let greeting = handle.recv(100).unwrap();
+    let mut lease = pm
+        .request_lease("job-1", Duration::from_millis(50))
+        .unwrap();
+    login(&mut lease);
+    assert!(matches!(
+        lease.release(),
+        Err(PortReleaseError::ByeNotAcked { .. })
+    ));
+    assert_eq!(pm.mode(), PortMode::Smdr);
+    assert_eq!(handle.recv(100).unwrap(), greeting);
+}
+
+#[test]
+fn a_signed_out_lease_only_drops_dtr() {
+    let dir = tempfile::tempdir().unwrap();
+    let pm = manager(&dir, 1);
+    let mut lease = pm
+        .request_lease("job-1", Duration::from_millis(50))
+        .unwrap();
     lease.send(b"X").unwrap();
     lease.release().unwrap();
     let sent = pm.inspect_transport(|t| t.sent.clone()).unwrap();
-    assert!(sent.ends_with(b"BYE\r\n"), "{sent:?}");
-    assert_eq!(handle.recv(100).unwrap(), greeting);
+    assert_eq!(sent, b"X");
 }
 
 #[test]
 fn dropping_a_lease_releases_it() {
     let dir = tempfile::tempdir().unwrap();
     let pm = manager(&dir, 1);
-    drop(
-        pm.request_lease("job-1", Duration::from_millis(50))
-            .unwrap(),
-    );
+    let mut lease = pm
+        .request_lease("job-1", Duration::from_millis(50))
+        .unwrap();
+    login(&mut lease);
+    drop(lease);
     assert_eq!(pm.mode(), PortMode::Smdr);
     let sent = pm.inspect_transport(|t| t.sent.clone()).unwrap();
-    assert!(sent.ends_with(b"BYE\r\n"));
+    assert!(sent.ends_with(BYE));
 }
 
 #[test]
