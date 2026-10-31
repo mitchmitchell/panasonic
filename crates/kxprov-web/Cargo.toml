@@ -8,6 +8,7 @@ publish.workspace = true
 
 [dependencies]
 askama.workspace = true
+tracing.workspace = true
 axum.workspace = true
 axum_csrf.workspace = true
 hex = "0.4"

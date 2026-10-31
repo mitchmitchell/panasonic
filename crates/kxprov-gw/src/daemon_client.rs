@@ -71,6 +71,14 @@ impl DaemonClient {
     }
 }
 
+const UNEXPECTED_REPLY_REASON: &str =
+    "a daemon reply this gateway does not map fails closed as a bad request rather than guessing";
+
+fn unexpected_daemon_reply() -> BackendError {
+    tracing::warn!(reason = UNEXPECTED_REPLY_REASON, "unexpected daemon reply");
+    BackendError::BadRequest("daemon")
+}
+
 fn daemon_auth(caller: &CallerIdentity, gateway_bearer: &str) -> (RequestAuth, Option<String>) {
     match caller {
         CallerIdentity::Web(w) => (
@@ -115,7 +123,7 @@ fn map_remote_error(code: &str, message: &str) -> BackendError {
         _ if lower.contains("live write") || lower.contains("live_write") => {
             BackendError::LiveWritesBlocked
         }
-        _ => BackendError::BadRequest("daemon"),
+        _ => unexpected_daemon_reply(),
     }
 }
 
@@ -160,7 +168,7 @@ impl DaemonBackend for DaemonClient {
     async fn status(&self, caller: &CallerIdentity) -> Result<DaemonStatus, BackendError> {
         match self.call(caller, RequestBody::Status).await? {
             ResponseResult::Status(s) => Ok(status_from_response(s)),
-            _ => Err(BackendError::BadRequest("daemon")),
+            _ => Err(unexpected_daemon_reply()),
         }
     }
 
@@ -169,14 +177,14 @@ impl DaemonBackend for DaemonClient {
             ResponseResult::ListBackups(r) => Ok(BackupList {
                 backups: r.backups.into_iter().map(backup_from_api).collect(),
             }),
-            _ => Err(BackendError::BadRequest("daemon")),
+            _ => Err(unexpected_daemon_reply()),
         }
     }
 
     async fn backup_now(&self, caller: &CallerIdentity) -> Result<BackupInfo, BackendError> {
         match self.call(caller, RequestBody::BackupNow).await? {
             ResponseResult::BackupNow(r) => Ok(backup_from_api(r.backup)),
-            _ => Err(BackendError::BadRequest("daemon")),
+            _ => Err(unexpected_daemon_reply()),
         }
     }
 
@@ -246,7 +254,7 @@ impl DaemonBackend for DaemonClient {
             .await?
         {
             ResponseResult::ReadFields(r) => r.rows.into_iter().next().map(|row| row.value),
-            _ => return Err(BackendError::BadRequest("daemon")),
+            _ => return Err(unexpected_daemon_reply()),
         }
         .unwrap_or_default();
         let result = self
@@ -265,7 +273,8 @@ impl DaemonBackend for DaemonClient {
             return Err(BackendError::BadRequest("daemon"));
         };
         let summary = if r.diff.is_empty() {
-            format!("Plan {} (table {table}, record {record})", r.plan_id.0)
+            let label = kxtd1232::tables::spec(table).map_or(record, |s| s.index_to_label(record));
+            format!("Plan {} (table {table}, record {label})", r.plan_id.0)
         } else {
             r.diff.join("; ")
         };
@@ -303,7 +312,7 @@ impl DaemonBackend for DaemonClient {
             .await?
         {
             ResponseResult::SubmitApproval(r) => Ok(r.approval),
-            _ => Err(BackendError::BadRequest("daemon")),
+            _ => Err(unexpected_daemon_reply()),
         }
     }
 
@@ -328,7 +337,7 @@ impl DaemonBackend for DaemonClient {
                 message: String::new(),
             }),
             ResponseResult::ApplyApprovalRequired(r) => Err(BackendError::ApprovalRequired(r)),
-            _ => Err(BackendError::BadRequest("daemon")),
+            _ => Err(unexpected_daemon_reply()),
         }
     }
 

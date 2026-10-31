@@ -24,17 +24,23 @@ async fn body_string(resp: axum::response::Response) -> String {
 }
 
 fn app(mode: OperationalMode, profile: Profile) -> axum::Router {
+    app_with_mock(mode, profile).0
+}
+
+fn app_with_mock(mode: OperationalMode, profile: Profile) -> (axum::Router, Arc<MockDaemon>) {
+    let mock = Arc::new(MockDaemon::with_mode_profile(mode, profile));
     let mut state = test_web_state();
-    state.backend = Arc::new(MockDaemon::with_mode_profile(mode, profile));
+    state.backend = mock.clone();
     let session = SessionManagerLayer::new(MemoryStore::default())
         .with_name("__Host-kxprov.sid")
         .with_secure(true)
         .with_http_only(true)
         .with_same_site(SameSite::Strict)
         .with_expiry(Expiry::OnInactivity(CookieDuration::seconds(900)));
-    kxprov_web::router(state)
+    let router = kxprov_web::router(state)
         .layer(from_fn(require_web_session))
-        .layer(session)
+        .layer(session);
+    (router, mock)
 }
 
 fn form_csrf(html: &str) -> String {
@@ -216,59 +222,97 @@ async fn post_form(
     (status, body_string(resp).await)
 }
 
-#[tokio::test]
-async fn record_zero_rejected_on_read_and_plan() {
-    let app = app(OperationalMode::Testing, Profile::Sim);
-    let (cookie, csrf, _) = sign_in(&app).await;
-    let csrf = form_urlencoded(&csrf);
-    let (status, html) = post_form(
-        &app,
-        "/read",
-        &cookie,
-        format!("table=36&record=0&_csrf={csrf}"),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    assert!(html.contains("Enter a whole number from 1 to 9999."));
-    assert!(!html.contains("read-result"));
-    let (status, html) = post_form(
-        &app,
-        "/plan",
-        &cookie,
-        format!("table=36&record=0&field=cid_number&new_value=1&_csrf={csrf}"),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    assert!(html.contains("Enter a whole number from 1 to 9999."));
-    assert!(!html.contains("plan-result"));
+fn table_36_range() -> (u16, u16) {
+    kxtd1232::tables::spec(36).unwrap().label_range().unwrap()
 }
 
 #[tokio::test]
-async fn non_integer_and_out_of_range_records_get_plain_message() {
-    let app = app(OperationalMode::Testing, Profile::Sim);
+async fn first_and_last_labels_map_to_first_and_last_index() {
+    let (app, mock) = app_with_mock(OperationalMode::Testing, Profile::Sim);
     let (cookie, csrf, _) = sign_in(&app).await;
     let csrf = form_urlencoded(&csrf);
-    for record in ["abc", "1.5", "-1", "10000", ""] {
-        let (_, html) = post_form(
+    let (first, last) = table_36_range();
+    let records = kxtd1232::tables::spec(36).unwrap().records;
+    for label in [first, last] {
+        let (status, html) = post_form(
+            &app,
+            "/read",
+            &cookie,
+            format!("table=36&record={label}&_csrf={csrf}"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(html.contains("read-result"), "read {label}");
+        assert!(
+            html.contains(&format!("Record {label} in table 36")),
+            "read {label}"
+        );
+        let (status, html) = post_form(
+            &app,
+            "/plan",
+            &cookie,
+            format!("table=36&record={label}&field=cid_number&new_value=1&_csrf={csrf}"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(html.contains("plan-result"), "plan {label}");
+    }
+    assert_eq!(
+        mock.requested_indexes().await,
+        vec![0, 0, records - 1, records - 1]
+    );
+}
+
+#[tokio::test]
+async fn labels_outside_the_table_range_get_the_in_page_error() {
+    let (app, mock) = app_with_mock(OperationalMode::Testing, Profile::Sim);
+    let (cookie, csrf, _) = sign_in(&app).await;
+    let csrf = form_urlencoded(&csrf);
+    let (first, last) = table_36_range();
+    let error = format!("Enter a whole number from {first} to {last} for table 36.");
+    let mut outside = vec![
+        (last + 1).to_string(),
+        "abc".into(),
+        "1.5".into(),
+        "-1".into(),
+        String::new(),
+        "65536".into(),
+    ];
+    if let Some(below) = first.checked_sub(1) {
+        outside.push(below.to_string());
+    }
+    for record in &outside {
+        let (status, html) = post_form(
             &app,
             "/read",
             &cookie,
             format!("table=36&record={record}&_csrf={csrf}"),
         )
         .await;
-        assert!(
-            html.contains("Enter a whole number from 1 to 9999."),
-            "record {record:?}"
-        );
+        assert_eq!(status, StatusCode::OK);
+        assert!(html.contains(&error), "read {record:?}");
+        assert!(!html.contains("read-result"), "read {record:?}");
+        let (status, html) = post_form(
+            &app,
+            "/plan",
+            &cookie,
+            format!("table=36&record={record}&field=cid_number&new_value=1&_csrf={csrf}"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(html.contains(&error), "plan {record:?}");
+        assert!(!html.contains("plan-result"), "plan {record:?}");
     }
-    let (_, html) = post_form(
-        &app,
-        "/read",
-        &cookie,
-        format!("table=36&record=9999&_csrf={csrf}"),
-    )
-    .await;
-    assert!(html.contains("read-result"));
+    assert!(mock.requested_indexes().await.is_empty());
+}
+
+#[tokio::test]
+async fn help_text_names_each_table_range() {
+    let app = app(OperationalMode::Testing, Profile::Sim);
+    let (_, _, dashboard) = sign_in(&app).await;
+    let (first, last) = table_36_range();
+    assert!(dashboard.contains(&format!("table 36 from {first} to {last}")));
+    assert!(!dashboard.contains("9999"));
 }
 
 #[tokio::test]

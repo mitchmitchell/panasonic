@@ -16,9 +16,26 @@ pub struct TableSpec {
     pub records_per_frame: u16,
     /// Words per frame (NN byte of the read request).
     pub words_per_frame: u8,
+    pub label_offset: u16,
 }
 
 impl TableSpec {
+    pub const fn label_range(&self) -> Option<(u16, u16)> {
+        if self.records == 0 {
+            return None;
+        }
+        Some((self.label_offset, self.label_offset + (self.records - 1)))
+    }
+
+    pub fn label_to_index(&self, label: u16) -> Option<u16> {
+        let index = label.checked_sub(self.label_offset)?;
+        (index < self.records).then_some(index)
+    }
+
+    pub const fn index_to_label(&self, index: u16) -> u16 {
+        index.saturating_add(self.label_offset)
+    }
+
     /// Total wire bytes of the table.
     pub const fn wire_bytes(&self) -> usize {
         self.record_bytes as usize * self.records as usize
@@ -58,6 +75,7 @@ const fn t(id: u8, record_bytes: u16, records: u16, rpf: u16, nn: u8) -> TableSp
         records,
         records_per_frame: rpf,
         words_per_frame: nn,
+        label_offset: 0,
     }
 }
 

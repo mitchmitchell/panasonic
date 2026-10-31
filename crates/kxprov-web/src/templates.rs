@@ -28,6 +28,7 @@ pub struct DashboardTemplate {
     pub queue_depth: u32,
     pub table_value: String,
     pub record_value: String,
+    pub record_help: String,
     pub field_value: String,
     pub new_value_value: String,
     pub show_read_form_error: bool,

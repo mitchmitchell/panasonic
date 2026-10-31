@@ -118,6 +118,7 @@ fn empty_dashboard(csrf: &str) -> DashboardTemplate {
         queue_depth: 0,
         table_value,
         record_value,
+        record_help: fields::record_range_help(),
         field_value,
         new_value_value,
         show_read_form_error: false,
@@ -197,7 +198,7 @@ fn apply_plan_result(
     tpl.diff_hash_hex = summary.diff_hash.0.clone();
     tpl.plan_summary = summary.summary.clone();
     tpl.plan_table = summary.table;
-    tpl.plan_record = summary.record;
+    tpl.plan_record = fields::record_label(summary.table, summary.record);
     tpl.plan_field = summary.field.clone();
     tpl.plan_old_value = display_value(&summary.old_value);
     tpl.plan_new_value = display_value(&summary.new_value);
@@ -269,6 +270,16 @@ fn login_rate_limited_response(message: &str, retry_after: std::time::Duration) 
     resp
 }
 
+const RENDER_FALLBACK_REASON: &str =
+    "askama render fails only on a template bug; answer with plain text instead of panicking the handler";
+
+fn render_page<T: Template>(tpl: &T) -> Html<String> {
+    Html(tpl.render().unwrap_or_else(|err| {
+        tracing::warn!(reason = RENDER_FALLBACK_REASON, %err, "page render failed");
+        "This page could not be shown. Reload to try again.".into()
+    }))
+}
+
 pub fn error_page(status: StatusCode, title: &str, message: &str, next_step: &str) -> Response {
     let html = templates::ErrorTemplate {
         page_title: title.into(),
@@ -276,7 +287,10 @@ pub fn error_page(status: StatusCode, title: &str, message: &str, next_step: &st
         next_step: next_step.into(),
     }
     .render()
-    .unwrap_or_else(|_| format!("{title}. {message} {next_step}"));
+    .unwrap_or_else(|err| {
+        tracing::warn!(reason = RENDER_FALLBACK_REASON, %err, "error page render failed");
+        format!("{title}. {message} {next_step}")
+    });
     (status, Html(html)).into_response()
 }
 
@@ -303,20 +317,16 @@ async fn login_form(session: Session, Query(query): Query<LoginQuery>) -> impl I
     let cookie = csrf::csrf_set_cookie_value(&token);
     (
         [(header::SET_COOKIE, cookie)],
-        Html(
-            templates::LoginTemplate {
-                page_title: sign_in_page_title().into(),
-                show_error,
-                error: if show_error {
-                    LOGIN_FAILED_MESSAGE.into()
-                } else {
-                    String::new()
-                },
-                csrf_token: token,
-            }
-            .render()
-            .unwrap_or_default(),
-        ),
+        render_page(&templates::LoginTemplate {
+            page_title: sign_in_page_title().into(),
+            show_error,
+            error: if show_error {
+                LOGIN_FAILED_MESSAGE.into()
+            } else {
+                String::new()
+            },
+            csrf_token: token,
+        }),
     )
 }
 
@@ -451,7 +461,7 @@ pub struct PlanForm {
 
 fn parse_table_record(form: &TableRecordForm) -> Result<(u8, u16), String> {
     let table = fields::parse_table_input(&form.table)?;
-    let record = fields::parse_record_input(&form.record)?;
+    let record = fields::parse_record_input(table, &form.record)?;
     Ok((table, record))
 }
 
@@ -476,7 +486,7 @@ async fn read_record(
         Err(msg) => {
             tpl.show_read_form_error = true;
             tpl.read_form_error = msg;
-            return Html(tpl.render().unwrap_or_default()).into_response();
+            return render_page(&tpl).into_response();
         }
     };
 
@@ -488,7 +498,7 @@ async fn read_record(
         Ok(resp) => {
             tpl.show_read_result = true;
             tpl.read_table = table;
-            tpl.read_record = record;
+            tpl.read_record = fields::record_label(table, record);
             tpl.read_fields = resp
                 .fields
                 .into_iter()
@@ -504,7 +514,7 @@ async fn read_record(
         }
     }
 
-    Html(tpl.render().unwrap_or_default()).into_response()
+    render_page(&tpl).into_response()
 }
 
 async fn dashboard(State(state): State<WebState>, session: Session) -> impl IntoResponse {
@@ -513,10 +523,7 @@ async fn dashboard(State(state): State<WebState>, session: Session) -> impl Into
     let caller = caller_from_session(&session);
     let mut tpl = empty_dashboard(&token);
     fill_dashboard_from_status(&mut tpl, &state, &caller).await;
-    (
-        [(header::SET_COOKIE, cookie)],
-        Html(tpl.render().unwrap_or_default()),
-    )
+    ([(header::SET_COOKIE, cookie)], render_page(&tpl))
 }
 
 fn parse_plan_form(form: &PlanForm) -> Result<PlanChangeRequest, String> {
@@ -561,7 +568,7 @@ async fn plan_change(
             tpl.plan_form_error =
                 "Could not read daemon status. Planning is unavailable until status succeeds."
                     .into();
-            return Html(tpl.render().unwrap_or_default()).into_response();
+            return render_page(&tpl).into_response();
         }
     };
 
@@ -570,7 +577,7 @@ async fn plan_change(
         Err(msg) => {
             tpl.show_plan_form_error = true;
             tpl.plan_form_error = msg;
-            return Html(tpl.render().unwrap_or_default()).into_response();
+            return render_page(&tpl).into_response();
         }
     };
 
@@ -582,7 +589,7 @@ async fn plan_change(
         }
     }
 
-    Html(tpl.render().unwrap_or_default()).into_response()
+    render_page(&tpl).into_response()
 }
 
 #[cfg(test)]

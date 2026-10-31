@@ -44,6 +44,7 @@ struct Inner {
     backups: Vec<BackupInfo>,
     next_job: u64,
     live_writes_approved: bool,
+    requested_indexes: Vec<u16>,
 }
 
 pub struct MockDaemon {
@@ -51,6 +52,10 @@ pub struct MockDaemon {
 }
 
 impl MockDaemon {
+    pub async fn requested_indexes(&self) -> Vec<u16> {
+        self.inner.read().await.requested_indexes.clone()
+    }
+
     pub fn new() -> Self {
         Self::with_operational_mode(OperationalMode::Testing)
     }
@@ -86,6 +91,7 @@ impl MockDaemon {
                 }],
                 next_job: 0,
                 live_writes_approved: false,
+                requested_indexes: Vec::new(),
             })),
         }
     }
@@ -247,6 +253,7 @@ impl DaemonBackend for MockDaemon {
         req: ReadFieldsRequest,
     ) -> Result<ReadFieldsResponse, BackendError> {
         Self::require_scope(caller, Scope::Read)?;
+        self.inner.write().await.requested_indexes.push(req.record);
         let fields = FieldKind::ALL
             .into_iter()
             .filter(|kind| kind.table() == req.table)
@@ -267,6 +274,7 @@ impl DaemonBackend for MockDaemon {
         kxtd1232::tables::check_writable_table(req.table)
             .map_err(|_| BackendError::BadRequest("table not writable"))?;
         let kind = Self::field_kind_for_request(&req)?;
+        self.inner.write().await.requested_indexes.push(req.record);
         let old_value = Self::simulated_value(kind, req.record);
         let inner = self.inner.read().await;
         let profile = inner.profile;
@@ -277,8 +285,9 @@ impl DaemonBackend for MockDaemon {
         let field = req.field.clone();
         let new_value = req.new_value.clone();
         let plan = ImmutablePlan::from_request(profile, req, creator)?;
+        let label = kxtd1232::tables::spec(table).map_or(record, |s| s.index_to_label(record));
         let summary_text = format!(
-            "Table {table}, record {record}: {field} changes from \"{old_value}\" to \"{new_value}\""
+            "Table {table}, record {label}: {field} changes from \"{old_value}\" to \"{new_value}\""
         );
         let plan_id = plan.id.clone();
         let diff_hash = plan.diff_hash.clone();
