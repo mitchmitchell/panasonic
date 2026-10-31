@@ -295,6 +295,7 @@ pub struct SmdrDeviceHandle {
 pub type PreReadHook = Box<dyn FnMut() + Send>;
 
 pub const SMDR_READ_SLICE_MS: u64 = 50;
+const SMDR_READ_SLICE: std::time::Duration = std::time::Duration::from_millis(SMDR_READ_SLICE_MS);
 
 #[cfg(feature = "test-util")]
 pub type ReadbackHook = Box<dyn FnMut(&mut Termios) + Send>;
@@ -385,7 +386,11 @@ impl SmdrSource for SmdrDeviceHandle {
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
         loop {
             let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-            let slice = remaining.min(std::time::Duration::from_millis(SMDR_READ_SLICE_MS));
+            let slice_ms = if remaining >= SMDR_READ_SLICE {
+                SMDR_READ_SLICE_MS
+            } else {
+                u64::from(remaining.subsec_millis())
+            };
             let resumed = self.resume_after_lease().map_err(|e| {
                 TransportError::LinkDown(kxtd1232::LinkDownError {
                     detail: format!("SMDR line settings not restored after a lease: {e}"),
@@ -401,14 +406,13 @@ impl SmdrSource for SmdrDeviceHandle {
                 let unchanged = self.lease_epoch.load(Ordering::SeqCst) == self.configured_epoch;
                 if !self.leased.load(Ordering::SeqCst) && unchanged {
                     let mut reader: &File = &device.file;
-                    let slice_ms = u64::try_from(slice.as_millis()).unwrap_or(u64::MAX);
                     return crate::transport::recv_with_poll(&mut reader, slice_ms);
                 }
             }
             if remaining.is_zero() {
                 return Err(TransportError::Timeout);
             }
-            std::thread::sleep(slice);
+            std::thread::sleep(std::time::Duration::from_millis(slice_ms));
         }
     }
 }

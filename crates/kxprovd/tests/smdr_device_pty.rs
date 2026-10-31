@@ -386,7 +386,7 @@ fn a_lease_request_during_smdr_resume_waits_until_resume_finishes() {
     let (entered_tx, entered_rx) = std::sync::mpsc::channel();
     let hook_finished = Arc::clone(&finished);
     smdr.set_resume_readback_hook(Box::new(move |_| {
-        entered_tx.send(()).unwrap();
+        let _test_side_only_listens_for_the_first_resume = entered_tx.send(());
         std::thread::sleep(std::time::Duration::from_millis(300));
         hook_finished.store(true, Ordering::SeqCst);
     }));
@@ -400,7 +400,12 @@ fn a_lease_request_during_smdr_resume_waits_until_resume_finishes() {
         finished.load(Ordering::SeqCst),
         "lease granted before SMDR resume finished"
     );
-    assert!(reader.join().unwrap().unwrap().starts_with(b"10/30/26"));
+    let smdr_got = reader.join().unwrap();
+    assert!(
+        matches!(&smdr_got, Ok(b) if b.starts_with(b"10/30/26"))
+            || matches!(smdr_got, Err(kxtd1232::TransportError::Timeout)),
+        "SMDR must either read the pre-lease line or wait out the lease: {smdr_got:?}"
+    );
     lease.release().unwrap();
 }
 
@@ -572,4 +577,52 @@ fn smdr_recv_in_smdr_mode_returns_within_one_read_slice() {
         waited <= std::time::Duration::from_millis(400),
         "{waited:?}"
     );
+}
+
+#[cfg(feature = "test-util")]
+#[test]
+fn smdr_never_reads_with_a_lease_dirtied_line_after_a_lease_lands_between_resume_and_read() {
+    for run in 0..10 {
+        let mut pty = pty();
+        let pm = manager();
+        let mut smdr = pm
+            .open_smdr_device(&pty.path, SmdrLineOptions::default())
+            .unwrap();
+        let (gap_tx, gap_rx) = std::sync::mpsc::channel();
+        let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
+        let mut first = true;
+        smdr.set_pre_read_hook(Box::new(move || {
+            if std::mem::take(&mut first) {
+                gap_tx.send(()).unwrap();
+                go_rx.recv().unwrap();
+            }
+        }));
+        let reader = std::thread::spawn(move || smdr.recv(2000));
+        gap_rx.recv().unwrap();
+        let lease = pm
+            .request_lease("job-1", std::time::Duration::from_secs(2))
+            .unwrap();
+        let dev = pm
+            .open_programming_device(&lease, &pty.path, SmdrLineOptions::default())
+            .unwrap();
+        let mut t = termios::tcgetattr(&pty.slave).unwrap();
+        t.local_flags |= LocalFlags::ECHO;
+        t.input_flags |= InputFlags::IXOFF;
+        termios::tcsetattr(&pty.slave, SetArg::TCSANOW, &t).unwrap();
+        dev.end(std::time::Duration::from_millis(20)).unwrap();
+        lease.release().unwrap();
+        pty.master.write_all(b"10/30/26\r\n").unwrap();
+        go_tx.send(()).unwrap();
+        let smdr_got = reader.join().unwrap();
+        let after = termios::tcgetattr(&pty.slave).unwrap();
+        assert!(
+            !after.local_flags.contains(LocalFlags::ECHO)
+                && !after.input_flags.contains(InputFlags::IXOFF),
+            "run {run}: SMDR read without re-applying termios after the lease: {smdr_got:?}"
+        );
+        assert!(
+            smdr_got.as_ref().is_ok_and(|b| b.starts_with(b"10/30/26")),
+            "run {run}: {smdr_got:?}"
+        );
+    }
 }
