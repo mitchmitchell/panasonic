@@ -2,13 +2,13 @@
     clippy::unwrap_used,
     reason = "a failed test setup step should panic the test"
 )]
-use kxprovd::port::journal::{LeaseEvent, LeaseJournal, GAP_TRACKING_ISSUE};
+use kxprovd::port::journal::{LeaseEvent, LeaseJournal, LeaseLog, GAP_TRACKING_ISSUE};
 use kxprovd::port::{LeaseError, PortManager, PortMode};
 use kxprovd::smdr_reader::SmdrSource;
 use kxtd1232::Transport;
 use kxtd1232_sim::{SimPbx, SimTransport};
 use std::os::unix::fs::PermissionsExt;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 fn manager(dir: &tempfile::TempDir, max: usize) -> PortManager<SimTransport> {
@@ -170,4 +170,126 @@ fn lease_events_are_journaled_with_utc_time_job_id_and_gap_link() {
     }
     let mode = std::fs::metadata(&path).unwrap().permissions().mode();
     assert_eq!(mode & 0o777, 0o600);
+}
+
+#[derive(Clone, Default)]
+struct FailingLog {
+    fail_on: Arc<Mutex<Vec<LeaseEvent>>>,
+}
+
+impl LeaseLog for FailingLog {
+    fn append(&mut self, event: LeaseEvent, _job_id: &str) -> std::io::Result<()> {
+        if self.fail_on.lock().unwrap().contains(&event) {
+            Err(std::io::Error::other("injected journal failure"))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+fn failing_manager(max: usize) -> (PortManager<SimTransport>, FailingLog) {
+    let log = FailingLog::default();
+    let pm = PortManager::new(
+        SimTransport::new(SimPbx::new(Default::default(), "1234")),
+        log.clone(),
+        max,
+    );
+    (pm, log)
+}
+
+fn assert_port_restored(pm: &PortManager<SimTransport>, log: &FailingLog) {
+    log.fail_on.lock().unwrap().clear();
+    assert_eq!(pm.mode(), PortMode::Smdr);
+    assert_eq!(pm.holder(), None);
+    pm.request_lease("after", Duration::from_millis(50))
+        .unwrap()
+        .release()
+        .unwrap();
+}
+
+#[test]
+fn a_granted_journal_failure_fails_closed_and_restores_the_port() {
+    for event in [LeaseEvent::Granted, LeaseEvent::ReaderPaused] {
+        let (pm, log) = failing_manager(1);
+        log.fail_on.lock().unwrap().push(event);
+        assert!(matches!(
+            pm.request_lease("job-1", Duration::from_millis(50)),
+            Err(LeaseError::Journal(_))
+        ));
+        assert_port_restored(&pm, &log);
+    }
+}
+
+#[test]
+fn a_refusal_journal_failure_keeps_the_typed_timeout() {
+    let (pm, log) = failing_manager(1);
+    let held = pm
+        .request_lease("job-1", Duration::from_millis(50))
+        .unwrap();
+    log.fail_on.lock().unwrap().push(LeaseEvent::TimedOut);
+    assert!(matches!(
+        pm.request_lease("job-2", Duration::from_millis(10)),
+        Err(LeaseError::Timeout { .. })
+    ));
+    held.release().unwrap();
+    assert_port_restored(&pm, &log);
+}
+
+#[test]
+fn a_refusal_journal_failure_keeps_the_typed_queue_full() {
+    let (pm, log) = failing_manager(0);
+    let held = pm
+        .request_lease("job-1", Duration::from_millis(50))
+        .unwrap();
+    log.fail_on.lock().unwrap().push(LeaseEvent::Refused);
+    assert!(matches!(
+        pm.request_lease("job-2", Duration::from_millis(10)),
+        Err(LeaseError::QueueFull { max: 0 })
+    ));
+    held.release().unwrap();
+    assert_port_restored(&pm, &log);
+}
+
+#[test]
+fn a_timeout_racing_a_release_never_loses_the_port() {
+    let (pm, log) = failing_manager(1);
+    let pm = Arc::new(pm);
+    for i in 0..200 {
+        let held = pm
+            .request_lease("holder", Duration::from_millis(50))
+            .unwrap();
+        let waiter = {
+            let pm = Arc::clone(&pm);
+            std::thread::spawn(move || {
+                pm.request_lease("racer", Duration::from_millis(1))
+                    .map(|l| l.release())
+            })
+        };
+        if i % 2 == 0 {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        held.release().unwrap();
+        let _ = waiter.join().unwrap();
+        assert_eq!(pm.mode(), PortMode::Smdr, "iteration {i}");
+    }
+    assert_port_restored(&pm, &log);
+}
+
+#[test]
+fn a_lease_request_is_not_held_up_by_a_long_smdr_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let pm = Arc::new(manager(&dir, 1));
+    let mut handle = pm.smdr_handle();
+    let _ = handle.recv(100);
+    let reader = std::thread::spawn(move || handle.recv(5_000));
+    std::thread::sleep(Duration::from_millis(20));
+    let started = std::time::Instant::now();
+    let lease = pm.request_lease("job-1", Duration::from_secs(1)).unwrap();
+    assert!(
+        started.elapsed() < Duration::from_millis(500),
+        "{:?}",
+        started.elapsed()
+    );
+    lease.release().unwrap();
+    let _ = reader.join().unwrap();
 }

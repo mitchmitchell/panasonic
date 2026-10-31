@@ -3,7 +3,7 @@ pub mod device;
 pub mod journal;
 
 use crate::smdr_reader::SmdrSource;
-use journal::{LeaseEvent, LeaseJournal};
+use journal::{LeaseEvent, LeaseLog};
 use kxtd1232::{Transport, TransportError};
 use kxtd1232_sim::SimTransport;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
@@ -21,6 +21,7 @@ fn recover_from_poison<G>(poisoned: std::sync::PoisonError<G>) -> G {
 
 pub const DEFAULT_MAX_LEASE_WAITERS: usize = 4;
 pub const DEFAULT_LEASE_TIMEOUT: Duration = Duration::from_secs(30);
+pub const SMDR_RECV_SLICE: Duration = Duration::from_millis(50);
 
 pub trait SimRelease: Transport {
     fn bye_and_dtr_cycle(&mut self) -> Result<(), TransportError>;
@@ -60,8 +61,10 @@ struct State<T> {
 struct Shared<T> {
     state: Mutex<State<T>>,
     returned: Condvar,
-    journal: Mutex<LeaseJournal>,
+    journal: Mutex<Box<dyn LeaseLog>>,
     max_waiters: usize,
+    #[cfg(target_os = "linux")]
+    device: Mutex<Option<Arc<Mutex<device::SmdrDevice>>>>,
 }
 
 impl<T> Shared<T> {
@@ -75,6 +78,21 @@ impl<T> Shared<T> {
             .unwrap_or_else(recover_from_poison)
             .append(event, job_id)
     }
+
+    fn record_refusal(&self, event: LeaseEvent, job_id: &str) {
+        if let Err(e) = self.record(event, job_id) {
+            tracing::error!(job_id, ?event, error = %e, "lease journal write failed; returning the typed refusal");
+        }
+    }
+
+    fn restore(&self, transport: T) {
+        {
+            let mut state = self.lock();
+            state.transport = Some(transport);
+            state.holder = None;
+        }
+        self.returned.notify_all();
+    }
 }
 
 pub struct PortManager<T: SimRelease> {
@@ -82,7 +100,7 @@ pub struct PortManager<T: SimRelease> {
 }
 
 impl<T: SimRelease> PortManager<T> {
-    pub fn new(transport: T, journal: LeaseJournal, max_waiters: usize) -> Self {
+    pub fn new(transport: T, journal: impl LeaseLog + 'static, max_waiters: usize) -> Self {
         Self {
             shared: Arc::new(Shared {
                 state: Mutex::new(State {
@@ -91,8 +109,10 @@ impl<T: SimRelease> PortManager<T> {
                     holder: None,
                 }),
                 returned: Condvar::new(),
-                journal: Mutex::new(journal),
+                journal: Mutex::new(Box::new(journal)),
                 max_waiters,
+                #[cfg(target_os = "linux")]
+                device: Mutex::new(None),
             }),
         }
     }
@@ -120,30 +140,38 @@ impl<T: SimRelease> PortManager<T> {
         let mut state = self.shared.lock();
         if state.transport.is_none() && state.waiters >= self.shared.max_waiters {
             drop(state);
-            self.shared.record(LeaseEvent::Refused, job_id)?;
+            self.shared.record_refusal(LeaseEvent::Refused, job_id);
             return Err(LeaseError::QueueFull {
                 max: self.shared.max_waiters,
             });
         }
         state.waiters += 1;
         let start = Instant::now();
-        let (mut state, wait) = self
+        let (mut state, _) = self
             .shared
             .returned
             .wait_timeout_while(state, timeout, |s| s.transport.is_none())
             .unwrap_or_else(recover_from_poison);
         state.waiters -= 1;
-        let Some(transport) = state.transport.take().filter(|_| !wait.timed_out()) else {
+        let taken = state.transport.take();
+        self.shared.returned.notify_all();
+        let Some(transport) = taken else {
             drop(state);
-            self.shared.record(LeaseEvent::TimedOut, job_id)?;
+            self.shared.record_refusal(LeaseEvent::TimedOut, job_id);
             return Err(LeaseError::Timeout {
                 waited_ms: u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX),
             });
         };
         state.holder = Some(job_id.to_string());
         drop(state);
-        self.shared.record(LeaseEvent::Granted, job_id)?;
-        self.shared.record(LeaseEvent::ReaderPaused, job_id)?;
+        if let Err(e) = self
+            .shared
+            .record(LeaseEvent::Granted, job_id)
+            .and_then(|()| self.shared.record(LeaseEvent::ReaderPaused, job_id))
+        {
+            self.shared.restore(transport);
+            return Err(LeaseError::Journal(e));
+        }
         Ok(ProgrammingLease {
             shared: Arc::clone(&self.shared),
             transport: Some(transport),
@@ -157,6 +185,25 @@ impl<T: SimRelease> PortManager<T> {
 
     pub fn holder(&self) -> Option<String> {
         self.shared.lock().holder.clone()
+    }
+
+    #[cfg(target_os = "linux")]
+    pub fn open_smdr_device(
+        &self,
+        path: &std::path::Path,
+        options: device::SmdrLineOptions,
+    ) -> Result<device::SmdrDeviceHandle, device::DeviceError> {
+        let mut slot = self
+            .shared
+            .device
+            .lock()
+            .unwrap_or_else(recover_from_poison);
+        if slot.is_some() {
+            return Err(device::DeviceError::AlreadyOpen);
+        }
+        let opened = Arc::new(Mutex::new(device::SmdrDevice::open(path, options)?));
+        *slot = Some(Arc::clone(&opened));
+        Ok(device::SmdrDeviceHandle::new(opened))
     }
 }
 
@@ -180,12 +227,7 @@ impl<T: SimRelease> ProgrammingLease<T> {
             return Ok(());
         };
         let cycled = transport.bye_and_dtr_cycle();
-        {
-            let mut state = self.shared.lock();
-            state.transport = Some(transport);
-            state.holder = None;
-        }
-        self.shared.returned.notify_all();
+        self.shared.restore(transport);
         let journaled = self
             .shared
             .record(LeaseEvent::Released, &self.job_id)
@@ -241,17 +283,29 @@ pub struct SmdrHandle<T: SimRelease> {
 
 impl<T: SimRelease> SmdrSource for SmdrHandle<T> {
     fn recv(&mut self, timeout_ms: u64) -> Result<Vec<u8>, TransportError> {
-        let state = self.shared.lock();
-        let (mut state, _) = self
-            .shared
-            .returned
-            .wait_timeout_while(state, Duration::from_millis(timeout_ms), |s| {
-                s.transport.is_none()
-            })
-            .unwrap_or_else(recover_from_poison);
-        match state.transport.as_mut() {
-            Some(t) => t.recv(timeout_ms),
-            None => Err(TransportError::Timeout),
+        let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let state = self.shared.lock();
+            let (mut state, _) = self
+                .shared
+                .returned
+                .wait_timeout_while(state, remaining, |s| s.transport.is_none() || s.waiters > 0)
+                .unwrap_or_else(recover_from_poison);
+            if state.waiters > 0 {
+                return Err(TransportError::Timeout);
+            }
+            let Some(t) = state.transport.as_mut() else {
+                return Err(TransportError::Timeout);
+            };
+            let slice = remaining.min(SMDR_RECV_SLICE);
+            let slice_ms = u64::try_from(slice.as_millis()).unwrap_or(u64::MAX);
+            match t.recv(slice_ms) {
+                Err(TransportError::Timeout) if Instant::now() < deadline => {}
+                other => return other,
+            }
+            drop(state);
+            self.shared.returned.notify_all();
         }
     }
 }

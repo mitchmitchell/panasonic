@@ -27,6 +27,16 @@ pub struct LeaseRecord {
     pub gap_tracking: String,
 }
 
+pub trait LeaseLog: Send {
+    fn append(&mut self, event: LeaseEvent, job_id: &str) -> std::io::Result<()>;
+}
+
+impl LeaseLog for LeaseJournal {
+    fn append(&mut self, event: LeaseEvent, job_id: &str) -> std::io::Result<()> {
+        LeaseJournal::append(self, event, job_id)
+    }
+}
+
 pub struct LeaseJournal {
     path: PathBuf,
 }

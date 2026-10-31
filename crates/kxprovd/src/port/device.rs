@@ -7,6 +7,7 @@ use std::fs::File;
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 
 pub const SMDR_BAUD: BaudRate = BaudRate::B9600;
 
@@ -30,11 +31,13 @@ pub enum DeviceError {
     NotATty,
     #[error("termios: {0}")]
     Termios(Errno),
+    #[error("the SMDR device is already open in this PortManager")]
+    AlreadyOpen,
     #[error("termios flag {0} still set after tcsetattr")]
     TermiosNotApplied(&'static str),
 }
 
-pub struct SmdrDevice {
+pub(crate) struct SmdrDevice {
     file: Flock<File>,
 }
 
@@ -66,14 +69,10 @@ impl SmdrDevice {
         Ok(Self { file })
     }
 
-    pub fn access_mode_is_read_only(&self) -> Result<bool, Errno> {
+    fn access_mode_is_read_only(&self) -> Result<bool, Errno> {
         let fl = nix::fcntl::fcntl(self.file.as_raw_fd(), nix::fcntl::FcntlArg::F_GETFL)?;
         Ok(fl & nix::libc::O_ACCMODE == nix::libc::O_RDONLY)
     }
-}
-
-pub fn open_smdr_device(path: &Path, options: SmdrLineOptions) -> Result<SmdrDevice, DeviceError> {
-    SmdrDevice::open(path, options)
 }
 
 fn apply_smdr_termios(t: &mut Termios, options: SmdrLineOptions) -> Result<(), DeviceError> {
@@ -127,9 +126,30 @@ fn verify_smdr_termios(t: &Termios, options: SmdrLineOptions) -> Result<(), Devi
     Ok(())
 }
 
-impl SmdrSource for SmdrDevice {
+pub struct SmdrDeviceHandle {
+    device: Arc<Mutex<SmdrDevice>>,
+}
+
+impl SmdrDeviceHandle {
+    pub(crate) fn new(device: Arc<Mutex<SmdrDevice>>) -> Self {
+        Self { device }
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, SmdrDevice> {
+        self.device
+            .lock()
+            .unwrap_or_else(super::recover_from_poison)
+    }
+
+    pub fn access_mode_is_read_only(&self) -> Result<bool, Errno> {
+        self.lock().access_mode_is_read_only()
+    }
+}
+
+impl SmdrSource for SmdrDeviceHandle {
     fn recv(&mut self, timeout_ms: u64) -> Result<Vec<u8>, TransportError> {
-        let mut reader: &File = &self.file;
+        let device = self.lock();
+        let mut reader: &File = &device.file;
         crate::transport::recv_with_poll(&mut reader, timeout_ms)
     }
 }

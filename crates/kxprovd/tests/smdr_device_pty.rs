@@ -5,12 +5,32 @@
 #![cfg(target_os = "linux")]
 
 use kxprovd::port::device::{
-    open_smdr_device, DeviceError, SmdrLineOptions, CLEARED_INPUT_FLAGS, CLEARED_LOCAL_FLAGS,
+    DeviceError, SmdrDeviceHandle, SmdrLineOptions, CLEARED_INPUT_FLAGS, CLEARED_LOCAL_FLAGS,
 };
+use kxprovd::port::journal::LeaseJournal;
+use kxprovd::port::PortManager;
 use kxprovd::smdr_reader::SmdrSource;
+use kxtd1232_sim::{SimPbx, SimTransport};
 use nix::sys::termios::{self, BaudRate, ControlFlags, InputFlags, LocalFlags, SetArg};
 use std::io::Write;
 use std::path::PathBuf;
+
+fn manager() -> PortManager<SimTransport> {
+    PortManager::new(
+        SimTransport::new(SimPbx::new(Default::default(), "1234")),
+        LeaseJournal::new(
+            std::env::temp_dir().join(format!("kxprovd-pty-{}.jsonl", std::process::id())),
+        ),
+        1,
+    )
+}
+
+fn open_smdr_device(
+    path: &std::path::Path,
+    options: SmdrLineOptions,
+) -> Result<SmdrDeviceHandle, DeviceError> {
+    manager().open_smdr_device(path, options)
+}
 
 const CHILD_ENV: &str = "KXPROVD_SMDR_LOCK_CHILD_PATH";
 
@@ -94,4 +114,17 @@ fn a_second_process_cannot_open_a_locked_device() {
         .status()
         .unwrap();
     assert_eq!(status.code(), Some(0));
+}
+
+#[test]
+fn one_manager_refuses_a_second_open() {
+    let pty = pty();
+    let pm = manager();
+    let _dev = pm
+        .open_smdr_device(&pty.path, SmdrLineOptions::default())
+        .unwrap();
+    assert!(matches!(
+        pm.open_smdr_device(&pty.path, SmdrLineOptions::default()),
+        Err(DeviceError::AlreadyOpen)
+    ));
 }
