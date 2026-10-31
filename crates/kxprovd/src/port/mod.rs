@@ -197,6 +197,7 @@ struct Shared<T> {
     release_step_timeout: Duration,
     leased: Arc<AtomicBool>,
     lease_epoch: Arc<AtomicU64>,
+    resume_guard: Arc<Mutex<()>>,
     #[cfg(target_os = "linux")]
     device: Mutex<Option<Arc<Mutex<device::SmdrDevice>>>>,
 }
@@ -263,6 +264,7 @@ impl<T: PortRelease> PortManager<T> {
                 release_step_timeout,
                 leased: Arc::new(AtomicBool::new(false)),
                 lease_epoch: Arc::new(AtomicU64::new(0)),
+                resume_guard: Arc::new(Mutex::new(())),
                 #[cfg(target_os = "linux")]
                 device: Mutex::new(None),
             }),
@@ -305,6 +307,11 @@ impl<T: PortRelease> PortManager<T> {
             .wait_timeout_while(state, timeout, |s| s.transport.is_none())
             .unwrap_or_else(recover_from_poison);
         state.waiters -= 1;
+        let resume = self
+            .shared
+            .resume_guard
+            .lock()
+            .unwrap_or_else(recover_from_poison);
         let taken = state.transport.take();
         self.shared.returned.notify_all();
         let Some(transport) = taken else {
@@ -317,6 +324,7 @@ impl<T: PortRelease> PortManager<T> {
         state.holder = Some(job_id.to_string());
         self.shared.lease_epoch.fetch_add(1, Ordering::SeqCst);
         self.shared.leased.store(true, Ordering::SeqCst);
+        drop(resume);
         drop(state);
         if let Err(e) = self
             .shared
@@ -362,6 +370,7 @@ impl<T: PortRelease> PortManager<T> {
             opened,
             Arc::clone(&self.shared.leased),
             Arc::clone(&self.shared.lease_epoch),
+            Arc::clone(&self.shared.resume_guard),
         ))
     }
 

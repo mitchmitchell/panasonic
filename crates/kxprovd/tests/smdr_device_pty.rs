@@ -360,3 +360,68 @@ fn smdr_resume_after_a_lease_reapplies_raw_termios() {
     assert_eq!(termios::cfgetispeed(&t), BaudRate::B9600);
     assert_eq!(termios::cfgetospeed(&t), BaudRate::B9600);
 }
+
+#[cfg(feature = "test-util")]
+fn cycle_a_lease(pm: &PortManager<SimTransport>) {
+    pm.request_lease("job-1", std::time::Duration::from_millis(50))
+        .unwrap()
+        .release()
+        .unwrap();
+}
+
+#[cfg(feature = "test-util")]
+#[test]
+fn a_lease_request_during_smdr_resume_waits_until_resume_finishes() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    let mut pty = pty();
+    let pm = manager();
+    let mut smdr = pm
+        .open_smdr_device(&pty.path, SmdrLineOptions::default())
+        .unwrap();
+    cycle_a_lease(&pm);
+    let finished = Arc::new(AtomicBool::new(false));
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let hook_finished = Arc::clone(&finished);
+    smdr.set_resume_readback_hook(Box::new(move |_| {
+        entered_tx.send(()).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        hook_finished.store(true, Ordering::SeqCst);
+    }));
+    pty.master.write_all(b"10/30/26\r\n").unwrap();
+    let reader = std::thread::spawn(move || smdr.recv(1000));
+    entered_rx.recv().unwrap();
+    let lease = pm
+        .request_lease("job-2", std::time::Duration::from_secs(2))
+        .unwrap();
+    assert!(
+        finished.load(Ordering::SeqCst),
+        "lease granted before SMDR resume finished"
+    );
+    assert!(reader.join().unwrap().unwrap().starts_with(b"10/30/26"));
+    lease.release().unwrap();
+}
+
+#[cfg(feature = "test-util")]
+#[test]
+fn a_termios_readback_mismatch_on_resume_fails_closed_without_reading() {
+    let mut pty = pty();
+    let pm = manager();
+    let mut smdr = pm
+        .open_smdr_device(&pty.path, SmdrLineOptions::default())
+        .unwrap();
+    cycle_a_lease(&pm);
+    smdr.set_resume_readback_hook(Box::new(|t| t.input_flags |= InputFlags::IXOFF));
+    pty.master.write_all(b"10/30/26\r\n").unwrap();
+    assert!(matches!(
+        smdr.resume_after_lease(),
+        Err(DeviceError::TermiosNotApplied { .. })
+    ));
+    assert!(matches!(
+        smdr.recv(200),
+        Err(kxtd1232::TransportError::LinkDown(_))
+    ));
+    smdr.set_resume_readback_hook(Box::new(|_| {}));
+    assert!(smdr.recv(1000).unwrap().starts_with(b"10/30/26"));
+}

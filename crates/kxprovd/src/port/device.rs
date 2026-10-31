@@ -206,13 +206,20 @@ pub struct SmdrDeviceHandle {
     leased: Arc<AtomicBool>,
     lease_epoch: Arc<AtomicU64>,
     configured_epoch: u64,
+    resume_guard: Arc<Mutex<()>>,
+    #[cfg(feature = "test-util")]
+    readback_hook: Option<ReadbackHook>,
 }
+
+#[cfg(feature = "test-util")]
+pub type ReadbackHook = Box<dyn FnMut(&mut Termios) + Send>;
 
 impl SmdrDeviceHandle {
     pub(crate) fn new(
         device: Arc<Mutex<SmdrDevice>>,
         leased: Arc<AtomicBool>,
         lease_epoch: Arc<AtomicU64>,
+        resume_guard: Arc<Mutex<()>>,
     ) -> Self {
         let configured_epoch = lease_epoch.load(Ordering::SeqCst);
         Self {
@@ -220,10 +227,28 @@ impl SmdrDeviceHandle {
             leased,
             lease_epoch,
             configured_epoch,
+            resume_guard,
+            #[cfg(feature = "test-util")]
+            readback_hook: None,
         }
     }
 
-    pub fn resume_after_lease(&mut self) -> Result<(), DeviceError> {
+    #[cfg(feature = "test-util")]
+    pub fn set_resume_readback_hook(&mut self, hook: ReadbackHook) {
+        self.readback_hook = Some(hook);
+    }
+
+    pub fn resume_after_lease(&mut self) -> Result<bool, DeviceError> {
+        let guard = Arc::clone(&self.resume_guard);
+        let _resume = guard.lock().unwrap_or_else(super::recover_from_poison);
+        if self.leased.load(Ordering::SeqCst) {
+            return Ok(false);
+        }
+        self.reapply_if_leased_since()?;
+        Ok(true)
+    }
+
+    fn reapply_if_leased_since(&mut self) -> Result<(), DeviceError> {
         let epoch = self.lease_epoch.load(Ordering::SeqCst);
         if epoch == self.configured_epoch {
             return Ok(());
@@ -233,11 +258,21 @@ impl SmdrDeviceHandle {
         let mut t = termios::tcgetattr(file).map_err(DeviceError::Termios)?;
         apply_smdr_termios(&mut t, device.options)?;
         termios::tcsetattr(file, SetArg::TCSANOW, &t).map_err(DeviceError::Termios)?;
-        verify_smdr_termios(
-            &termios::tcgetattr(file).map_err(DeviceError::Termios)?,
-            device.options,
-        )?;
+        let options = device.options;
+        #[cfg_attr(
+            not(feature = "test-util"),
+            allow(
+                unused_mut,
+                reason = "only the test-util readback hook mutates the readback"
+            )
+        )]
+        let mut back = termios::tcgetattr(file).map_err(DeviceError::Termios)?;
         drop(device);
+        #[cfg(feature = "test-util")]
+        if let Some(hook) = self.readback_hook.as_mut() {
+            hook(&mut back);
+        }
+        verify_smdr_termios(&back, options)?;
         self.configured_epoch = epoch;
         Ok(())
     }
@@ -255,15 +290,15 @@ impl SmdrDeviceHandle {
 
 impl SmdrSource for SmdrDeviceHandle {
     fn recv(&mut self, timeout_ms: u64) -> Result<Vec<u8>, TransportError> {
-        if self.leased.load(Ordering::SeqCst) {
-            return Err(TransportError::Timeout);
-        }
-        self.resume_after_lease().map_err(|e| {
+        let resumed = self.resume_after_lease().map_err(|e| {
             TransportError::LinkDown(kxtd1232::LinkDownError {
                 detail: format!("SMDR line settings not restored after a lease: {e}"),
                 bytes_sent: None,
             })
         })?;
+        if !resumed {
+            return Err(TransportError::Timeout);
+        }
         let device = self.lock();
         let mut reader: &File = &device.file;
         crate::transport::recv_with_poll(&mut reader, timeout_ms)
