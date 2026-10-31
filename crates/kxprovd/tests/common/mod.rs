@@ -16,6 +16,14 @@ pub fn kxprov_binary() -> std::path::PathBuf {
             std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target")
         });
     let bin = target.join("debug/kxprov");
+    if !bin.is_file() {
+        let status = std::process::Command::new(env!("CARGO"))
+            .args(["build", "-p", "kxprov", "--bin", "kxprov"])
+            .env("CARGO_TARGET_DIR", &target)
+            .status()
+            .expect("spawn cargo build -p kxprov");
+        assert!(status.success(), "cargo build -p kxprov failed");
+    }
     assert!(
         bin.is_file(),
         "kxprov not at {}; run via cargo test",

@@ -73,6 +73,7 @@ pub struct SmdrStore {
     dir: PathBuf,
     db: Connection,
     order: DateOrder,
+    journaled_awaiting_db: Option<(String, String)>,
 }
 
 impl SmdrStore {
@@ -101,7 +102,12 @@ impl SmdrStore {
         fs::set_permissions(&db_path, fs::Permissions::from_mode(FILE_MODE))?;
         let db = Connection::open(&db_path)?;
         db.execute_batch(SCHEMA)?;
-        Ok(Self { dir, db, order })
+        Ok(Self {
+            dir,
+            db,
+            order,
+            journaled_awaiting_db: None,
+        })
     }
 
     pub fn dir(&self) -> &Path {
@@ -120,10 +126,25 @@ impl SmdrStore {
         line: SmdrLine,
         rx: DateTime<Utc>,
     ) -> Result<IngestOutcome, SmdrStoreError> {
-        let rx_ts = rx.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-        self.append_raw(rx, &rx_ts, line.raw())?;
+        let rx_ts = match self.journaled_awaiting_db.take() {
+            Some((raw, rx_ts)) if raw == line.raw() => rx_ts,
+            _ => {
+                let rx_ts = rx.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+                self.append_raw(rx, &rx_ts, line.raw())?;
+                rx_ts
+            }
+        };
+        let raw = line.raw().to_string();
+        let stored = self.store_parsed(line, &rx_ts);
+        if stored.is_err() {
+            self.journaled_awaiting_db = Some((raw, rx_ts));
+        }
+        stored
+    }
+
+    fn store_parsed(&self, line: SmdrLine, rx_ts: &str) -> Result<IngestOutcome, SmdrStoreError> {
         match parse_line(line, self.order) {
-            ParsedLine::Record { line, record } => self.insert_call(&rx_ts, line.raw(), &record),
+            ParsedLine::Record { line, record } => self.insert_call(rx_ts, line.raw(), &record),
             ParsedLine::Unparsed { line, error } => {
                 self.db.execute(
                     "INSERT INTO smdr_unparsed (rx_ts_utc, raw, error) VALUES (?1, ?2, ?3)",
@@ -248,4 +269,48 @@ pub fn backup_sets(config: &crate::config::Config) -> [PathBuf; 2] {
         config.data_dir.join("backups"),
         config.goliath_target.clone(),
     ]
+}
+
+#[cfg(test)]
+mod retry_tests {
+    #![allow(
+        clippy::unwrap_used,
+        reason = "test setup failures should abort the test"
+    )]
+    use super::*;
+
+    #[test]
+    fn a_retried_line_after_a_db_failure_is_journaled_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut store = SmdrStore::open(tmp.path(), &[], DateOrder::default()).unwrap();
+        let rx = DateTime::parse_from_rfc3339("2026-10-30T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let raw = "garbage that does not parse";
+        store
+            .db
+            .execute_batch("ALTER TABLE smdr_unparsed RENAME TO hidden")
+            .unwrap();
+        let line = || SmdrLine::new(raw.to_string());
+        assert!(store.ingest(line(), rx).is_err());
+        store
+            .db
+            .execute_batch("ALTER TABLE hidden RENAME TO smdr_unparsed")
+            .unwrap();
+        let later = rx + chrono::Duration::seconds(5);
+        assert!(matches!(
+            store.ingest(line(), later),
+            Ok(IngestOutcome::Unparsed)
+        ));
+        let journal = fs::read_to_string(store.journal_path(rx.date_naive())).unwrap();
+        assert_eq!(journal.lines().count(), 1, "{journal}");
+        assert!(store.journaled_awaiting_db.is_none());
+        assert!(store.ingest(line(), later).is_ok());
+        let journal = fs::read_to_string(store.journal_path(rx.date_naive())).unwrap();
+        assert_eq!(
+            journal.lines().count(),
+            2,
+            "a later identical line is still journaled"
+        );
+    }
 }

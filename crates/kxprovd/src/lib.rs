@@ -23,6 +23,7 @@ pub mod plan_store;
 pub mod queue;
 pub mod rate_limit;
 pub mod sim_mark;
+pub mod smdr_reader;
 pub mod smdr_store;
 #[cfg(feature = "test-util")]
 pub mod test_util;
