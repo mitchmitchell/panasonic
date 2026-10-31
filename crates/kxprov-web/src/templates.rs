@@ -54,3 +54,11 @@ pub struct DashboardTemplate {
     pub plan_expires_at_ms: String,
     pub csrf_token: String,
 }
+
+#[derive(Template)]
+#[template(path = "error.html")]
+pub struct ErrorTemplate {
+    pub page_title: String,
+    pub message: String,
+    pub next_step: String,
+}

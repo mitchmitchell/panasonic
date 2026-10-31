@@ -1,5 +1,6 @@
+use askama::Template;
 use axum::http::{header, HeaderMap, StatusCode};
-use axum::response::{IntoResponse, Response};
+use axum::response::{Html, IntoResponse, Response};
 use subtle::ConstantTimeEq;
 use tower_sessions::Session;
 
@@ -26,14 +27,26 @@ pub fn csrf_set_cookie_value(token: &str) -> String {
 }
 
 fn cookie_token(headers: &HeaderMap) -> Option<String> {
-    let raw = headers.get(header::COOKIE)?.to_str().ok()?;
-    for part in raw.split(';') {
-        let part = part.trim();
-        if let Some(v) = part.strip_prefix(&format!("{CSRF_COOKIE_NAME}=")) {
-            return Some(v.to_string());
-        }
+    let prefix = format!("{CSRF_COOKIE_NAME}=");
+    headers
+        .get_all(header::COOKIE)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|raw| raw.split(';'))
+        .find_map(|part| part.trim().strip_prefix(&prefix).map(str::to_string))
+}
+
+fn csrf_rejection() -> Response {
+    let html = crate::templates::ErrorTemplate {
+        page_title: "Your session needs a refresh".into(),
+        message: "This form was out of date or your sign-in expired, so nothing was changed."
+            .into(),
+        next_step: "Go back to the home page and try again. If it keeps happening, sign in again."
+            .into(),
     }
-    None
+    .render()
+    .unwrap_or_else(|_| "Your session needs a refresh. Go back to / and try again.".into());
+    (StatusCode::FORBIDDEN, Html(html)).into_response()
 }
 
 pub async fn verify_form_csrf(
@@ -43,17 +56,17 @@ pub async fn verify_form_csrf(
 ) -> Option<Response> {
     let session_token = session.get::<String>(SESSION_CSRF_KEY).await.ok().flatten();
     let Some(session_token) = session_token else {
-        return Some((StatusCode::FORBIDDEN, "invalid or missing CSRF token").into_response());
+        return Some(csrf_rejection());
     };
     if form_token.is_empty() || !bool::from(session_token.as_bytes().ct_eq(form_token.as_bytes())) {
-        return Some((StatusCode::FORBIDDEN, "invalid or missing CSRF token").into_response());
+        return Some(csrf_rejection());
     }
     let cookie = cookie_token(headers);
     let Some(cookie) = cookie else {
-        return Some((StatusCode::FORBIDDEN, "invalid or missing CSRF token").into_response());
+        return Some(csrf_rejection());
     };
     if !bool::from(session_token.as_bytes().ct_eq(cookie.as_bytes())) {
-        return Some((StatusCode::FORBIDDEN, "invalid or missing CSRF token").into_response());
+        return Some(csrf_rejection());
     }
     None
 }

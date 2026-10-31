@@ -8,7 +8,7 @@ mod static_files;
 mod templates;
 
 use askama::Template;
-use axum::extract::{ConnectInfo, Extension, Form, Path, State};
+use axum::extract::{ConnectInfo, Extension, Form, Path, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
@@ -75,6 +75,16 @@ pub fn operational_mode_banner_label(mode: OperationalMode) -> &'static str {
     match mode {
         OperationalMode::Testing => "TESTING",
         OperationalMode::Production => "PRODUCTION",
+    }
+}
+
+pub fn environment_banner(profile: Profile, mode: OperationalMode) -> (&'static str, &'static str) {
+    match profile {
+        Profile::Sim => ("SIMULATOR \u{b7} no phone system connected", "sim"),
+        Profile::Test | Profile::Prod => (
+            operational_mode_banner_label(mode),
+            operational_mode_banner_class(mode),
+        ),
     }
 }
 
@@ -149,8 +159,9 @@ async fn fill_dashboard_from_status(
 ) {
     if let Ok(status) = state.backend.status(caller).await {
         tpl.show_mode_banner = true;
-        tpl.mode_banner = operational_mode_banner_label(status.operational_mode).into();
-        tpl.mode_banner_class = operational_mode_banner_class(status.operational_mode).into();
+        let (banner, banner_class) = environment_banner(status.profile, status.operational_mode);
+        tpl.mode_banner = banner.into();
+        tpl.mode_banner_class = banner_class.into();
         tpl.show_profile_badge = true;
         let (badge, badge_class) = profile_badge_label(status.profile);
         tpl.profile_badge = badge;
@@ -239,7 +250,16 @@ fn login_rate_limited_response(message: &str, retry_after: std::time::Duration) 
     resp
 }
 
-async fn login_form(session: Session) -> impl IntoResponse {
+pub const LOGIN_FAILED_MESSAGE: &str = "That password isn't correct. Try again.";
+
+#[derive(Deserialize)]
+struct LoginQuery {
+    #[serde(default)]
+    error: Option<String>,
+}
+
+async fn login_form(session: Session, Query(query): Query<LoginQuery>) -> impl IntoResponse {
+    let show_error = query.error.is_some();
     let token = csrf::token_for_session(&session).await;
     let cookie = csrf::csrf_set_cookie_value(&token);
     (
@@ -247,8 +267,12 @@ async fn login_form(session: Session) -> impl IntoResponse {
         Html(
             templates::LoginTemplate {
                 page_title: sign_in_page_title().into(),
-                show_error: false,
-                error: String::new(),
+                show_error,
+                error: if show_error {
+                    LOGIN_FAILED_MESSAGE.into()
+                } else {
+                    String::new()
+                },
                 csrf_token: token,
             }
             .render()

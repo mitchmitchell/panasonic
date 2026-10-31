@@ -74,6 +74,12 @@ body {
   border-bottom-color: #dc2626;
 }
 
+.mode-banner--sim {
+  background: #ede9fe;
+  color: #4c1d95;
+  border-bottom-color: #8b5cf6;
+}
+
 .mode-banner--readonly {
   background: #e5e7eb;
   color: #374151;
@@ -91,6 +97,12 @@ body {
     background: #450a0a;
     color: #fecaca;
     border-bottom-color: #ef4444;
+  }
+
+  .mode-banner--sim {
+    background: #2e1065;
+    color: #ddd6fe;
+    border-bottom-color: #8b5cf6;
   }
 
   .mode-banner--readonly {
