@@ -34,7 +34,11 @@ kxprovd logs these as `login failed`, with the error's variant name (`error_kind
 
 ## Port exclusivity
 
-Before opening, kxprovd refuses the device if any other process holds it, found by a /proc fd scan like fuser. It then opens with serialport `exclusive(true)`, which in serialport 4.10.1 sets TIOCEXCL and takes an exclusive flock (RE-confirmed; Tester's pty probe saw EAGAIN against a held flock), and checks that exclusivity is in effect. The S5 PortManager lease replaces the pre-open scan; that is tracked in #63.
+Every serial job opens the device through the S5 PortManager for that device path, one per process. The job first takes the programming lease, which pauses SMDR. The programming open then goes through `open_exclusive`: read-write, TIOCEXCL, and the exclusive flock (or, when SMDR holds the device, under SMDR's flock), with the termios applied and read back. A refused, timed-out or full lease queue fails the job with a `transport` error. The pre-open /proc scan is gone.
+
+The shared port runs at 9600, so a serial open fails if `link_baud` is set to anything else.
+
+When the job ends, the device sends BYE (and end-binary first if needed), drops DTR, flushes input and restores 9600, and only then releases the lease, so SMDR resumes on a line holding no programming bytes.
 
 ## Apply stays simulator-only
 
@@ -48,6 +52,14 @@ A failed daemon job is logged as `job failed` with its job kind and error code. 
 
 A failed job logs `job failed` with the job id, job kind, error code and the message's byte count, never the message. A PBX error also logs `pbx error` with `error_kind` (the `kxtd1232::Error` variant name). Error text can carry raw reply bytes, so it is never logged; it goes only to the gateway, which maps it to fixed strings.
 
-## DTR cycle is not lease-gated yet
+## DTR cycle is lease-gated
 
-Every job's sign-on cycles DTR. Until S5's PortManager lease is on main, nothing gates that on a held programming lease: only the exclusive open does. Running the cycle only under a held lease is tracked in #63.
+Only the leased device can cycle DTR, so every sign-on's cycle runs while SMDR is paused. The cycle sets B0 (DTR and RTS low), waits `DTR_LOW_PERIOD`, flushes input and restores 9600 with a readback, so bytes from before the rise are never read as a reply.
+
+Sign-on and release share one hold, `DTR_LOW_PERIOD` = 300 ms. That is the release hold the read-path spec records as supported (read-path-spec-v1 §3 step 3, PR #36). #57's separate 250 ms sign-on hold is gone.
+
+If the input flush fails, the cycle returns `DtrError::Flush` without restoring the speed, so the line stays at B0 with DTR low. Sign-on fails with `LinkDown`. A failed release leaves the line hung up until the next open, which re-applies 9600.
+
+## Modem lines are not reported on serial yet
+
+The leased device has no safe TIOCMGET (the workspace forbids `unsafe`), so DSR, CTS and DCD read `NotReported` in the login trace. Tracked in https://github.com/mitchmitchell/panasonic/issues/69.

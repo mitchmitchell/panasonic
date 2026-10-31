@@ -82,3 +82,10 @@ fn test_write_range_checks() {
     let enc = Encoder::new(Access::ReadWrite);
     assert!(enc.write(0x25, 0xFFFF, 0, &[0; 16]).is_err());
 }
+
+#[test]
+fn test_read_path_never_encodes_the_full_upload_end_frames() {
+    use kxtd1232::frame::Cmd;
+    assert!(Cmd::from_byte(0x0A).is_none());
+    assert!(Cmd::from_byte(0x10).is_none());
+}
