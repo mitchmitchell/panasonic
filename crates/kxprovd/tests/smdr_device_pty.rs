@@ -465,7 +465,7 @@ fn resume_fails_closed_with(hook: kxprovd::port::device::ReadbackHook, expected:
     pty.master.write_all(b"10/30/26\r\n").unwrap();
     let result = smdr.resume_after_lease();
     assert!(
-        matches!(result, Err(DeviceError::TermiosNotApplied(name)) if name == expected),
+        matches!(&result, Err(DeviceError::TermiosNotApplied(m)) if m.name() == expected),
         "{result:?}"
     );
     assert!(matches!(
@@ -493,4 +493,41 @@ fn a_missing_cs8_readback_on_resume_fails_closed() {
         }),
         "CS8",
     );
+}
+
+#[cfg(feature = "test-util")]
+#[test]
+fn no_programming_reply_reaches_smdr_when_a_lease_lands_between_resume_and_read() {
+    use kxtd1232::Transport;
+
+    for run in 0..20 {
+        let mut pty = pty();
+        let pm = manager();
+        let mut smdr = pm
+            .open_smdr_device(&pty.path, SmdrLineOptions::default())
+            .unwrap();
+        cycle_a_lease(&pm);
+        let (gap_tx, gap_rx) = std::sync::mpsc::channel();
+        smdr.set_pre_read_hook(Box::new(move || {
+            let _receiver_gone_after_the_first_read = gap_tx.send(());
+            std::thread::sleep(std::time::Duration::from_millis(150));
+        }));
+        let reader = std::thread::spawn(move || smdr.recv(1000));
+        gap_rx.recv().unwrap();
+        let lease = pm
+            .request_lease("job-1", std::time::Duration::from_secs(2))
+            .unwrap();
+        let mut dev = pm
+            .open_programming_device(&lease, &pty.path, SmdrLineOptions::default())
+            .unwrap();
+        pty.master.write_all(b"PROGREPLY\r\n").unwrap();
+        let smdr_got = reader.join().unwrap();
+        assert!(
+            !matches!(&smdr_got, Ok(b) if b.windows(4).any(|w| w == b"PROG")),
+            "run {run}: SMDR read programming bytes: {smdr_got:?}"
+        );
+        assert_eq!(dev.recv(1000).unwrap(), b"PROGREPLY\r\n", "run {run}");
+        dev.end(std::time::Duration::from_millis(20)).unwrap();
+        lease.release().unwrap();
+    }
 }

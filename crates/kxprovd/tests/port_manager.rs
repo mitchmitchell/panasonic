@@ -365,7 +365,7 @@ fn a_timeout_racing_a_release_never_loses_the_port() {
             std::thread::sleep(Duration::from_millis(1));
         }
         held.release().unwrap();
-        let _ = waiter.join().unwrap();
+        let _racer_may_be_granted_or_time_out = waiter.join().unwrap();
         assert_eq!(pm.mode(), PortMode::Smdr, "iteration {i}");
     }
     assert_port_restored(&pm, &log);
@@ -376,7 +376,7 @@ fn a_lease_request_is_not_held_up_by_a_long_smdr_read() {
     let dir = tempfile::tempdir().unwrap();
     let pm = Arc::new(manager(&dir, 1));
     let mut handle = pm.smdr_handle();
-    let _ = handle.recv(100);
+    let _warm_up_read_may_return_sim_banner_bytes = handle.recv(100);
     let reader = std::thread::spawn(move || handle.recv(5_000));
     std::thread::sleep(Duration::from_millis(20));
     let started = std::time::Instant::now();
@@ -387,7 +387,7 @@ fn a_lease_request_is_not_held_up_by_a_long_smdr_read() {
         started.elapsed()
     );
     lease.release().unwrap();
-    let _ = reader.join().unwrap();
+    let _reader_outcome_is_not_what_this_test_measures = reader.join().unwrap();
 }
 
 #[test]
@@ -468,7 +468,7 @@ fn an_smdr_read_slice_ends_before_any_programming_send() {
     let mut smdr = pm.smdr_handle();
     let reader = std::thread::spawn(move || {
         for _ in 0..6 {
-            let _ = smdr.recv(200);
+            assert!(smdr.recv(200).is_err(), "TimedPort never yields bytes");
         }
     });
     while !log.lock().unwrap().contains(&PortEvent::RecvStart) {

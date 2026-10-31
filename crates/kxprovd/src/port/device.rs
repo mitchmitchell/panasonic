@@ -41,8 +41,8 @@ pub enum DeviceError {
     Exclusive(Errno),
     #[error("a programming open needs this PortManager's held programming lease")]
     NoLease,
-    #[error("termios flag {0} still set after tcsetattr")]
-    TermiosNotApplied(&'static str),
+    #[error("termios not applied: {0}")]
+    TermiosNotApplied(TermiosMismatch),
 }
 
 pub(crate) struct SmdrDevice {
@@ -184,6 +184,40 @@ pub const CLEARED_LOCAL_FLAGS: [(&str, LocalFlags); 8] = [
     ("ICANON", LocalFlags::ICANON),
 ];
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TermiosMismatch {
+    StillSet(&'static str),
+    Missing(&'static str),
+    WrongSpeed {
+        which: &'static str,
+        got: BaudRate,
+        expected: BaudRate,
+    },
+}
+
+impl TermiosMismatch {
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::StillSet(n) | Self::Missing(n) => n,
+            Self::WrongSpeed { which, .. } => which,
+        }
+    }
+}
+
+impl std::fmt::Display for TermiosMismatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::StillSet(n) => write!(f, "{n} is set but must be cleared"),
+            Self::Missing(n) => write!(f, "{n} is cleared but must be set"),
+            Self::WrongSpeed {
+                which,
+                got,
+                expected,
+            } => write!(f, "{which} reads back as {got:?}, expected {expected:?}"),
+        }
+    }
+}
+
 pub const REQUIRED_CONTROL_FLAGS: [(&str, ControlFlags); 3] = [
     ("CS8", ControlFlags::CS8),
     ("CREAD", ControlFlags::CREAD),
@@ -193,27 +227,54 @@ pub const REQUIRED_CONTROL_FLAGS: [(&str, ControlFlags); 3] = [
 fn verify_smdr_termios(t: &Termios, options: SmdrLineOptions) -> Result<(), DeviceError> {
     for (name, flag) in CLEARED_INPUT_FLAGS {
         if t.input_flags.contains(flag) {
-            return Err(DeviceError::TermiosNotApplied(name));
+            return Err(DeviceError::TermiosNotApplied(TermiosMismatch::StillSet(
+                name,
+            )));
         }
     }
     for (name, flag) in CLEARED_LOCAL_FLAGS {
         if t.local_flags.contains(flag) {
-            return Err(DeviceError::TermiosNotApplied(name));
+            return Err(DeviceError::TermiosNotApplied(TermiosMismatch::StillSet(
+                name,
+            )));
         }
     }
-    if t.control_flags.contains(ControlFlags::CRTSCTS) != options.rtscts {
-        return Err(DeviceError::TermiosNotApplied("CRTSCTS"));
+    match (
+        t.control_flags.contains(ControlFlags::CRTSCTS),
+        options.rtscts,
+    ) {
+        (true, false) => {
+            return Err(DeviceError::TermiosNotApplied(TermiosMismatch::StillSet(
+                "CRTSCTS",
+            )))
+        }
+        (false, true) => {
+            return Err(DeviceError::TermiosNotApplied(TermiosMismatch::Missing(
+                "CRTSCTS",
+            )))
+        }
+        (true, true) | (false, false) => {}
     }
     for (name, flag) in REQUIRED_CONTROL_FLAGS {
         if !t.control_flags.contains(flag) {
-            return Err(DeviceError::TermiosNotApplied(name));
+            return Err(DeviceError::TermiosNotApplied(TermiosMismatch::Missing(
+                name,
+            )));
         }
     }
-    if termios::cfgetospeed(t) != SMDR_BAUD {
-        return Err(DeviceError::TermiosNotApplied("ospeed"));
-    }
-    if termios::cfgetispeed(t) != SMDR_BAUD {
-        return Err(DeviceError::TermiosNotApplied("ispeed"));
+    for (which, got) in [
+        ("ospeed", termios::cfgetospeed(t)),
+        ("ispeed", termios::cfgetispeed(t)),
+    ] {
+        if got != SMDR_BAUD {
+            return Err(DeviceError::TermiosNotApplied(
+                TermiosMismatch::WrongSpeed {
+                    which,
+                    got,
+                    expected: SMDR_BAUD,
+                },
+            ));
+        }
     }
     Ok(())
 }
@@ -226,7 +287,14 @@ pub struct SmdrDeviceHandle {
     resume_guard: Arc<Mutex<()>>,
     #[cfg(feature = "test-util")]
     readback_hook: Option<ReadbackHook>,
+    #[cfg(feature = "test-util")]
+    pre_read_hook: Option<PreReadHook>,
 }
+
+#[cfg(feature = "test-util")]
+pub type PreReadHook = Box<dyn FnMut() + Send>;
+
+pub const SMDR_READ_SLICE_MS: u64 = 50;
 
 #[cfg(feature = "test-util")]
 pub type ReadbackHook = Box<dyn FnMut(&mut Termios) + Send>;
@@ -247,12 +315,19 @@ impl SmdrDeviceHandle {
             resume_guard,
             #[cfg(feature = "test-util")]
             readback_hook: None,
+            #[cfg(feature = "test-util")]
+            pre_read_hook: None,
         }
     }
 
     #[cfg(feature = "test-util")]
     pub fn set_resume_readback_hook(&mut self, hook: ReadbackHook) {
         self.readback_hook = Some(hook);
+    }
+
+    #[cfg(feature = "test-util")]
+    pub fn set_pre_read_hook(&mut self, hook: PreReadHook) {
+        self.pre_read_hook = Some(hook);
     }
 
     pub fn resume_after_lease(&mut self) -> Result<bool, DeviceError> {
@@ -316,9 +391,23 @@ impl SmdrSource for SmdrDeviceHandle {
         if !resumed {
             return Err(TransportError::Timeout);
         }
+        #[cfg(feature = "test-util")]
+        if let Some(hook) = self.pre_read_hook.as_mut() {
+            hook();
+        }
         let device = self.lock();
+        let before = self.lease_epoch.load(Ordering::SeqCst);
+        if self.leased.load(Ordering::SeqCst) || before != self.configured_epoch {
+            return Err(TransportError::Timeout);
+        }
+        let slice = timeout_ms.min(SMDR_READ_SLICE_MS);
         let mut reader: &File = &device.file;
-        crate::transport::recv_with_poll(&mut reader, timeout_ms)
+        let read = crate::transport::recv_with_poll(&mut reader, slice);
+        if self.leased.load(Ordering::SeqCst) || self.lease_epoch.load(Ordering::SeqCst) != before {
+            return Err(TransportError::Timeout);
+        }
+        drop(device);
+        read
     }
 }
 

@@ -322,8 +322,20 @@ impl<T: PortRelease> PortManager<T> {
             });
         };
         state.holder = Some(job_id.to_string());
-        self.shared.lease_epoch.fetch_add(1, Ordering::SeqCst);
-        self.shared.leased.store(true, Ordering::SeqCst);
+        {
+            #[cfg(target_os = "linux")]
+            let slot = self
+                .shared
+                .device
+                .lock()
+                .unwrap_or_else(recover_from_poison);
+            #[cfg(target_os = "linux")]
+            let _reads_stopped = slot
+                .as_ref()
+                .map(|d| d.lock().unwrap_or_else(recover_from_poison));
+            self.shared.lease_epoch.fetch_add(1, Ordering::SeqCst);
+            self.shared.leased.store(true, Ordering::SeqCst);
+        }
         drop(resume);
         drop(state);
         if let Err(e) = self
