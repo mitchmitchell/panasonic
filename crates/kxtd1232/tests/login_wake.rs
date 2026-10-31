@@ -147,7 +147,6 @@ fn every_sign_on_cycles_dtr() {
     t.greets_on_dtr = true;
     let mut c = client(t);
     c.login(PASSWORD).unwrap();
-    c.end_binary().ok();
     c.login(PASSWORD).unwrap();
     assert_eq!(c.transport().dtr_cycles(), 2);
     assert_eq!(c.transport().crlfs(), 0);
