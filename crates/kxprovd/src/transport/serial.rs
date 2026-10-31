@@ -60,13 +60,22 @@ pub(crate) fn send_all_port<W: Write>(
     data: &[u8],
     send_bound_ms: u64,
 ) -> Result<(), TransportError> {
+    send_all_port_from(port, data, Instant::now(), send_bound_ms)
+}
+
+fn send_all_port_from<W: Write>(
+    port: &mut W,
+    data: &[u8],
+    start: Instant,
+    send_bound_ms: u64,
+) -> Result<(), TransportError> {
     if data.is_empty() {
         return Ok(());
     }
-    let deadline = Instant::now() + Duration::from_millis(send_bound_ms);
+    let deadline = crate::deadline::recv_deadline(start, send_bound_ms);
     let mut written = 0;
     while written < data.len() {
-        if Instant::now() >= deadline {
+        if crate::deadline::remaining(deadline, Instant::now()).is_zero() {
             return if written == 0 {
                 Err(TransportError::NothingWritten(
                     "serial: send timed out with no bytes written".into(),
@@ -379,6 +388,18 @@ mod tests {
         let out = recv_with_poll_from(&mut port, crate::deadline::latest_instant(), 1_000)
             .expect("a past-range deadline waits for the byte");
         assert_eq!(out, b"X");
+    }
+
+    #[test]
+    fn a_send_starting_near_the_clock_maximum_writes_without_a_deadline_overflow() {
+        let mut port = BlockThenWrite { blocks: 2 };
+        send_all_port_from(
+            &mut port,
+            &[1, 2, 3],
+            crate::deadline::latest_instant(),
+            5_000,
+        )
+        .expect("a past-range send bound keeps writing");
     }
 
     #[test]
