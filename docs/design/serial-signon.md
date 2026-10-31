@@ -16,7 +16,7 @@
 
 After XON, login sends the normal CR LF that is part of the sign-on flow. The wake is different: it is only for a line that stays silent.
 
-1. Every sign-on starts with a DTR drop (250 ms) and rise (spec §2.2 amendment 3), even if the line isn't silent. After the rise, input is flushed (tcflush TCIFLUSH), so the trace counts only this sign-on's bytes.
+1. Every sign-on starts with a DTR drop (250 ms) and rise (spec §2.2 amendment 3), even if the line isn't silent. Input is flushed (tcflush TCIFLUSH) while DTR is still low, before the rise, so the `00` from the drop and any stale bytes are discarded but the XOFF/XON the PBX sends on the rise are kept, and the trace counts only this sign-on's bytes.
 2. The client then waits `wake_interval_ms` (1.5 s) for XON.
 3. If that fresh DTR edge brings no XON, it sends **one** unsolicited CR LF, then waits the normal reply timeout. It never sends another: an extra CR LF may count as an empty password attempt.
 

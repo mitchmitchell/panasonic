@@ -5,7 +5,7 @@ use crate::transport::AnyTransport;
 use kxprov_api::DEFAULT_BACKUP_KEEP;
 use kxprov_api::{GoliathCopyStatus, OperationalMode, Profile};
 use kxtd1232::tables::TABLES;
-use kxtd1232::{Client, Transport};
+use kxtd1232::Client;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
@@ -113,11 +113,11 @@ impl BackupStore {
             .and_then(|m| m.caller_id_digest.clone())
     }
 
-    pub fn read_full_backup<T: Transport>(
-        client: &mut Client<T>,
+    pub fn read_full_backup(
+        client: &mut Client<AnyTransport>,
         password: &str,
     ) -> Result<std::collections::HashMap<u8, Vec<u8>>, BackupError> {
-        client.login(password)?;
+        crate::transport::login(client, password)?;
         let mut wire = std::collections::HashMap::new();
         for spec in TABLES.iter() {
             wire.insert(spec.id, client.read_table(spec.id)?);

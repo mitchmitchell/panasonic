@@ -525,6 +525,24 @@ mod prod_gate_tests {
     }
 
     #[tokio::test]
+    async fn backup_login_failure_logs_the_login_trace() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut ctx = test_worker_ctx(&tmp, false);
+        ctx.config.password = "not-the-sim-password".into();
+        let (cap, guard) = super::log_redaction_tests::capture();
+        let outcome = run_backup(&ctx, OperationalMode::Testing).await;
+        drop(guard);
+        let out = cap.text();
+        assert!(
+            matches!(outcome, JobOutcome::Err { ref code, .. } if code == "backup"),
+            "{outcome:?}"
+        );
+        assert!(out.contains("login failed"), "{out}");
+        assert!(out.contains("dtr_cycled="), "{out}");
+        assert!(!out.contains("not-the-sim-password"), "{out}");
+    }
+
+    #[tokio::test]
     async fn apply_job_approval_gate_blocks_without_consumed() {
         let tmp = tempfile::tempdir().unwrap();
         let ctx = test_worker_ctx(&tmp, false);
@@ -568,7 +586,7 @@ mod log_redaction_tests {
     use std::sync::{Arc, Mutex};
 
     #[derive(Clone, Default)]
-    struct Capture(Arc<Mutex<Vec<u8>>>);
+    pub(super) struct Capture(Arc<Mutex<Vec<u8>>>);
 
     impl Write for Capture {
         fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
@@ -580,16 +598,28 @@ mod log_redaction_tests {
         }
     }
 
-    fn captured(f: impl FnOnce()) -> String {
+    impl Capture {
+        pub(super) fn text(&self) -> String {
+            String::from_utf8(self.0.lock().unwrap().clone()).unwrap()
+        }
+    }
+
+    pub(super) fn capture() -> (Capture, tracing::subscriber::DefaultGuard) {
         let cap = Capture::default();
         let writer = cap.clone();
         let subscriber = tracing_subscriber::fmt()
             .with_ansi(false)
             .with_writer(move || writer.clone())
             .finish();
-        tracing::subscriber::with_default(subscriber, f);
-        let out = cap.0.lock().unwrap().clone();
-        String::from_utf8(out).unwrap()
+        let guard = tracing::subscriber::set_default(subscriber);
+        (cap, guard)
+    }
+
+    fn captured(f: impl FnOnce()) -> String {
+        let (cap, guard) = capture();
+        f();
+        drop(guard);
+        cap.text()
     }
 
     #[test]

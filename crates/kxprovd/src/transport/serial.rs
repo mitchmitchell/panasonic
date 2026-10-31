@@ -150,8 +150,8 @@ impl DtrPort for tokio_serial::SerialStream {
 pub(crate) fn cycle_dtr_port<P: DtrPort>(port: &mut P, hold_ms: u64) -> tokio_serial::Result<()> {
     port.set_dtr(false)?;
     std::thread::sleep(Duration::from_millis(hold_ms));
-    port.set_dtr(true)?;
-    port.flush_input()
+    port.flush_input()?;
+    port.set_dtr(true)
 }
 
 pub(crate) fn port_holders(
@@ -300,10 +300,10 @@ mod tests {
     }
 
     #[test]
-    fn dtr_cycle_flushes_input_after_dtr_rises() {
+    fn dtr_cycle_flushes_input_before_dtr_rises() {
         let mut port = RecordingPort::default();
         cycle_dtr_port(&mut port, 0).unwrap();
-        assert_eq!(port.ops, ["dtr_low", "dtr_high", "tcflush_input"]);
+        assert_eq!(port.ops, ["dtr_low", "tcflush_input", "dtr_high"]);
     }
 
     #[test]
@@ -313,7 +313,7 @@ mod tests {
             ..RecordingPort::default()
         };
         assert!(cycle_dtr_port(&mut port, 0).is_err());
-        assert_eq!(port.ops, ["dtr_low", "dtr_high", "tcflush_input"]);
+        assert_eq!(port.ops, ["dtr_low", "tcflush_input"]);
     }
 
     #[test]
