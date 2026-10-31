@@ -199,14 +199,14 @@ pub(crate) fn recv_with_poll<R: Read>(
     port: &mut R,
     timeout_ms: u64,
 ) -> Result<Vec<u8>, TransportError> {
-    let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+    let deadline = Instant::now().checked_add(Duration::from_millis(timeout_ms));
     let mut buf = [0u8; 256];
     loop {
         let now = Instant::now();
-        if now >= deadline {
+        let remaining = deadline.map_or(Duration::MAX, |d| d.saturating_duration_since(now));
+        if remaining.is_zero() {
             return Err(TransportError::Timeout);
         }
-        let remaining = deadline.saturating_duration_since(now);
         match port.read(&mut buf) {
             Ok(0) => {
                 std::thread::sleep(Duration::from_millis(5).min(remaining));
@@ -356,6 +356,16 @@ mod tests {
             read_plan: Arc::clone(&read_plan),
         };
         let out = recv_with_poll(&mut port, 100).expect("recv succeeds after WouldBlock");
+        assert_eq!(out, b"X");
+    }
+
+    #[test]
+    fn a_wait_forever_timeout_does_not_overflow_the_deadline() {
+        let read_plan = Arc::new(Mutex::new(vec![Err(ErrorKind::WouldBlock.into()), Ok(1)]));
+        let mut port = MockPort {
+            read_plan: Arc::clone(&read_plan),
+        };
+        let out = recv_with_poll(&mut port, u64::MAX).expect("u64::MAX timeout reads a byte");
         assert_eq!(out, b"X");
     }
 

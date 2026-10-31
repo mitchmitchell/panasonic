@@ -311,6 +311,10 @@ pub fn read_slice_ms(remaining: std::time::Duration) -> Option<u64> {
             .clamp(1, SMDR_READ_SLICE_MS),
     )
 }
+pub fn recv_deadline(now: std::time::Instant, timeout_ms: u64) -> Option<std::time::Instant> {
+    now.checked_add(std::time::Duration::from_millis(timeout_ms))
+}
+
 const SMDR_READ_SLICE: std::time::Duration = std::time::Duration::from_millis(SMDR_READ_SLICE_MS);
 
 #[cfg(feature = "test-util")]
@@ -406,9 +410,11 @@ impl SmdrDeviceHandle {
 
 impl SmdrSource for SmdrDeviceHandle {
     fn recv(&mut self, timeout_ms: u64) -> Result<Vec<u8>, TransportError> {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+        let deadline = recv_deadline(std::time::Instant::now(), timeout_ms);
         loop {
-            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            let remaining = deadline.map_or(SMDR_READ_SLICE, |d| {
+                d.saturating_duration_since(std::time::Instant::now())
+            });
             let Some(slice_ms) = read_slice_ms(remaining) else {
                 return Err(TransportError::Timeout);
             };
@@ -605,7 +611,7 @@ fn restore_line_speed(fd: &File, hook: Option<&mut ReadbackHook>) -> Result<(), 
 
 #[cfg(test)]
 mod tests {
-    use super::{read_slice_ms, SMDR_READ_SLICE_MS};
+    use super::{read_slice_ms, recv_deadline, SMDR_READ_SLICE_MS};
     use std::time::Duration;
 
     #[test]
@@ -623,5 +629,27 @@ mod tests {
         );
         assert_eq!(read_slice_ms(Duration::from_nanos(1)), Some(1));
         assert_eq!(read_slice_ms(Duration::from_micros(10_001)), Some(11));
+    }
+
+    #[test]
+    fn a_deadline_past_the_clock_range_means_no_deadline() {
+        let now = std::time::Instant::now();
+        let mut latest = now;
+        let mut step = Duration::from_secs(1 << 62);
+        while step >= Duration::from_secs(1) {
+            match latest.checked_add(step) {
+                Some(later) => latest = later,
+                None => step /= 2,
+            }
+        }
+        assert_eq!(recv_deadline(latest, u64::MAX), None);
+        assert_eq!(
+            recv_deadline(now, u64::MAX),
+            now.checked_add(Duration::from_millis(u64::MAX))
+        );
+        assert_eq!(
+            recv_deadline(now, 1_000),
+            Some(now + Duration::from_secs(1))
+        );
     }
 }
