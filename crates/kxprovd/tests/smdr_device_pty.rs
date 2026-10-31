@@ -395,7 +395,9 @@ fn a_lease_request_during_smdr_resume_waits_until_resume_finishes() {
         let got = smdr.recv(1000);
         (smdr, got)
     });
-    entered_rx.recv().unwrap();
+    entered_rx
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("SMDR resume never reached the readback hook within 5 s; recv did not re-apply termios after the lease");
     let lease = pm
         .request_lease("job-2", std::time::Duration::from_secs(2))
         .unwrap();
@@ -634,4 +636,50 @@ fn smdr_never_reads_with_a_lease_dirtied_line_after_a_lease_lands_between_resume
             "run {run}: {smdr_got:?}"
         );
     }
+}
+
+#[cfg(feature = "test-util")]
+#[test]
+fn no_lease_is_granted_during_an_in_flight_smdr_read() {
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Event {
+        ReadEnd,
+        Granted,
+    }
+
+    let mut pty = pty();
+    let pm = manager();
+    let mut smdr = pm
+        .open_smdr_device(&pty.path, SmdrLineOptions::default())
+        .unwrap();
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let (inside_tx, inside_rx) = std::sync::mpsc::channel();
+    let hook_events = Arc::clone(&events);
+    smdr.set_in_read_hook(Box::new(move || {
+        let _test_side_only_listens_for_the_first_read = inside_tx.send(());
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        hook_events.lock().unwrap().push(Event::ReadEnd);
+    }));
+    pty.master.write_all(b"10/30/26\r\n").unwrap();
+    let reader = std::thread::spawn(move || smdr.recv(1000));
+    inside_rx
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("SMDR reader never entered its read within 5 s");
+    let lease = pm
+        .request_lease("job-1", std::time::Duration::from_secs(2))
+        .unwrap();
+    events.lock().unwrap().push(Event::Granted);
+    let got = reader.join().unwrap();
+    assert!(
+        got.as_ref().is_ok_and(|b| b.starts_with(b"10/30/26")),
+        "{got:?}"
+    );
+    assert_eq!(
+        *events.lock().unwrap(),
+        [Event::ReadEnd, Event::Granted],
+        "a lease was granted while an SMDR read held the port"
+    );
+    lease.release().unwrap();
 }

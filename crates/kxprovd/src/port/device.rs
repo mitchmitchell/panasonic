@@ -289,6 +289,8 @@ pub struct SmdrDeviceHandle {
     readback_hook: Option<ReadbackHook>,
     #[cfg(feature = "test-util")]
     pre_read_hook: Option<PreReadHook>,
+    #[cfg(feature = "test-util")]
+    in_read_hook: Option<PreReadHook>,
 }
 
 #[cfg(feature = "test-util")]
@@ -332,6 +334,8 @@ impl SmdrDeviceHandle {
             readback_hook: None,
             #[cfg(feature = "test-util")]
             pre_read_hook: None,
+            #[cfg(feature = "test-util")]
+            in_read_hook: None,
         }
     }
 
@@ -343,6 +347,11 @@ impl SmdrDeviceHandle {
     #[cfg(feature = "test-util")]
     pub fn set_pre_read_hook(&mut self, hook: PreReadHook) {
         self.pre_read_hook = Some(hook);
+    }
+
+    #[cfg(feature = "test-util")]
+    pub fn set_in_read_hook(&mut self, hook: PreReadHook) {
+        self.in_read_hook = Some(hook);
     }
 
     pub fn resume_after_lease(&mut self) -> Result<bool, DeviceError> {
@@ -414,11 +423,18 @@ impl SmdrSource for SmdrDeviceHandle {
                 if let Some(hook) = self.pre_read_hook.as_mut() {
                     hook();
                 }
-                let device = self.lock();
+                let port = Arc::clone(&self.device);
+                let device = port.lock().unwrap_or_else(super::recover_from_poison);
                 let unchanged = self.lease_epoch.load(Ordering::SeqCst) == self.configured_epoch;
                 if !self.leased.load(Ordering::SeqCst) && unchanged {
                     let mut reader: &File = &device.file;
-                    return crate::transport::recv_with_poll(&mut reader, slice_ms);
+                    let read = crate::transport::recv_with_poll(&mut reader, slice_ms);
+                    #[cfg(feature = "test-util")]
+                    if let Some(hook) = self.in_read_hook.as_mut() {
+                        hook();
+                    }
+                    drop(device);
+                    return read;
                 }
             }
             std::thread::sleep(std::time::Duration::from_millis(slice_ms));
