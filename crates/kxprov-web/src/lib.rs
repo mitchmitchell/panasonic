@@ -172,7 +172,26 @@ async fn fill_dashboard_from_status(
     }
 }
 
-fn apply_plan_result(tpl: &mut DashboardTemplate, summary: &PlanSummary, mode: OperationalMode) {
+pub const EMPTY_VALUE_LABEL: &str = "(empty)";
+
+fn display_value(value: &str) -> String {
+    if value.trim().is_empty() {
+        EMPTY_VALUE_LABEL.into()
+    } else {
+        value.to_string()
+    }
+}
+
+pub fn shows_production_plan_hint(profile: Profile, mode: OperationalMode) -> bool {
+    profile != Profile::Sim && mode == OperationalMode::Production
+}
+
+fn apply_plan_result(
+    tpl: &mut DashboardTemplate,
+    summary: &PlanSummary,
+    profile: Profile,
+    mode: OperationalMode,
+) {
     tpl.show_plan = true;
     tpl.plan_id_hex = summary.plan_id.0.clone();
     tpl.diff_hash_hex = summary.diff_hash.0.clone();
@@ -180,9 +199,9 @@ fn apply_plan_result(tpl: &mut DashboardTemplate, summary: &PlanSummary, mode: O
     tpl.plan_table = summary.table;
     tpl.plan_record = summary.record;
     tpl.plan_field = summary.field.clone();
-    tpl.plan_old_value = summary.old_value.clone();
-    tpl.plan_new_value = summary.new_value.clone();
-    if mode == OperationalMode::Production {
+    tpl.plan_old_value = display_value(&summary.old_value);
+    tpl.plan_new_value = display_value(&summary.new_value);
+    if shows_production_plan_hint(profile, mode) {
         tpl.plan_id_prefix = summary.plan_id.0.chars().take(8).collect();
         tpl.plan_expires_at_iso = summary.expires_at.clone();
         tpl.plan_expires_at_chicago = expiry::format_expiry_chicago(&summary.expires_at);
@@ -248,6 +267,26 @@ fn login_rate_limited_response(message: &str, retry_after: std::time::Duration) 
             .insert(axum::http::header::RETRY_AFTER, value);
     }
     resp
+}
+
+pub fn error_page(status: StatusCode, title: &str, message: &str, next_step: &str) -> Response {
+    let html = templates::ErrorTemplate {
+        page_title: title.into(),
+        message: message.into(),
+        next_step: next_step.into(),
+    }
+    .render()
+    .unwrap_or_else(|_| format!("{title}. {message} {next_step}"));
+    (status, Html(html)).into_response()
+}
+
+pub fn stale_form_page() -> Response {
+    error_page(
+        StatusCode::FORBIDDEN,
+        "Your session needs a refresh",
+        "This form came from an old or different page, so nothing was changed.",
+        "Go back to the home page and try again. If it keeps happening, sign in again.",
+    )
 }
 
 pub const LOGIN_FAILED_MESSAGE: &str = "That password isn't correct. Try again.";
@@ -388,7 +427,9 @@ async fn logout(session: Session, headers: HeaderMap, Form(form): Form<LogoutFor
 
 #[derive(Deserialize)]
 pub struct TableRecordForm {
+    #[serde(default)]
     table: String,
+    #[serde(default)]
     record: String,
     #[serde(default, rename = "_csrf")]
     pub _csrf: String,
@@ -396,9 +437,13 @@ pub struct TableRecordForm {
 
 #[derive(Deserialize)]
 pub struct PlanForm {
+    #[serde(default)]
     table: String,
+    #[serde(default)]
     record: String,
+    #[serde(default)]
     field: String,
+    #[serde(default)]
     new_value: String,
     #[serde(default, rename = "_csrf")]
     pub _csrf: String,
@@ -449,7 +494,7 @@ async fn read_record(
                 .into_iter()
                 .map(|f| ReadFieldRow {
                     name: f.name,
-                    value: f.value,
+                    value: display_value(&f.value),
                 })
                 .collect();
         }
@@ -509,8 +554,8 @@ async fn plan_change(
     tpl.new_value_value = form.new_value.clone();
     fill_dashboard_from_status(&mut tpl, &state, &caller).await;
 
-    let mode = match state.backend.status(&caller).await {
-        Ok(status) => status.operational_mode,
+    let (profile, mode) = match state.backend.status(&caller).await {
+        Ok(status) => (status.profile, status.operational_mode),
         Err(_) => {
             tpl.show_plan_form_error = true;
             tpl.plan_form_error =
@@ -530,7 +575,7 @@ async fn plan_change(
     };
 
     match state.backend.plan_change(&caller, request).await {
-        Ok(summary) => apply_plan_result(&mut tpl, &summary, mode),
+        Ok(summary) => apply_plan_result(&mut tpl, &summary, profile, mode),
         Err(err) => {
             tpl.show_plan_form_error = true;
             tpl.plan_form_error = plan_error_message(err);
@@ -556,5 +601,37 @@ mod client_ip_tests {
         let peer = "10.0.0.2:443".parse().unwrap();
         assert_eq!(client_ip(&headers, Some(peer), true, true), "203.0.113.5");
         assert_eq!(client_ip(&headers, Some(peer), false, false), "10.0.0.2");
+    }
+}
+
+#[cfg(test)]
+mod display_value_tests {
+    use super::*;
+
+    #[test]
+    fn blank_values_show_empty_label() {
+        assert_eq!(display_value(""), EMPTY_VALUE_LABEL);
+        assert_eq!(display_value("   "), EMPTY_VALUE_LABEL);
+        assert_eq!(display_value("5550100"), "5550100");
+    }
+
+    #[test]
+    fn production_hint_only_off_sim_in_production_mode() {
+        assert!(!shows_production_plan_hint(
+            Profile::Sim,
+            OperationalMode::Production
+        ));
+        assert!(shows_production_plan_hint(
+            Profile::Prod,
+            OperationalMode::Production
+        ));
+        assert!(shows_production_plan_hint(
+            Profile::Test,
+            OperationalMode::Production
+        ));
+        assert!(!shows_production_plan_hint(
+            Profile::Prod,
+            OperationalMode::Testing
+        ));
     }
 }

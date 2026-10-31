@@ -232,6 +232,23 @@ impl DaemonBackend for DaemonClient {
         let record = req.record;
         let field = req.field.clone();
         let new_value = req.new_value.clone();
+        let old_value = match self
+            .call(
+                caller,
+                RequestBody::ReadFields {
+                    params: kxprov_api::ReadFieldsParams {
+                        kind: field_kind_wire(kind),
+                        first: record,
+                        count: 1,
+                    },
+                },
+            )
+            .await?
+        {
+            ResponseResult::ReadFields(r) => r.rows.into_iter().next().map(|row| row.value),
+            _ => return Err(BackendError::BadRequest("daemon")),
+        }
+        .unwrap_or_default();
         let result = self
             .call(
                 caller,
@@ -259,7 +276,7 @@ impl DaemonBackend for DaemonClient {
             table: r.table,
             record,
             field,
-            old_value: String::new(),
+            old_value,
             new_value,
             expires_at: expires_at_rfc3339(r.expires_at_ms),
         })

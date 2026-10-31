@@ -14,10 +14,16 @@ pub fn parse_table_input(raw: &str) -> Result<u8, String> {
     }
 }
 
+pub const RECORD_MIN: u16 = 1;
+pub const RECORD_MAX: u16 = 9999;
+pub const RECORD_INPUT_ERROR: &str = "Enter a whole number from 1 to 9999.";
+
 pub fn parse_record_input(raw: &str) -> Result<u16, String> {
     raw.trim()
-        .parse()
-        .map_err(|_| "record number must be a valid integer".to_string())
+        .parse::<u16>()
+        .ok()
+        .filter(|record| (RECORD_MIN..=RECORD_MAX).contains(record))
+        .ok_or_else(|| RECORD_INPUT_ERROR.to_string())
 }
 
 /// Rejects field names that are not in the table spec for the given table.
@@ -33,4 +39,22 @@ pub fn field_for_table(table: u8, field_name: &str) -> Result<FieldKind, String>
         ));
     }
     Ok(kind)
+}
+
+#[cfg(test)]
+mod record_tests {
+    use super::*;
+
+    #[test]
+    fn record_bounds() {
+        assert_eq!(parse_record_input("1"), Ok(1));
+        assert_eq!(parse_record_input(" 9999 "), Ok(9999));
+        for bad in ["0", "10000", "abc", "1.0", "-1", "", "65536"] {
+            assert_eq!(
+                parse_record_input(bad),
+                Err(RECORD_INPUT_ERROR.to_string()),
+                "{bad:?}"
+            );
+        }
+    }
 }

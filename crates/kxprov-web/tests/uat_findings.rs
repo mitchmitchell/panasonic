@@ -200,3 +200,125 @@ async fn prod_profile_banner_still_shows_production() {
     assert!(html.contains("mode-banner--production"));
     assert!(html.contains("PRODUCTION"));
 }
+
+async fn post_form(
+    app: &axum::Router,
+    path: &str,
+    cookie: &str,
+    body: String,
+) -> (StatusCode, String) {
+    let resp = app
+        .clone()
+        .oneshot(split_cookie_request(path, cookie, body))
+        .await
+        .unwrap();
+    let status = resp.status();
+    (status, body_string(resp).await)
+}
+
+#[tokio::test]
+async fn record_zero_rejected_on_read_and_plan() {
+    let app = app(OperationalMode::Testing, Profile::Sim);
+    let (cookie, csrf, _) = sign_in(&app).await;
+    let csrf = form_urlencoded(&csrf);
+    let (status, html) = post_form(
+        &app,
+        "/read",
+        &cookie,
+        format!("table=36&record=0&_csrf={csrf}"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(html.contains("Enter a whole number from 1 to 9999."));
+    assert!(!html.contains("read-result"));
+    let (status, html) = post_form(
+        &app,
+        "/plan",
+        &cookie,
+        format!("table=36&record=0&field=cid_number&new_value=1&_csrf={csrf}"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(html.contains("Enter a whole number from 1 to 9999."));
+    assert!(!html.contains("plan-result"));
+}
+
+#[tokio::test]
+async fn non_integer_and_out_of_range_records_get_plain_message() {
+    let app = app(OperationalMode::Testing, Profile::Sim);
+    let (cookie, csrf, _) = sign_in(&app).await;
+    let csrf = form_urlencoded(&csrf);
+    for record in ["abc", "1.5", "-1", "10000", ""] {
+        let (_, html) = post_form(
+            &app,
+            "/read",
+            &cookie,
+            format!("table=36&record={record}&_csrf={csrf}"),
+        )
+        .await;
+        assert!(
+            html.contains("Enter a whole number from 1 to 9999."),
+            "record {record:?}"
+        );
+    }
+    let (_, html) = post_form(
+        &app,
+        "/read",
+        &cookie,
+        format!("table=36&record=9999&_csrf={csrf}"),
+    )
+    .await;
+    assert!(html.contains("read-result"));
+}
+
+#[tokio::test]
+async fn missing_form_fields_render_in_layout_not_bare_422() {
+    let app = app(OperationalMode::Testing, Profile::Sim);
+    let (cookie, csrf, _) = sign_in(&app).await;
+    let (status, html) = post_form(
+        &app,
+        "/read",
+        &cookie,
+        format!("_csrf={}", form_urlencoded(&csrf)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(html.contains("site-header"));
+    assert!(html.contains("inline-error"));
+}
+
+#[tokio::test]
+async fn sim_plan_result_has_no_production_hint_and_shows_current_value() {
+    let app = app(OperationalMode::Production, Profile::Sim);
+    let (cookie, csrf, _) = sign_in(&app).await;
+    let (_, html) = post_form(
+        &app,
+        "/plan",
+        &cookie,
+        format!(
+            "table=36&record=1&field=cid_number&new_value=5550199&_csrf={}",
+            form_urlencoded(&csrf)
+        ),
+    )
+    .await;
+    assert!(html.contains("plan-result"));
+    assert!(!html.contains("production-hint"));
+    assert!(html.contains("<dt>Current value</dt><dd>5550001</dd>"));
+}
+
+#[tokio::test]
+async fn prod_plan_result_keeps_production_hint() {
+    let app = app(OperationalMode::Production, Profile::Prod);
+    let (cookie, csrf, _) = sign_in(&app).await;
+    let (_, html) = post_form(
+        &app,
+        "/plan",
+        &cookie,
+        format!(
+            "table=36&record=1&field=cid_number&new_value=5550199&_csrf={}",
+            form_urlencoded(&csrf)
+        ),
+    )
+    .await;
+    assert!(html.contains("production-hint"));
+}

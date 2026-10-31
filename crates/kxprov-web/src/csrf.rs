@@ -1,6 +1,5 @@
-use askama::Template;
 use axum::http::{header, HeaderMap, StatusCode};
-use axum::response::{Html, IntoResponse, Response};
+use axum::response::Response;
 use subtle::ConstantTimeEq;
 use tower_sessions::Session;
 
@@ -37,16 +36,12 @@ fn cookie_token(headers: &HeaderMap) -> Option<String> {
 }
 
 fn csrf_rejection() -> Response {
-    let html = crate::templates::ErrorTemplate {
-        page_title: "Your session needs a refresh".into(),
-        message: "This form was out of date or your sign-in expired, so nothing was changed."
-            .into(),
-        next_step: "Go back to the home page and try again. If it keeps happening, sign in again."
-            .into(),
-    }
-    .render()
-    .unwrap_or_else(|_| "Your session needs a refresh. Go back to / and try again.".into());
-    (StatusCode::FORBIDDEN, Html(html)).into_response()
+    crate::error_page(
+        StatusCode::FORBIDDEN,
+        "Your session needs a refresh",
+        "This form was out of date or your sign-in expired, so nothing was changed.",
+        "Go back to the home page and try again. If it keeps happening, sign in again.",
+    )
 }
 
 pub async fn verify_form_csrf(
