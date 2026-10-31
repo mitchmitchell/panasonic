@@ -43,6 +43,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 chrono-tz = "0.10"
+rusqlite = { version = "0.37", features = ["bundled"] }
 
 [dev-dependencies]
 tempfile = "3"
@@ -95,4 +96,8 @@ required-features = ["test-util"]
 
 [[test]]
 name = "tokens_fifo"
+required-features = ["test-util"]
+
+[[test]]
+name = "smdr_store_daemon"
 required-features = ["test-util"]
