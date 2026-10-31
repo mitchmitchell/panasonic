@@ -82,3 +82,31 @@ fn test_write_range_checks() {
     let enc = Encoder::new(Access::ReadWrite);
     assert!(enc.write(0x25, 0xFFFF, 0, &[0; 16]).is_err());
 }
+
+#[test]
+fn test_read_path_never_encodes_the_full_upload_end_frames() {
+    use kxtd1232::frame::Cmd;
+    const END_UPLOAD: [[u8; 3]; 2] = [[0x02, 0x0A, 0x0C], [0x02, 0x10, 0x12]];
+    assert!(Cmd::from_byte(0x0A).is_none());
+    assert!(Cmd::from_byte(0x10).is_none());
+    let enc = Encoder::new(Access::ReadOnly);
+    let mut sent = vec![
+        enc.version_probe(),
+        enc.status_probe(),
+        enc.clock(),
+        enc.end_binary(),
+    ];
+    for spec in TABLES.iter() {
+        for (record, word, nwords) in spec.frames() {
+            sent.push(enc.read(spec.id, record, word, nwords).unwrap());
+        }
+    }
+    for frame in &sent {
+        assert!(
+            !END_UPLOAD.iter().any(|end| frame.as_slice() == end),
+            "read path encoded a full-upload end frame: {frame:02X?}"
+        );
+        assert_ne!(frame[1], 0x0A, "{frame:02X?}");
+        assert_ne!(frame[1], 0x10, "{frame:02X?}");
+    }
+}

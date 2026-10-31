@@ -56,6 +56,10 @@ A failed job logs `job failed` with the job id, job kind, error code and the mes
 
 Only the leased device can cycle DTR, so every sign-on's cycle runs while SMDR is paused. The cycle sets B0 (DTR and RTS low), waits `DTR_LOW_PERIOD`, flushes input and restores 9600 with a readback, so bytes from before the rise are never read as a reply.
 
+Sign-on and release share one hold, `DTR_LOW_PERIOD` = 300 ms. That is the release hold the read-path spec records as supported (read-path-spec-v1 §2 step 3, PR #36). #57's separate 250 ms sign-on hold is gone.
+
+If the input flush fails, the cycle returns `DtrError::Flush` without restoring the speed, so the line stays at B0 with DTR low. Sign-on fails with `LinkDown`. A failed release leaves the line hung up until the next open, which re-applies 9600.
+
 ## Modem lines are not reported on serial yet
 
 The leased device has no safe TIOCMGET (the workspace forbids `unsafe`), so DSR, CTS and DCD read `NotReported` in the login trace. Tracked in https://github.com/mitchmitchell/panasonic/issues/69.
