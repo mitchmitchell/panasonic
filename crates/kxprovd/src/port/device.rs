@@ -295,6 +295,20 @@ pub struct SmdrDeviceHandle {
 pub type PreReadHook = Box<dyn FnMut() + Send>;
 
 pub const SMDR_READ_SLICE_MS: u64 = 50;
+
+pub fn read_slice_ms(remaining: std::time::Duration) -> Option<u64> {
+    if remaining.is_zero() {
+        return None;
+    }
+    if remaining >= SMDR_READ_SLICE {
+        return Some(SMDR_READ_SLICE_MS);
+    }
+    Some(
+        u64::from(remaining.subsec_micros())
+            .div_ceil(1000)
+            .clamp(1, SMDR_READ_SLICE_MS),
+    )
+}
 const SMDR_READ_SLICE: std::time::Duration = std::time::Duration::from_millis(SMDR_READ_SLICE_MS);
 
 #[cfg(feature = "test-util")]
@@ -386,10 +400,8 @@ impl SmdrSource for SmdrDeviceHandle {
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
         loop {
             let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-            let slice_ms = if remaining >= SMDR_READ_SLICE {
-                SMDR_READ_SLICE_MS
-            } else {
-                u64::from(remaining.subsec_millis())
+            let Some(slice_ms) = read_slice_ms(remaining) else {
+                return Err(TransportError::Timeout);
             };
             let resumed = self.resume_after_lease().map_err(|e| {
                 TransportError::LinkDown(kxtd1232::LinkDownError {
@@ -408,9 +420,6 @@ impl SmdrSource for SmdrDeviceHandle {
                     let mut reader: &File = &device.file;
                     return crate::transport::recv_with_poll(&mut reader, slice_ms);
                 }
-            }
-            if remaining.is_zero() {
-                return Err(TransportError::Timeout);
             }
             std::thread::sleep(std::time::Duration::from_millis(slice_ms));
         }
@@ -576,4 +585,27 @@ fn restore_line_speed(fd: &File, hook: Option<&mut ReadbackHook>) -> Result<(), 
         });
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{read_slice_ms, SMDR_READ_SLICE_MS};
+    use std::time::Duration;
+
+    #[test]
+    fn read_slice_rounds_up_and_clamps() {
+        assert_eq!(read_slice_ms(Duration::ZERO), None);
+        assert_eq!(read_slice_ms(Duration::from_micros(500)), Some(1));
+        assert_eq!(read_slice_ms(Duration::from_micros(49_900)), Some(50));
+        assert_eq!(
+            read_slice_ms(Duration::from_millis(50)),
+            Some(SMDR_READ_SLICE_MS)
+        );
+        assert_eq!(
+            read_slice_ms(Duration::from_secs(3)),
+            Some(SMDR_READ_SLICE_MS)
+        );
+        assert_eq!(read_slice_ms(Duration::from_nanos(1)), Some(1));
+        assert_eq!(read_slice_ms(Duration::from_micros(10_001)), Some(11));
+    }
 }

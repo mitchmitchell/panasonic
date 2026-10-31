@@ -391,7 +391,10 @@ fn a_lease_request_during_smdr_resume_waits_until_resume_finishes() {
         hook_finished.store(true, Ordering::SeqCst);
     }));
     pty.master.write_all(b"10/30/26\r\n").unwrap();
-    let reader = std::thread::spawn(move || smdr.recv(1000));
+    let reader = std::thread::spawn(move || {
+        let got = smdr.recv(1000);
+        (smdr, got)
+    });
     entered_rx.recv().unwrap();
     let lease = pm
         .request_lease("job-2", std::time::Duration::from_secs(2))
@@ -400,13 +403,19 @@ fn a_lease_request_during_smdr_resume_waits_until_resume_finishes() {
         finished.load(Ordering::SeqCst),
         "lease granted before SMDR resume finished"
     );
-    let smdr_got = reader.join().unwrap();
-    assert!(
-        matches!(&smdr_got, Ok(b) if b.starts_with(b"10/30/26"))
-            || matches!(smdr_got, Err(kxtd1232::TransportError::Timeout)),
-        "SMDR must either read the pre-lease line or wait out the lease: {smdr_got:?}"
-    );
+    let (mut smdr, smdr_got) = reader.join().unwrap();
     lease.release().unwrap();
+    match smdr_got {
+        Ok(bytes) => assert!(bytes.starts_with(b"10/30/26"), "{bytes:?}"),
+        Err(kxtd1232::TransportError::Timeout) => {
+            let after = smdr.recv(1000);
+            assert!(
+                after.as_ref().is_ok_and(|b| b.starts_with(b"10/30/26")),
+                "SMDR lost the pre-lease line across the lease: {after:?}"
+            );
+        }
+        Err(other) => panic!("unexpected SMDR outcome: {other:?}"),
+    }
 }
 
 #[cfg(feature = "test-util")]
