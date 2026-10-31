@@ -512,7 +512,7 @@ fn no_programming_reply_reaches_smdr_when_a_lease_lands_between_resume_and_read(
             let _receiver_gone_after_the_first_read = gap_tx.send(());
             std::thread::sleep(std::time::Duration::from_millis(150));
         }));
-        let reader = std::thread::spawn(move || smdr.recv(1000));
+        let reader = std::thread::spawn(move || smdr.recv(400));
         gap_rx.recv().unwrap();
         let lease = pm
             .request_lease("job-1", std::time::Duration::from_secs(2))
@@ -530,4 +530,46 @@ fn no_programming_reply_reaches_smdr_when_a_lease_lands_between_resume_and_read(
         dev.end(std::time::Duration::from_millis(20)).unwrap();
         lease.release().unwrap();
     }
+}
+
+#[test]
+fn smdr_recv_under_a_held_lease_waits_out_its_timeout() {
+    let pty = pty();
+    let pm = manager();
+    let mut smdr = pm
+        .open_smdr_device(&pty.path, SmdrLineOptions::default())
+        .unwrap();
+    let lease = pm
+        .request_lease("job-1", std::time::Duration::from_millis(50))
+        .unwrap();
+    let started = std::time::Instant::now();
+    let got = smdr.recv(200);
+    let waited = started.elapsed();
+    assert!(
+        matches!(got, Err(kxtd1232::TransportError::Timeout)),
+        "{got:?}"
+    );
+    assert!(
+        waited >= std::time::Duration::from_millis(180)
+            && waited <= std::time::Duration::from_millis(600),
+        "{waited:?}"
+    );
+    lease.release().unwrap();
+}
+
+#[test]
+fn smdr_recv_in_smdr_mode_returns_within_one_read_slice() {
+    let pty = pty();
+    let mut smdr = open_smdr_device(&pty.path, SmdrLineOptions::default()).unwrap();
+    let started = std::time::Instant::now();
+    let got = smdr.recv(5_000);
+    let waited = started.elapsed();
+    assert!(
+        matches!(got, Err(kxtd1232::TransportError::Timeout)),
+        "{got:?}"
+    );
+    assert!(
+        waited <= std::time::Duration::from_millis(400),
+        "{waited:?}"
+    );
 }

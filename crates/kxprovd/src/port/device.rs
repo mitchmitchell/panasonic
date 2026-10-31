@@ -382,32 +382,34 @@ impl SmdrDeviceHandle {
 
 impl SmdrSource for SmdrDeviceHandle {
     fn recv(&mut self, timeout_ms: u64) -> Result<Vec<u8>, TransportError> {
-        let resumed = self.resume_after_lease().map_err(|e| {
-            TransportError::LinkDown(kxtd1232::LinkDownError {
-                detail: format!("SMDR line settings not restored after a lease: {e}"),
-                bytes_sent: None,
-            })
-        })?;
-        if !resumed {
-            return Err(TransportError::Timeout);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+        loop {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            let slice = remaining.min(std::time::Duration::from_millis(SMDR_READ_SLICE_MS));
+            let resumed = self.resume_after_lease().map_err(|e| {
+                TransportError::LinkDown(kxtd1232::LinkDownError {
+                    detail: format!("SMDR line settings not restored after a lease: {e}"),
+                    bytes_sent: None,
+                })
+            })?;
+            if resumed {
+                #[cfg(feature = "test-util")]
+                if let Some(hook) = self.pre_read_hook.as_mut() {
+                    hook();
+                }
+                let device = self.lock();
+                let unchanged = self.lease_epoch.load(Ordering::SeqCst) == self.configured_epoch;
+                if !self.leased.load(Ordering::SeqCst) && unchanged {
+                    let mut reader: &File = &device.file;
+                    let slice_ms = u64::try_from(slice.as_millis()).unwrap_or(u64::MAX);
+                    return crate::transport::recv_with_poll(&mut reader, slice_ms);
+                }
+            }
+            if remaining.is_zero() {
+                return Err(TransportError::Timeout);
+            }
+            std::thread::sleep(slice);
         }
-        #[cfg(feature = "test-util")]
-        if let Some(hook) = self.pre_read_hook.as_mut() {
-            hook();
-        }
-        let device = self.lock();
-        let before = self.lease_epoch.load(Ordering::SeqCst);
-        if self.leased.load(Ordering::SeqCst) || before != self.configured_epoch {
-            return Err(TransportError::Timeout);
-        }
-        let slice = timeout_ms.min(SMDR_READ_SLICE_MS);
-        let mut reader: &File = &device.file;
-        let read = crate::transport::recv_with_poll(&mut reader, slice);
-        if self.leased.load(Ordering::SeqCst) || self.lease_epoch.load(Ordering::SeqCst) != before {
-            return Err(TransportError::Timeout);
-        }
-        drop(device);
-        read
     }
 }
 
