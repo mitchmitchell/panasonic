@@ -1,58 +1,64 @@
-//! Linux serial transport via `tokio-serial` (blocking read in the worker task).
-
-use kxtd1232::{LineLevel, ModemLines};
-use kxtd1232::{LinkDownError, Transport, TransportError};
+use crate::port::device::{LeasedDevice, SmdrLineOptions};
+use crate::port::journal::LeaseJournal;
+use crate::port::{DeviceLine, PortManager, DEFAULT_LEASE_TIMEOUT, DEFAULT_MAX_LEASE_WAITERS};
+use kxtd1232::{LinkDownError, TransportError};
+use std::collections::HashMap;
 use std::io::{Read, Write};
-use std::os::unix::fs::{FileTypeExt, MetadataExt};
-use std::path::Path;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use tokio_serial::{DataBits, FlowControl, Parity, SerialPort, SerialPortBuilderExt, StopBits};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
-const DTR_DROP_MS: u64 = 250;
+pub const SHARED_PORT_BAUD: u32 = 9600;
 
-pub struct TokioSerialTransport {
-    port: tokio_serial::SerialStream,
-    send_bound_ms: u64,
+pub type SerialTransport = LeasedDevice<DeviceLine>;
+
+type Registry = Mutex<HashMap<PathBuf, Arc<PortManager<DeviceLine>>>>;
+
+fn registry() -> &'static Registry {
+    static PORTS: OnceLock<Registry> = OnceLock::new();
+    PORTS.get_or_init(Registry::default)
 }
 
-impl TokioSerialTransport {
-    pub fn open(path: &Path, baud: u32, send_bound_ms: u64) -> Result<Self, String> {
-        let holders = port_holders(Path::new("/proc"), path, std::process::id())
-            .map_err(|e| format!("serial: cannot check {} holders: {e}", path.display()))?;
-        if !holders.is_empty() {
-            return Err(format!(
-                "serial: {} is held by pid {holders:?}",
-                path.display()
-            ));
-        }
-        let path = path.to_string_lossy();
-        let port = tokio_serial::new(path.as_ref(), baud)
-            .data_bits(DataBits::Eight)
-            .parity(Parity::None)
-            .stop_bits(StopBits::One)
-            .flow_control(FlowControl::None)
-            .exclusive(true)
-            .open_native_async()
-            .map_err(|e| e.to_string())?;
-        if !port.exclusive() {
-            return Err("serial: exclusive open (TIOCEXCL and flock) not in effect".into());
-        }
-        Ok(Self {
-            port,
+const REGISTRY_POISON_REASON: &str = "the registry critical section only inserts or clones an Arc, so a panic cannot leave a half-applied entry";
+
+pub fn port_manager(device: &Path, journal: &Path) -> Arc<PortManager<DeviceLine>> {
+    let mut ports = registry().lock().unwrap_or_else(|poisoned| {
+        tracing::warn!(
+            reason = REGISTRY_POISON_REASON,
+            "port registry lock was poisoned; continuing"
+        );
+        poisoned.into_inner()
+    });
+    Arc::clone(ports.entry(device.to_path_buf()).or_insert_with(|| {
+        Arc::new(PortManager::new(
+            DeviceLine,
+            LeaseJournal::new(journal),
+            DEFAULT_MAX_LEASE_WAITERS,
+        ))
+    }))
+}
+
+pub fn open_leased(
+    device: &Path,
+    journal: &Path,
+    job_id: &str,
+    baud: u32,
+    send_bound_ms: u64,
+) -> Result<SerialTransport, String> {
+    if baud != SHARED_PORT_BAUD {
+        return Err(format!(
+            "serial: link_baud {baud} is not {SHARED_PORT_BAUD}, the speed the shared SMDR and programming port runs at"
+        ));
+    }
+    port_manager(device, journal)
+        .open_leased_device(
+            job_id,
+            DEFAULT_LEASE_TIMEOUT,
+            device,
+            SmdrLineOptions::default(),
             send_bound_ms,
-        })
-    }
-
-    fn line_error(e: tokio_serial::Error) -> TransportError {
-        TransportError::LinkDown(LinkDownError {
-            detail: format!("serial: modem line: {e}"),
-            bytes_sent: Some(0),
-        })
-    }
-
-    fn send_all(&mut self, data: &[u8]) -> Result<(), TransportError> {
-        send_all_port(&mut self.port, data, self.send_bound_ms)
-    }
+        )
+        .map_err(|e| format!("serial: {}: {e}", device.display()))
 }
 
 pub(crate) fn send_all_port<W: Write>(
@@ -100,98 +106,6 @@ pub(crate) fn send_all_port<W: Write>(
         }
     }
     Ok(())
-}
-
-impl Transport for TokioSerialTransport {
-    fn send(&mut self, data: &[u8]) -> Result<(), TransportError> {
-        self.send_all(data)
-    }
-
-    fn recv(&mut self, timeout_ms: u64) -> Result<Vec<u8>, TransportError> {
-        recv_with_poll(&mut self.port, timeout_ms)
-    }
-
-    fn now_ms(&mut self) -> u64 {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0)
-    }
-
-    fn cycle_dtr(&mut self) -> Result<bool, TransportError> {
-        cycle_dtr_port(&mut self.port, DTR_DROP_MS).map_err(Self::line_error)?;
-        Ok(true)
-    }
-
-    fn modem_lines(&mut self) -> ModemLines {
-        ModemLines {
-            dsr: LineLevel::from_read(self.port.read_data_set_ready()),
-            cts: LineLevel::from_read(self.port.read_clear_to_send()),
-            dcd: LineLevel::from_read(self.port.read_carrier_detect()),
-        }
-    }
-}
-
-pub(crate) trait DtrPort {
-    fn set_dtr(&mut self, level: bool) -> tokio_serial::Result<()>;
-    fn flush_input(&mut self) -> tokio_serial::Result<()>;
-}
-
-impl DtrPort for tokio_serial::SerialStream {
-    fn set_dtr(&mut self, level: bool) -> tokio_serial::Result<()> {
-        self.write_data_terminal_ready(level)
-    }
-
-    fn flush_input(&mut self) -> tokio_serial::Result<()> {
-        self.clear(tokio_serial::ClearBuffer::Input)
-    }
-}
-
-pub(crate) fn cycle_dtr_port<P: DtrPort>(port: &mut P, hold_ms: u64) -> tokio_serial::Result<()> {
-    port.set_dtr(false)?;
-    std::thread::sleep(Duration::from_millis(hold_ms));
-    port.flush_input()?;
-    port.set_dtr(true)
-}
-
-pub(crate) fn port_holders(
-    proc_root: &Path,
-    device: &Path,
-    own_pid: u32,
-) -> std::io::Result<Vec<u32>> {
-    let meta = std::fs::metadata(device)?;
-    let target = meta.file_type().is_char_device().then(|| meta.rdev());
-    let canonical = std::fs::canonicalize(device)?;
-    let mut holders = Vec::new();
-    for entry in std::fs::read_dir(proc_root)?.flatten() {
-        let Some(pid) = entry
-            .file_name()
-            .to_str()
-            .and_then(|n| n.parse::<u32>().ok())
-        else {
-            continue;
-        };
-        if pid == own_pid {
-            continue;
-        }
-        let Ok(fds) = std::fs::read_dir(entry.path().join("fd")) else {
-            continue;
-        };
-        let held = fds.flatten().any(|fd| {
-            let path = fd.path();
-            let by_link = std::fs::read_link(&path).is_ok_and(|l| l == canonical);
-            let by_rdev = target.is_some_and(|rdev| {
-                std::fs::metadata(&path)
-                    .is_ok_and(|m| m.file_type().is_char_device() && m.rdev() == rdev)
-            });
-            by_link || by_rdev
-        });
-        if held {
-            holders.push(pid);
-        }
-    }
-    holders.sort_unstable();
-    Ok(holders)
 }
 
 /// Shared recv loop: `WouldBlock` means no data yet (wait, do not drop the link).
@@ -273,80 +187,6 @@ mod tests {
         fn flush(&mut self) -> std::io::Result<()> {
             Ok(())
         }
-    }
-
-    #[derive(Default)]
-    struct RecordingPort {
-        ops: Vec<&'static str>,
-        fail_flush: bool,
-    }
-
-    impl DtrPort for RecordingPort {
-        fn set_dtr(&mut self, level: bool) -> tokio_serial::Result<()> {
-            self.ops.push(if level { "dtr_high" } else { "dtr_low" });
-            Ok(())
-        }
-
-        fn flush_input(&mut self) -> tokio_serial::Result<()> {
-            self.ops.push("tcflush_input");
-            if self.fail_flush {
-                return Err(tokio_serial::Error::new(
-                    tokio_serial::ErrorKind::Unknown,
-                    "flush failed",
-                ));
-            }
-            Ok(())
-        }
-    }
-
-    #[test]
-    fn dtr_cycle_flushes_input_before_dtr_rises() {
-        let mut port = RecordingPort::default();
-        cycle_dtr_port(&mut port, 0).unwrap();
-        assert_eq!(port.ops, ["dtr_low", "tcflush_input", "dtr_high"]);
-    }
-
-    #[test]
-    fn dtr_cycle_reports_a_failed_flush() {
-        let mut port = RecordingPort {
-            fail_flush: true,
-            ..RecordingPort::default()
-        };
-        assert!(cycle_dtr_port(&mut port, 0).is_err());
-        assert_eq!(port.ops, ["dtr_low", "tcflush_input"]);
-    }
-
-    #[test]
-    fn port_holders_finds_other_pids_and_skips_self() {
-        let dir = tempfile::tempdir().unwrap();
-        let device = dir.path().join("ttyFAKE");
-        std::fs::write(&device, b"").unwrap();
-        let canonical = std::fs::canonicalize(&device).unwrap();
-        let proc_root = dir.path().join("proc");
-        for (pid, link) in [(10u32, true), (11, false), (12, true)] {
-            let fd_dir = proc_root.join(pid.to_string()).join("fd");
-            std::fs::create_dir_all(&fd_dir).unwrap();
-            let other = dir.path().join(format!("other{pid}"));
-            std::fs::write(&other, b"").unwrap();
-            std::os::unix::fs::symlink(&other, fd_dir.join("0")).unwrap();
-            if link {
-                std::os::unix::fs::symlink(&canonical, fd_dir.join("3")).unwrap();
-            }
-        }
-        std::fs::create_dir_all(proc_root.join("self")).unwrap();
-        assert_eq!(port_holders(&proc_root, &device, 12).unwrap(), vec![10]);
-        assert_eq!(port_holders(&proc_root, &device, 99).unwrap(), vec![10, 12]);
-    }
-
-    #[test]
-    fn port_holders_is_empty_when_nobody_has_the_device() {
-        let dir = tempfile::tempdir().unwrap();
-        let device = dir.path().join("ttyFAKE");
-        std::fs::write(&device, b"").unwrap();
-        std::fs::create_dir_all(dir.path().join("proc/7/fd")).unwrap();
-        assert!(port_holders(&dir.path().join("proc"), &device, 1)
-            .unwrap()
-            .is_empty());
     }
 
     #[test]

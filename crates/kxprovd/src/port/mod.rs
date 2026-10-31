@@ -38,6 +38,8 @@ pub const DTR_LOW_PERIOD: Duration = Duration::from_millis(300);
 pub enum DtrError {
     #[error("DTR drop (B0): {0}")]
     Hangup(String),
+    #[error("flushing input after the DTR drop: {0}")]
+    Flush(String),
     #[error("restoring line speed after the DTR drop: {0}")]
     Restore(String),
     #[error("line speed after the DTR drop reads back as {got}, expected {expected}")]
@@ -175,6 +177,40 @@ pub enum LeaseError {
     Timeout { waited_ms: u64 },
     #[error("lease journal: {0}")]
     Journal(#[from] std::io::Error),
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum LeasedOpenError {
+    #[error("{0}")]
+    Lease(LeaseError),
+    #[error("programming open: {0}")]
+    Device(device::DeviceError),
+}
+
+pub struct DeviceLine;
+
+impl Transport for DeviceLine {
+    fn send(&mut self, _data: &[u8]) -> Result<(), TransportError> {
+        Err(TransportError::NothingWritten(
+            "the lease only arbitrates the device; bytes go through the leased device".into(),
+        ))
+    }
+
+    fn recv(&mut self, _timeout_ms: u64) -> Result<Vec<u8>, TransportError> {
+        Err(TransportError::Timeout)
+    }
+
+    fn now_ms(&mut self) -> u64 {
+        0
+    }
+}
+
+impl PortRelease for DeviceLine {
+    fn drop_dtr(&mut self) -> Result<(), DtrError> {
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -405,7 +441,36 @@ impl<T: PortRelease> PortManager<T> {
             Some(smdr) => device::FlockCover::HeldBySmdr(Arc::clone(smdr)),
             None => device::FlockCover::Own,
         };
-        device::ProgrammingDevice::open(path, options, lock)
+        device::ProgrammingLine::open(path, options, lock, device::PROGRAMMING_SEND_BOUND_MS)
+            .map(device::ProgrammingDevice::new)
+    }
+
+    #[cfg(target_os = "linux")]
+    pub fn open_leased_device(
+        &self,
+        job_id: &str,
+        timeout: Duration,
+        path: &std::path::Path,
+        options: device::SmdrLineOptions,
+        send_bound_ms: u64,
+    ) -> Result<device::LeasedDevice<T>, LeasedOpenError> {
+        let lease = self
+            .request_lease(job_id, timeout)
+            .map_err(LeasedOpenError::Lease)?;
+        let cover = {
+            let slot = self
+                .shared
+                .device
+                .lock()
+                .unwrap_or_else(recover_from_poison);
+            match slot.as_ref() {
+                Some(smdr) => device::FlockCover::HeldBySmdr(Arc::clone(smdr)),
+                None => device::FlockCover::Own,
+            }
+        };
+        let line = device::ProgrammingLine::open(path, options, cover, send_bound_ms)
+            .map_err(LeasedOpenError::Device)?;
+        Ok(device::LeasedDevice::new(line, lease))
     }
 }
 

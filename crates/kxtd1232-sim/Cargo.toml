@@ -69,3 +69,7 @@ required-features = ["faults"]
 [[test]]
 name = "partial_send"
 required-features = ["test-transport-access"]
+
+[[test]]
+name = "read_path_commands"
+required-features = ["test-transport-access"]
