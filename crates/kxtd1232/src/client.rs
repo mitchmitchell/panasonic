@@ -77,6 +77,8 @@ pub struct Timing {
     pub reply_guard_ms: u64,
     /// Upper bound for a single serial [`Transport::send`] (daemon maps to line I/O).
     pub send_bound_ms: u64,
+    pub wake_interval_ms: u64,
+    pub wake_attempts: u32,
 }
 
 /// Shortest reply frame (an ack), for the post-send cutoff.
@@ -141,6 +143,8 @@ impl Default for Timing {
             link_baud: 9600,
             reply_guard_ms: MIN_REPLY_GUARD_MS,
             send_bound_ms: 5_000,
+            wake_interval_ms: 1_500,
+            wake_attempts: 3,
         }
     }
 }
@@ -308,12 +312,28 @@ impl<T: Transport> Client<T> {
         let mut sm = Login::with_signon(password, self.signon.clone()).map_err(Error::Login)?;
         let start = self.t.now_ms();
         let limit = self.timing.login_timeout_ms;
+        let mut wakes = 0u32;
         while !sm.state().is_terminal() {
             let elapsed = self.t.now_ms().saturating_sub(start);
             if elapsed >= limit {
                 return Err(Error::Login(LoginFailure::TimedOut { ms: limit }));
             }
-            let data = self.recv(self.timing.reply_timeout_ms.min(limit - elapsed))?;
+            let can_wake = sm.wake_pending() && wakes < self.timing.wake_attempts;
+            let wait = if can_wake {
+                self.timing.wake_interval_ms
+            } else {
+                self.timing.reply_timeout_ms
+            };
+            let data = match self.recv(wait.min(limit - elapsed)) {
+                Ok(d) => d,
+                Err(Error::Timeout) if can_wake => {
+                    wakes += 1;
+                    let out = sm.wake();
+                    self.send(&out)?;
+                    continue;
+                }
+                Err(e) => return Err(e),
+            };
             let out = sm.feed(&data);
             if !out.is_empty() {
                 self.send(&out)?;

@@ -736,7 +736,7 @@ mod apply_plan_tests {
     use crate::transport::open;
     use kxprov_api::{ApplyPlanParams, Profile, TokenId};
     use kxtd1232::frame::Access;
-    use kxtd1232::{build_plan, field_patch, Client, FieldKind, Granularity};
+    use kxtd1232::{build_plan, field_patch, FieldKind, Granularity};
     use std::sync::Arc;
     use tokio::sync::{mpsc, RwLock};
 
@@ -808,7 +808,7 @@ mod apply_plan_tests {
         let pwd = state.config.password.clone();
         let rec = {
             let transport = open(&state.config).unwrap();
-            let mut client = Client::with(transport, Access::ReadOnly, state.config.timing);
+            let mut client = crate::transport::client(&state.config, transport, Access::ReadOnly);
             client.login(&pwd).unwrap();
             let base = client.read_table(kind.table()).unwrap();
             let patch = field_patch(kind, 4, "AP").unwrap();
@@ -861,7 +861,7 @@ mod apply_plan_tests {
         let pwd = state.config.password.clone();
         let rec = {
             let transport = open(&state.config).unwrap();
-            let mut client = Client::with(transport, Access::ReadOnly, state.config.timing);
+            let mut client = crate::transport::client(&state.config, transport, Access::ReadOnly);
             client.login(&pwd).unwrap();
             let base = client.read_table(kind.table()).unwrap();
             let patch = field_patch(kind, 5, "C").unwrap();

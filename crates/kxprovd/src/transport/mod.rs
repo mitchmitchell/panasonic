@@ -17,7 +17,8 @@ pub(crate) use serial::{recv_with_poll, send_all_port};
 pub use serial_stub::TokioSerialTransport;
 
 use crate::config::{Config, TransportKind};
-use kxtd1232::Transport;
+use kxtd1232::frame::Access;
+use kxtd1232::{Client, Transport};
 
 pub enum AnyTransport {
     #[cfg(feature = "inprocess-sim")]
@@ -74,4 +75,8 @@ pub fn open(config: &Config) -> Result<AnyTransport, String> {
         )
         .map(AnyTransport::Serial),
     }
+}
+
+pub fn client(config: &Config, transport: AnyTransport, access: Access) -> Client<AnyTransport> {
+    Client::with(transport, access, config.timing).with_signon(config.signon.clone())
 }

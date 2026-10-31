@@ -5,7 +5,7 @@ use kxprov_api::{
     goliath_dir, resolve_profile_data_dir, sim_passed_path, DAEMON_ETC_CONFIG, DAEMON_SOCKET,
     DATA_DIR, TOKENS_JSON,
 };
-use kxtd1232::{Timing, TimingConfigError};
+use kxtd1232::{SignOn, Timing, TimingConfigError};
 use kxtd1232_sim::SimPbx;
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
@@ -54,6 +54,7 @@ pub struct Config {
     pub totp_enabled: bool,
     pub totp_secret_path: Option<PathBuf>,
     pub timing: Timing,
+    pub signon: SignOn,
     pub sim_pbx: Option<Arc<Mutex<SimPbx>>>,
     pub tokens_path: PathBuf,
 }
@@ -93,6 +94,52 @@ struct EtcConfigFile {
     link_baud: Option<u32>,
     #[serde(default)]
     reply_guard_ms: Option<u64>,
+    #[serde(default)]
+    signon_path: Option<PathBuf>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SignOnFile {
+    banner: String,
+    password_prompt: String,
+    mode_start: String,
+    in_use: String,
+}
+
+fn load_signon(path: &Path) -> Result<SignOn, ConfigError> {
+    use std::os::unix::fs::MetadataExt;
+    let meta = std::fs::metadata(path)?;
+    if meta.mode() & 0o077 != 0 {
+        return Err(ConfigError::SignOnPermissions(format!(
+            "{} must not be readable by group or others (mode {:o})",
+            path.display(),
+            meta.mode() & 0o777
+        )));
+    }
+    if meta.uid() != nix::unistd::geteuid().as_raw() {
+        return Err(ConfigError::SignOnPermissions(format!(
+            "{} must be owned by the daemon user",
+            path.display()
+        )));
+    }
+    let file: SignOnFile = serde_json::from_slice(&std::fs::read(path)?)?;
+    let signon = SignOn {
+        banner: file.banner,
+        password_prompt: file.password_prompt,
+        mode_start: file.mode_start,
+        in_use: file.in_use,
+    };
+    for (field, v) in [
+        ("password_prompt", &signon.password_prompt),
+        ("mode_start", &signon.mode_start),
+        ("in_use", &signon.in_use),
+    ] {
+        if v.trim().is_empty() {
+            return Err(ConfigError::SignOnEmpty(field));
+        }
+    }
+    Ok(signon)
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize)]
@@ -197,6 +244,12 @@ pub enum ConfigError {
     UnknownGatewayUser(String),
     #[error("missing config")]
     Missing,
+    #[error("transport \"serial\" requires signon_path (private sign-on file)")]
+    SignOnRequired,
+    #[error("signon file: {0}")]
+    SignOnPermissions(String),
+    #[error("signon file: {0} must not be empty")]
+    SignOnEmpty(&'static str),
 }
 
 impl std::fmt::Debug for Config {
@@ -249,6 +302,11 @@ impl Config {
         } else {
             None
         };
+        let signon = match (transport, &file.signon_path) {
+            (_, Some(p)) => load_signon(p)?,
+            (TransportKind::Serial, None) => return Err(ConfigError::SignOnRequired),
+            (TransportKind::Sim, None) => SignOn::default(),
+        };
         let gateway_uid = resolve_gateway_uid(file.gateway_uid, &file.gateway_user)?;
         let cfg = Self {
             profile: file.profile,
@@ -267,6 +325,7 @@ impl Config {
             totp_enabled: file.totp_enabled,
             totp_secret_path: file.totp_secret_path,
             timing,
+            signon,
             sim_pbx,
             tokens_path: file.tokens_path,
         };
@@ -295,6 +354,7 @@ impl Config {
             totp_enabled: false,
             totp_secret_path: None,
             timing: Timing::default(),
+            signon: SignOn::default(),
             sim_pbx: Some(Arc::new(Mutex::new(SimPbx::default()))),
             tokens_path: data_dir.join("tokens.json"),
         }
@@ -326,6 +386,7 @@ impl Config {
             totp_enabled: false,
             totp_secret_path: None,
             timing: Timing::default(),
+            signon: SignOn::default(),
             sim_pbx: Some(Arc::new(Mutex::new(SimPbx::default()))),
             tokens_path: data_dir.join("tokens.json"),
         }

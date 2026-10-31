@@ -213,6 +213,10 @@ fn apply_plan_result(
     }
 }
 
+const PBX_TRANSPORT_MESSAGE: &str =
+    "Could not open the phone system's serial port. Nothing was changed. Try again in a minute.";
+const PBX_PROTOCOL_MESSAGE: &str = "The phone system did not answer as expected, so nothing was read or changed. Try again in a minute.";
+
 fn plan_error_message(err: BackendError, form: &PlanForm) -> String {
     match err {
         BackendError::RecordNotFound { .. } => format!(
@@ -228,6 +232,8 @@ fn plan_error_message(err: BackendError, form: &PlanForm) -> String {
             other => format!("Invalid input: {other}."),
         },
         BackendError::PlanExpired => "That plan window has expired. Create a new plan.".into(),
+        BackendError::PbxTransport => PBX_TRANSPORT_MESSAGE.into(),
+        BackendError::PbxProtocol => PBX_PROTOCOL_MESSAGE.into(),
         _ => "Could not create the plan. Check your entries and try again.".into(),
     }
 }
@@ -238,6 +244,8 @@ fn read_error_message(err: BackendError) -> String {
             "You don't have permission to read phone data with this session.".into()
         }
         BackendError::BadRequest(field) => format!("Invalid input: {field}."),
+        BackendError::PbxTransport => PBX_TRANSPORT_MESSAGE.into(),
+        BackendError::PbxProtocol => PBX_PROTOCOL_MESSAGE.into(),
         _ => "Could not read that record. Check your entries and try again.".into(),
     }
 }
@@ -670,5 +678,34 @@ mod plan_error_message_tests {
         );
         assert!(msg.contains("Table 36, record 12"), "{msg}");
         assert!(msg.contains("no plan was created"), "{msg}");
+    }
+}
+
+#[cfg(test)]
+mod pbx_error_message_tests {
+    use super::*;
+
+    #[test]
+    fn read_and_plan_show_plain_pbx_errors() {
+        for err in [BackendError::PbxTransport, BackendError::PbxProtocol] {
+            let read = read_error_message(err.clone());
+            assert!(!read.contains("Invalid input"), "{read}");
+            assert!(read.contains("phone system"), "{read}");
+        }
+        let form = PlanForm {
+            table: "36".into(),
+            record: "12".into(),
+            field: "cid_name".into(),
+            new_value: "X".into(),
+            _csrf: String::new(),
+        };
+        assert_eq!(
+            plan_error_message(BackendError::PbxProtocol, &form),
+            PBX_PROTOCOL_MESSAGE
+        );
+        assert_eq!(
+            read_error_message(BackendError::PbxTransport),
+            PBX_TRANSPORT_MESSAGE
+        );
     }
 }

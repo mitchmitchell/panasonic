@@ -81,6 +81,18 @@ impl Login {
         &self.state
     }
 
+    pub fn wake_pending(&self) -> bool {
+        matches!(self.state, LoginState::WaitXon | LoginState::WaitPrompt)
+    }
+
+    pub fn wake(&mut self) -> Vec<u8> {
+        if !self.wake_pending() {
+            return Vec::new();
+        }
+        self.state = LoginState::WaitPrompt;
+        b"\r\n".to_vec()
+    }
+
     /// Feed received bytes; returns bytes to send.
     pub fn feed(&mut self, mut data: &[u8]) -> Vec<u8> {
         let mut out = Vec::new();

@@ -7,7 +7,6 @@ use crate::config::Config;
 use crate::time::now_ms;
 use crate::transport::open;
 use kxtd1232::tables::spec;
-use kxtd1232::Client;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
@@ -128,7 +127,7 @@ pub fn caller_id_wire_digest(wire: &std::collections::HashMap<u8, Vec<u8>>) -> S
 
 pub fn live_caller_id_digest(config: &Config) -> Result<String, TransitionError> {
     let transport = open(config).map_err(TransitionError::Transport)?;
-    let mut client = Client::with(transport, kxtd1232::frame::Access::ReadOnly, config.timing);
+    let mut client = crate::transport::client(config, transport, kxtd1232::frame::Access::ReadOnly);
     client.login(&config.password)?;
     let mut wire = std::collections::HashMap::new();
     for t in CALLER_ID_TABLES {

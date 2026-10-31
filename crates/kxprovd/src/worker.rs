@@ -92,6 +92,15 @@ pub async fn run_worker(
 }
 
 async fn execute_job(ctx: &WorkerCtx, job_id: &str, kind: JobKind) -> JobOutcome {
+    let label = kind.label();
+    let outcome = execute_job_inner(ctx, job_id, kind).await;
+    if let JobOutcome::Err { code, message } = &outcome {
+        tracing::warn!(job_id, job = label, code, message, "job failed");
+    }
+    outcome
+}
+
+async fn execute_job_inner(ctx: &WorkerCtx, job_id: &str, kind: JobKind) -> JobOutcome {
     match kind {
         JobKind::ReadFields { params } => run_read(ctx, params).await,
         JobKind::PlanChange { params, token_id } => run_plan(ctx, params, token_id).await,
@@ -109,7 +118,7 @@ fn open_client(ctx: &WorkerCtx, access: Access) -> Result<Client<AnyTransport>, 
         code: "transport".into(),
         message: e,
     })?;
-    Ok(Client::with(transport, access, ctx.config.timing))
+    Ok(crate::transport::client(&ctx.config, transport, access))
 }
 
 fn with_client<T>(
@@ -248,7 +257,7 @@ async fn run_backup(ctx: &WorkerCtx, operational_mode: OperationalMode) -> JobOu
             };
         }
     };
-    let mut client = Client::with(transport, Access::ReadOnly, ctx.config.timing);
+    let mut client = crate::transport::client(&ctx.config, transport, Access::ReadOnly);
     let wire = match BackupStore::read_full_backup(&mut client, &pwd) {
         Ok(w) => w,
         Err(e) => {
