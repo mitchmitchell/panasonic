@@ -182,3 +182,128 @@ async fn gateway_service_token_can_plan_not_apply_approve_or_set_mode() {
         .iter()
         .any(|s| *s == Scope::Write || *s == Scope::Approve));
 }
+
+#[tokio::test]
+async fn daemon_client_plan_change_old_value_matches_daemon_read() {
+    let tmp = TempDir::new().unwrap();
+    let uid = nix::unistd::getuid().as_raw();
+    let (_daemon, sock) =
+        kxprovd::Daemon::sim_for_tests_as_gateway_profile(tmp.path(), uid, Profile::Sim);
+    for _ in 0..100 {
+        if sock.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let client = DaemonClient::connect(&sock, GATEWAY_SECRET.to_string())
+        .await
+        .expect("connect");
+    let caller = CallerIdentity::Web(WebSessionIdentity {
+        session_key: "sess-old-value".into(),
+    });
+    let kind = kxtd1232::FieldKind::CidName;
+
+    let mut api = kxprov_api::ApiClient::connect(&sock).await.unwrap();
+    let ResponseResult::ReadFields(read) = api
+        .call_auth(
+            RequestBody::ReadFields {
+                params: kxprov_api::ReadFieldsParams {
+                    kind: FieldKindWire::CidName,
+                    first: 0,
+                    count: 1,
+                },
+            },
+            Some(gateway_auth()),
+        )
+        .await
+        .expect("daemon read")
+    else {
+        panic!("expected read_fields");
+    };
+    let expected = read.rows[0].value.clone();
+    assert!(!expected.is_empty(), "sim record 0 must be non-empty");
+
+    let summary = client
+        .plan_change(
+            &caller,
+            kxprov_mock::PlanChangeRequest {
+                table: kind.table(),
+                record: 0,
+                field: kind.name().into(),
+                new_value: "OLDVAL".into(),
+                base_bytes: Vec::new(),
+                new_bytes: Vec::new(),
+            },
+        )
+        .await
+        .expect("plan_change");
+    assert_eq!(summary.old_value, expected);
+    assert_eq!(summary.new_value, "OLDVAL");
+}
+
+#[tokio::test]
+async fn daemon_client_plan_change_fails_closed_when_row_missing() {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    let tmp = TempDir::new().unwrap();
+    let sock = tmp.path().join("fake.sock");
+    let listener = tokio::net::UnixListener::bind(&sock).unwrap();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let (read, mut write) = stream.into_split();
+        let mut reader = BufReader::new(read);
+        let mut bodies = Vec::new();
+        loop {
+            let mut line = String::new();
+            if reader.read_line(&mut line).await.unwrap() == 0 {
+                break;
+            }
+            let env: kxprov_api::RequestEnvelope = serde_json::from_str(line.trim()).unwrap();
+            let is_read = matches!(env.body, RequestBody::ReadFields { .. });
+            bodies.push(env.body);
+            let reply = if is_read {
+                serde_json::json!({"id": env.id, "ok": true, "result": {"rows": []}})
+            } else {
+                serde_json::json!({"id": env.id, "ok": false, "error": {"code": "internal", "message": "unexpected"}})
+            };
+            write
+                .write_all(format!("{reply}\n").as_bytes())
+                .await
+                .unwrap();
+        }
+        bodies
+    });
+
+    let client = DaemonClient::connect(&sock, GATEWAY_SECRET.to_string())
+        .await
+        .expect("connect");
+    let caller = CallerIdentity::Web(WebSessionIdentity {
+        session_key: "sess-missing-row".into(),
+    });
+    let kind = kxtd1232::FieldKind::CidName;
+    let err = client
+        .plan_change(
+            &caller,
+            kxprov_mock::PlanChangeRequest {
+                table: kind.table(),
+                record: 7,
+                field: kind.name().into(),
+                new_value: "X".into(),
+                base_bytes: Vec::new(),
+                new_bytes: Vec::new(),
+            },
+        )
+        .await
+        .expect_err("missing row must fail closed");
+    assert_eq!(
+        err,
+        kxprov_mock::BackendError::RecordNotFound {
+            table: kind.table(),
+            record: 7
+        }
+    );
+    drop(client);
+    let bodies = server.await.unwrap();
+    assert_eq!(bodies.len(), 1, "no plan request after a missing row");
+    assert!(matches!(bodies[0], RequestBody::ReadFields { .. }));
+}

@@ -213,8 +213,13 @@ fn apply_plan_result(
     }
 }
 
-fn plan_error_message(err: BackendError) -> String {
+fn plan_error_message(err: BackendError, form: &PlanForm) -> String {
     match err {
+        BackendError::RecordNotFound { .. } => format!(
+            "Table {}, record {} could not be read from the phone system, so no plan was created. Check the record number and try again.",
+            form.table.trim(),
+            form.record.trim()
+        ),
         BackendError::ForbiddenScope => {
             "You don't have permission to create plans with this session.".into()
         }
@@ -585,7 +590,7 @@ async fn plan_change(
         Ok(summary) => apply_plan_result(&mut tpl, &summary, profile, mode),
         Err(err) => {
             tpl.show_plan_form_error = true;
-            tpl.plan_form_error = plan_error_message(err);
+            tpl.plan_form_error = plan_error_message(err, &form);
         }
     }
 
@@ -640,5 +645,30 @@ mod display_value_tests {
             Profile::Prod,
             OperationalMode::Testing
         ));
+    }
+}
+
+#[cfg(test)]
+mod plan_error_message_tests {
+    use super::*;
+
+    #[test]
+    fn record_not_found_names_the_form_label_and_says_no_plan() {
+        let form = PlanForm {
+            table: "36".into(),
+            record: "12".into(),
+            field: "cid_name".into(),
+            new_value: "X".into(),
+            _csrf: String::new(),
+        };
+        let msg = plan_error_message(
+            BackendError::RecordNotFound {
+                table: 36,
+                record: 11,
+            },
+            &form,
+        );
+        assert!(msg.contains("Table 36, record 12"), "{msg}");
+        assert!(msg.contains("no plan was created"), "{msg}");
     }
 }

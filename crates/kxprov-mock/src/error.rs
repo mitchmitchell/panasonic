@@ -27,6 +27,8 @@ pub enum BackendError {
     PlanExpired,
     #[error("live writes not approved")]
     LiveWritesBlocked,
+    #[error("table {table} record {record} not returned by the phone system")]
+    RecordNotFound { table: u8, record: u16 },
     #[error("job not found")]
     JobNotFound,
     #[error("invalid request: {0}")]

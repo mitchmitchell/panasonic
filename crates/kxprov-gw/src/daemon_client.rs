@@ -253,10 +253,14 @@ impl DaemonBackend for DaemonClient {
             )
             .await?
         {
-            ResponseResult::ReadFields(r) => r.rows.into_iter().next().map(|row| row.value),
+            ResponseResult::ReadFields(r) => r
+                .rows
+                .into_iter()
+                .find(|row| row.index == u32::from(record))
+                .map(|row| row.value)
+                .ok_or(BackendError::RecordNotFound { table, record })?,
             _ => return Err(unexpected_daemon_reply()),
-        }
-        .unwrap_or_default();
+        };
         let result = self
             .call(
                 caller,
