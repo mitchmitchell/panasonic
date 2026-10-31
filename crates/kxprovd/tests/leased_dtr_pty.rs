@@ -6,7 +6,7 @@
 
 use kxprovd::port::device::SmdrLineOptions;
 use kxprovd::port::journal::LeaseJournal;
-use kxprovd::port::{DeviceLine, LeaseError, LeasedOpenError, PortManager, PortMode};
+use kxprovd::port::{DeviceArbiter, LeaseError, LeasedOpenError, PortManager, PortMode};
 use kxprovd::smdr_reader::SmdrSource;
 use kxtd1232::{Transport, TransportError};
 use std::io::Write;
@@ -29,12 +29,8 @@ fn pty() -> Pty {
     }
 }
 
-fn manager(dir: &tempfile::TempDir) -> PortManager<DeviceLine> {
-    PortManager::new(
-        DeviceLine,
-        LeaseJournal::new(dir.path().join("lease.jsonl")),
-        1,
-    )
+fn manager(dir: &tempfile::TempDir) -> DeviceArbiter {
+    PortManager::new((), LeaseJournal::new(dir.path().join("lease.jsonl")), 1)
 }
 
 fn read_until(src: &mut impl SmdrSource, needle: &[u8], within: Duration) -> Vec<u8> {

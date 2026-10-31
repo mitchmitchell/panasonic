@@ -111,6 +111,7 @@ fn apply_is_refused_on_the_serial_transport_before_any_io() {
     let backups = BackupStore::new(d.path().join("backups")).unwrap();
     let err = run_apply(
         &cfg,
+        &kxprovd::transport::device_arbiter(&cfg),
         Profile::Prod,
         &plans,
         &backups,
@@ -139,7 +140,12 @@ fn serial_open_leases_the_port_under_the_callers_job_id() {
     std::fs::create_dir_all(&cfg.data_dir).unwrap();
     let journal = cfg.data_dir.join("port-lease.jsonl");
 
-    let transport = kxprovd::transport::open(&cfg, "job-worker-42").unwrap();
+    let transport = kxprovd::transport::open(
+        &cfg,
+        &kxprovd::transport::device_arbiter(&cfg),
+        "job-worker-42",
+    )
+    .unwrap();
     drop(transport);
 
     let records = LeaseJournal::new(&journal).read_all().unwrap();
@@ -172,9 +178,35 @@ fn serial_open_refuses_a_link_baud_other_than_9600_before_leasing() {
     std::fs::create_dir_all(&cfg.data_dir).unwrap();
     cfg.timing.link_baud = 19_200;
 
-    let Err(err) = kxprovd::transport::open(&cfg, "job-baud") else {
+    let Err(err) =
+        kxprovd::transport::open(&cfg, &kxprovd::transport::device_arbiter(&cfg), "job-baud")
+    else {
         panic!("a 19200 link_baud opened the shared port");
     };
     assert!(err.contains("link_baud 19200"), "{err}");
     assert!(!cfg.data_dir.join("port-lease.jsonl").exists());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn each_injected_arbiter_owns_its_own_lease_state() {
+    let d = tempfile::tempdir().unwrap();
+    let s = d.path().join("signon.toml");
+    write_mode(&s, FIXTURE_SIGNON, 0o600);
+    let mut cfg = Config::load_from_etc(etc(d.path(), "serial", Some(&s))).unwrap();
+    let p = nix::pty::openpty(None, None).unwrap();
+    let _master = std::fs::File::from(p.master);
+    cfg.serial_device = nix::unistd::ttyname(&p.slave).unwrap();
+    std::fs::create_dir_all(&cfg.data_dir).unwrap();
+
+    let first = kxprovd::transport::device_arbiter(&cfg);
+    let second = kxprovd::transport::device_arbiter(&cfg);
+    let lease = first
+        .request_lease("job-first", std::time::Duration::from_millis(50))
+        .unwrap();
+    assert_eq!(first.holder().as_deref(), Some("job-first"));
+    assert_eq!(second.holder(), None);
+    assert_eq!(second.mode(), kxprovd::port::PortMode::Smdr);
+    drop(lease);
+    assert_eq!(first.holder(), None);
 }

@@ -27,6 +27,7 @@ use tokio::sync::RwLock;
 
 pub struct ApiState {
     pub config: Config,
+    pub port: Arc<crate::port::DeviceArbiter>,
     pub profile: Arc<tokio::sync::RwLock<Profile>>,
     pub transport_label: String,
     pub gates: Arc<RwLock<GateState>>,
@@ -530,6 +531,7 @@ async fn set_mode(
     if params.mode == OperationalMode::Production {
         if let Err(e) = crate::transition::verify_enter_production_or_block(
             &state.config,
+            &state.port,
             &state.backups,
             &state.transition,
         ) {
@@ -586,6 +588,7 @@ async fn apply_plan(
 
     verify_live_diff_hash(
         &state.config,
+        &state.port,
         APPLY_PREFLIGHT_HOLDER,
         profile,
         &state.plans,
@@ -752,6 +755,7 @@ mod apply_plan_tests {
         cfg.profile = Profile::Prod;
         cfg.gates.live_writes_approved = true;
         ApiState {
+            port: crate::transport::device_arbiter(&cfg),
             config: cfg.clone(),
             profile: Arc::new(RwLock::new(Profile::Prod)),
             transport_label: "sim".into(),
@@ -810,7 +814,7 @@ mod apply_plan_tests {
         let kind = FieldKind::CidName;
         let pwd = state.config.password.clone();
         let rec = {
-            let transport = open(&state.config, "api-test").unwrap();
+            let transport = open(&state.config, &state.port, "api-test").unwrap();
             let mut client = crate::transport::client(&state.config, transport, Access::ReadOnly);
             client.login(&pwd).unwrap();
             let base = client.read_table(kind.table()).unwrap();
@@ -863,7 +867,7 @@ mod apply_plan_tests {
         let kind = FieldKind::CidName;
         let pwd = state.config.password.clone();
         let rec = {
-            let transport = open(&state.config, "api-test").unwrap();
+            let transport = open(&state.config, &state.port, "api-test").unwrap();
             let mut client = crate::transport::client(&state.config, transport, Access::ReadOnly);
             client.login(&pwd).unwrap();
             let base = client.read_table(kind.table()).unwrap();

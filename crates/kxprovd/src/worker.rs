@@ -20,6 +20,7 @@ use tokio::sync::RwLock;
 
 pub struct WorkerCtx {
     pub config: Config,
+    pub port: Arc<crate::port::DeviceArbiter>,
     pub profile: Arc<RwLock<Profile>>,
     pub plans: PlanStore,
     pub backups: BackupStore,
@@ -132,7 +133,7 @@ fn open_client(
     job_id: &str,
     access: Access,
 ) -> Result<Client<AnyTransport>, JobOutcome> {
-    let transport = open(&ctx.config, job_id).map_err(|e| JobOutcome::Err {
+    let transport = open(&ctx.config, &ctx.port, job_id).map_err(|e| JobOutcome::Err {
         code: "transport".into(),
         message: e,
     })?;
@@ -270,7 +271,7 @@ async fn run_backup(
         temp_path: temp.display().to_string(),
     });
     let pwd = ctx.config.password.clone();
-    let transport = match open(&ctx.config, worker_job_id) {
+    let transport = match open(&ctx.config, &ctx.port, worker_job_id) {
         Ok(t) => t,
         Err(e) => {
             return JobOutcome::Err {
@@ -421,6 +422,7 @@ async fn run_apply_job(
     }
     match run_apply(
         &ctx.config,
+        &ctx.port,
         profile,
         &ctx.plans,
         &ctx.backups,
@@ -524,6 +526,7 @@ mod prod_gate_tests {
         }
         let cfg = Config::sim_test(data.clone(), data.join("kxprovd.sock"), 1000);
         WorkerCtx {
+            port: crate::transport::device_arbiter(&cfg),
             config: cfg,
             profile: Arc::new(RwLock::new(Profile::Prod)),
             plans: PlanStore::new(data.join("plans")).expect("plans"),
