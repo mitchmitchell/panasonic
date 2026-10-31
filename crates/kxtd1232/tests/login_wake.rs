@@ -126,12 +126,27 @@ fn client(t: ScriptedPbx) -> Client<ScriptedPbx> {
 }
 
 #[test]
-fn xon_on_open_needs_no_dtr_cycle_and_no_crlf() {
+fn line_that_is_not_silent_still_gets_a_dtr_cycle_first() {
     let mut t = ScriptedPbx::silent();
     t.pending.push_back(greeting(true));
     let mut c = client(t);
     c.login(PASSWORD).unwrap();
-    assert_eq!(c.transport().dtr_cycles(), 0);
+    assert_eq!(c.transport().events[0], Event::Dtr);
+    assert_eq!(c.transport().events[1], Event::Xon);
+    assert_eq!(c.transport().dtr_cycles(), 1);
+    assert_eq!(c.transport().crlfs(), 0);
+    assert_eq!(c.transport().now, 0);
+}
+
+#[test]
+fn every_sign_on_cycles_dtr() {
+    let mut t = ScriptedPbx::silent();
+    t.greets_on_dtr = true;
+    let mut c = client(t);
+    c.login(PASSWORD).unwrap();
+    c.end_binary().ok();
+    c.login(PASSWORD).unwrap();
+    assert_eq!(c.transport().dtr_cycles(), 2);
     assert_eq!(c.transport().crlfs(), 0);
 }
 
@@ -198,7 +213,7 @@ fn trace_counts_bytes_and_xon_when_the_prompt_never_matches() {
         .any(|e| matches!(e, Event::Sent(d) if d.ends_with(format!("{PASSWORD}\r").as_bytes()))));
     let trace = c.login_trace().unwrap();
     assert_eq!(trace.bytes_received, greeting(true).len());
-    assert!(trace.xon_seen && !trace.dtr_cycled && !trace.wake_sent);
+    assert!(trace.xon_seen && trace.dtr_cycled && !trace.wake_sent);
 }
 
 #[test]

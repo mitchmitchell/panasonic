@@ -32,13 +32,6 @@ pub enum TransportError {
     NothingWritten(String),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum WakeStep {
-    CycleDtr,
-    CrLf,
-    Done,
-}
-
 /// Byte transport plus clock. Implemented by the simulator and (A3) the daemon's port.
 pub trait Transport {
     /// Write all of `data`. Return [`TransportError::NothingWritten`] only when no byte
@@ -355,13 +348,19 @@ impl<T: Transport> Client<T> {
         let mut sm = Login::with_signon(password, self.signon.clone()).map_err(Error::Login)?;
         let start = self.t.now_ms();
         let limit = self.timing.login_timeout_ms;
-        let mut wake = WakeStep::CycleDtr;
+        let cycled = self.t.cycle_dtr().map_err(|e| match e {
+            TransportError::Timeout => Error::Timeout,
+            TransportError::LinkDown(e) => Error::LinkDown(e.detail),
+            TransportError::NothingWritten(s) => Error::LinkDown(s),
+        })?;
+        trace.dtr_cycled = cycled;
+        let mut wake_due = cycled;
         while !sm.state().is_terminal() {
             let elapsed = self.t.now_ms().saturating_sub(start);
             if elapsed >= limit {
                 return Err(Error::Login(LoginFailure::TimedOut { ms: limit }));
             }
-            let can_wake = sm.wake_pending() && wake != WakeStep::Done;
+            let can_wake = sm.wake_pending() && wake_due;
             let wait = if can_wake {
                 self.timing.wake_interval_ms
             } else {
@@ -370,27 +369,10 @@ impl<T: Transport> Client<T> {
             let data = match self.recv(wait.min(limit - elapsed)) {
                 Ok(d) => d,
                 Err(Error::Timeout) if can_wake => {
-                    wake = match wake {
-                        WakeStep::CycleDtr => {
-                            let cycled = self.t.cycle_dtr().map_err(|e| match e {
-                                TransportError::Timeout => Error::Timeout,
-                                TransportError::LinkDown(e) => Error::LinkDown(e.detail),
-                                TransportError::NothingWritten(s) => Error::LinkDown(s),
-                            })?;
-                            trace.dtr_cycled = cycled;
-                            if cycled {
-                                WakeStep::CrLf
-                            } else {
-                                WakeStep::Done
-                            }
-                        }
-                        WakeStep::CrLf | WakeStep::Done => {
-                            let out = sm.wake();
-                            self.send(&out)?;
-                            trace.wake_sent = true;
-                            WakeStep::Done
-                        }
-                    };
+                    let out = sm.wake();
+                    self.send(&out)?;
+                    trace.wake_sent = true;
+                    wake_due = false;
                     continue;
                 }
                 Err(e) => return Err(e),

@@ -16,9 +16,9 @@
 
 After XON, login sends the normal CR LF that is part of the sign-on flow. The wake is different: it is only for a line that stays silent.
 
-1. After the port opens, the client waits `wake_interval_ms` (1.5 s) for XON.
-2. If no XON arrives, it drops DTR for 250 ms, raises it again, and waits another `wake_interval_ms`.
-3. If that fresh DTR edge also brings no XON, it sends **one** unsolicited CR LF, then waits the normal reply timeout. It never sends another: an extra CR LF may count as an empty password attempt.
+1. Every sign-on starts with a DTR drop (250 ms) and rise (spec §2.2 amendment 3), even if the line isn't silent.
+2. The client then waits `wake_interval_ms` (1.5 s) for XON.
+3. If that fresh DTR edge brings no XON, it sends **one** unsolicited CR LF, then waits the normal reply timeout. It never sends another: an extra CR LF may count as an empty password attempt.
 
 A transport that can't drive DTR (`Transport::cycle_dtr` returns `false`) never sends the wake. Confirming this on the real unit is tracked in #62.
 
