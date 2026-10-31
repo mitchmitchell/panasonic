@@ -10,6 +10,8 @@ pub use sim::SimTransportBridge;
 
 #[cfg(target_os = "linux")]
 pub use serial::TokioSerialTransport;
+#[cfg(target_os = "linux")]
+pub(crate) use serial::{recv_with_poll, send_all_port};
 
 #[cfg(not(target_os = "linux"))]
 pub use serial_stub::TokioSerialTransport;

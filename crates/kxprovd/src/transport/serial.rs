@@ -33,7 +33,7 @@ impl TokioSerialTransport {
     }
 }
 
-fn send_all_port<W: Write>(
+pub(crate) fn send_all_port<W: Write>(
     port: &mut W,
     data: &[u8],
     send_bound_ms: u64,
