@@ -5,23 +5,28 @@ use kxprovd::smdr_reader::{
 use kxprovd::smdr_store::{IngestOutcome, SmdrStore};
 use kxtd1232::smdr::{DateOrder, SPEC_HEADER};
 use kxtd1232::{LinkDownError, Transport, TransportError};
+use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 #[derive(Default)]
 struct FakePort {
-    chunks: VecDeque<Vec<u8>>,
-    sent: Vec<Vec<u8>>,
+    chunks: Rc<RefCell<VecDeque<Vec<u8>>>>,
+    sent: Rc<RefCell<Vec<Vec<u8>>>>,
 }
 
 impl Transport for FakePort {
     fn send(&mut self, data: &[u8]) -> Result<(), TransportError> {
-        self.sent.push(data.to_vec());
+        self.sent.borrow_mut().push(data.to_vec());
         Ok(())
     }
 
     fn recv(&mut self, _timeout_ms: u64) -> Result<Vec<u8>, TransportError> {
-        self.chunks.pop_front().ok_or(TransportError::Timeout)
+        self.chunks
+            .borrow_mut()
+            .pop_front()
+            .ok_or(TransportError::Timeout)
     }
 
     fn now_ms(&mut self) -> u64 {
@@ -66,7 +71,7 @@ fn reader_stores_a_chunked_mixed_stream_from_a_fake_source() {
     let mut store = store(&tmp);
     let bytes = std::fs::read(fixture_dir().join("mixed_stream.txt")).expect("fixture");
     let port = FakePort {
-        chunks: chunked(&bytes, 7),
+        chunks: Rc::new(RefCell::new(chunked(&bytes, 7))),
         ..FakePort::default()
     };
     let mut reader = SmdrReader::new(ReceiveOnly::new(port));
@@ -97,15 +102,16 @@ fn reader_never_writes_to_the_port_across_every_fixture() {
         chunks.extend(chunked(&std::fs::read(p).expect("fixture"), 3));
     }
     chunks.push_back(b"AT&F\r\n\x00\x11\x13\x0c\r\n".to_vec());
-    let mut reader = SmdrReader::new(ReceiveOnly::new(FakePort {
-        chunks,
+    let port = FakePort {
+        chunks: Rc::new(RefCell::new(chunks)),
         ..FakePort::default()
-    }));
+    };
+    let (remaining, sent) = (Rc::clone(&port.chunks), Rc::clone(&port.sent));
+    let mut reader = SmdrReader::new(ReceiveOnly::new(port));
     let events = drain(&mut reader, &mut store);
     assert!(!events.is_empty());
-    let port = reader.into_source().into_inner();
-    assert!(port.chunks.is_empty());
-    assert!(port.sent.is_empty(), "reader wrote {:?}", port.sent);
+    assert!(remaining.borrow().is_empty());
+    assert!(sent.borrow().is_empty(), "reader wrote {:?}", sent.borrow());
 }
 
 #[test]
@@ -119,7 +125,7 @@ fn header_that_differs_from_spec_emits_a_typed_mismatch_event() {
     chunks.push_back(format!("{SPEC_HEADER}\r\n{changed}\r\n").into_bytes());
     chunks.push_back(outgoing);
     let mut reader = SmdrReader::new(ReceiveOnly::new(FakePort {
-        chunks,
+        chunks: Rc::new(RefCell::new(chunks)),
         ..FakePort::default()
     }));
     let events = drain(&mut reader, &mut store);
@@ -180,7 +186,7 @@ fn a_failed_ingest_keeps_the_rest_of_the_batch_for_the_next_poll() {
     let mut chunks = VecDeque::new();
     chunks.push_back(bytes.clone());
     let mut reader = SmdrReader::new(ReceiveOnly::new(FakePort {
-        chunks,
+        chunks: Rc::new(RefCell::new(chunks)),
         ..FakePort::default()
     }));
     let mut sink = Flaky {
@@ -225,7 +231,7 @@ fn a_header_mismatch_ahead_of_a_failed_ingest_is_not_lost() {
     let mut chunks = VecDeque::new();
     chunks.push_back(format!("{changed}\r\n{SPEC_HEADER}\r\n").into_bytes());
     let mut reader = SmdrReader::new(ReceiveOnly::new(FakePort {
-        chunks,
+        chunks: Rc::new(RefCell::new(chunks)),
         ..FakePort::default()
     }));
     let mut sink = FailSecond { calls: 0 };

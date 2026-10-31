@@ -8,6 +8,29 @@ pub trait SmdrSource {
     fn recv(&mut self, timeout_ms: u64) -> Result<Vec<u8>, TransportError>;
 }
 
+/// ```compile_fail
+/// use kxprovd::smdr_reader::ReceiveOnly;
+/// use kxtd1232::Transport;
+/// fn leak<T: Transport>(r: ReceiveOnly<T>) -> T {
+///     r.into_inner()
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use kxprovd::smdr_reader::ReceiveOnly;
+/// use kxtd1232::Transport;
+/// fn write<T: Transport>(r: &mut ReceiveOnly<T>) {
+///     let _ = r.send(b"x");
+/// }
+/// ```
+///
+/// ```
+/// use kxprovd::smdr_reader::{ReceiveOnly, SmdrSource};
+/// use kxtd1232::Transport;
+/// fn read<T: Transport>(r: &mut ReceiveOnly<T>) {
+///     let _ = r.recv(1);
+/// }
+/// ```
 pub struct ReceiveOnly<T: Transport>(T);
 
 impl<T: Transport> ReceiveOnly<T> {
@@ -15,7 +38,11 @@ impl<T: Transport> ReceiveOnly<T> {
         Self(transport)
     }
 
-    pub fn into_inner(self) -> T {
+    #[allow(
+        dead_code,
+        reason = "crate-private escape hatch kept for in-crate port handback; not reachable from outside the crate"
+    )]
+    pub(crate) fn into_inner(self) -> T {
         self.0
     }
 }
