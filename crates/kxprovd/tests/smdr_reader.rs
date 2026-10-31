@@ -202,3 +202,47 @@ fn a_failed_ingest_keeps_the_rest_of_the_batch_for_the_next_poll() {
     let want: Vec<String> = text.lines().map(str::to_string).collect();
     assert_eq!(sink.seen, want);
 }
+
+#[test]
+fn a_header_mismatch_ahead_of_a_failed_ingest_is_not_lost() {
+    struct FailSecond {
+        calls: usize,
+    }
+    impl SmdrSink for FailSecond {
+        fn ingest(
+            &mut self,
+            _line: kxtd1232::smdr::SmdrLine,
+            _rx: DateTime<Utc>,
+        ) -> Result<IngestOutcome, kxprovd::smdr_store::SmdrStoreError> {
+            self.calls += 1;
+            if self.calls == 2 {
+                return Err(std::io::Error::other("disk full").into());
+            }
+            Ok(IngestOutcome::Skipped)
+        }
+    }
+    let changed = SPEC_HEADER.replace("Acc code", "Cost    ");
+    let mut chunks = VecDeque::new();
+    chunks.push_back(format!("{changed}\r\n{SPEC_HEADER}\r\n").into_bytes());
+    let mut reader = SmdrReader::new(ReceiveOnly::new(FakePort {
+        chunks,
+        ..FakePort::default()
+    }));
+    let mut sink = FailSecond { calls: 0 };
+    assert!(matches!(
+        reader.poll_once(&mut sink, 1, rx),
+        Err(ReaderError::Store(_))
+    ));
+    let retried = reader.poll_once(&mut sink, 1, rx).expect("retry");
+    assert_eq!(
+        retried,
+        vec![
+            ReaderEvent::Ingested(IngestOutcome::Skipped),
+            ReaderEvent::HeaderMismatch {
+                rx: rx(),
+                raw: changed
+            },
+            ReaderEvent::Ingested(IngestOutcome::Skipped),
+        ]
+    );
+}
