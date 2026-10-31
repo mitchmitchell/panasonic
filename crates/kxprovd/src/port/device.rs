@@ -406,9 +406,28 @@ impl SmdrDeviceHandle {
 
 impl SmdrSource for SmdrDeviceHandle {
     fn recv(&mut self, timeout_ms: u64) -> Result<Vec<u8>, TransportError> {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+        self.recv_from(std::time::Instant::now(), timeout_ms)
+    }
+}
+
+impl SmdrDeviceHandle {
+    #[cfg(feature = "test-util")]
+    pub fn recv_starting_at(
+        &mut self,
+        now: std::time::Instant,
+        timeout_ms: u64,
+    ) -> Result<Vec<u8>, TransportError> {
+        self.recv_from(now, timeout_ms)
+    }
+
+    fn recv_from(
+        &mut self,
+        now: std::time::Instant,
+        timeout_ms: u64,
+    ) -> Result<Vec<u8>, TransportError> {
+        let deadline = crate::deadline::recv_deadline(now, timeout_ms);
         loop {
-            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            let remaining = crate::deadline::remaining(deadline, std::time::Instant::now());
             let Some(slice_ms) = read_slice_ms(remaining) else {
                 return Err(TransportError::Timeout);
             };
