@@ -8,7 +8,7 @@ use std::marker::PhantomData;
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -47,6 +47,7 @@ pub enum DeviceError {
 
 pub(crate) struct SmdrDevice {
     file: Flock<File>,
+    options: SmdrLineOptions,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -138,7 +139,7 @@ pub(crate) fn open_exclusive(
 impl SmdrDevice {
     pub(crate) fn open(path: &Path, options: SmdrLineOptions) -> Result<Self, DeviceError> {
         match open_exclusive(path, Access::ReadOnly, Exclusion::Own, options)? {
-            OpenedPort::Own(file) => Ok(Self { file }),
+            OpenedPort::Own(file) => Ok(Self { file, options }),
             OpenedPort::UnderHeld(_) => Err(DeviceError::Locked),
         }
     }
@@ -203,11 +204,42 @@ fn verify_smdr_termios(t: &Termios, options: SmdrLineOptions) -> Result<(), Devi
 pub struct SmdrDeviceHandle {
     device: Arc<Mutex<SmdrDevice>>,
     leased: Arc<AtomicBool>,
+    lease_epoch: Arc<AtomicU64>,
+    configured_epoch: u64,
 }
 
 impl SmdrDeviceHandle {
-    pub(crate) fn new(device: Arc<Mutex<SmdrDevice>>, leased: Arc<AtomicBool>) -> Self {
-        Self { device, leased }
+    pub(crate) fn new(
+        device: Arc<Mutex<SmdrDevice>>,
+        leased: Arc<AtomicBool>,
+        lease_epoch: Arc<AtomicU64>,
+    ) -> Self {
+        let configured_epoch = lease_epoch.load(Ordering::SeqCst);
+        Self {
+            device,
+            leased,
+            lease_epoch,
+            configured_epoch,
+        }
+    }
+
+    pub fn resume_after_lease(&mut self) -> Result<(), DeviceError> {
+        let epoch = self.lease_epoch.load(Ordering::SeqCst);
+        if epoch == self.configured_epoch {
+            return Ok(());
+        }
+        let device = self.lock();
+        let file: &File = &device.file;
+        let mut t = termios::tcgetattr(file).map_err(DeviceError::Termios)?;
+        apply_smdr_termios(&mut t, device.options)?;
+        termios::tcsetattr(file, SetArg::TCSANOW, &t).map_err(DeviceError::Termios)?;
+        verify_smdr_termios(
+            &termios::tcgetattr(file).map_err(DeviceError::Termios)?,
+            device.options,
+        )?;
+        drop(device);
+        self.configured_epoch = epoch;
+        Ok(())
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, SmdrDevice> {
@@ -226,6 +258,12 @@ impl SmdrSource for SmdrDeviceHandle {
         if self.leased.load(Ordering::SeqCst) {
             return Err(TransportError::Timeout);
         }
+        self.resume_after_lease().map_err(|e| {
+            TransportError::LinkDown(kxtd1232::LinkDownError {
+                detail: format!("SMDR line settings not restored after a lease: {e}"),
+                bytes_sent: None,
+            })
+        })?;
         let device = self.lock();
         let mut reader: &File = &device.file;
         crate::transport::recv_with_poll(&mut reader, timeout_ms)

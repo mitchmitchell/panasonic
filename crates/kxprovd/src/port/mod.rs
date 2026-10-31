@@ -6,7 +6,7 @@ use crate::smdr_reader::SmdrSource;
 use journal::{LeaseEvent, LeaseLog};
 use kxtd1232::{Transport, TransportError};
 use kxtd1232_sim::SimTransport;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
@@ -196,6 +196,7 @@ struct Shared<T> {
     max_waiters: usize,
     release_step_timeout: Duration,
     leased: Arc<AtomicBool>,
+    lease_epoch: Arc<AtomicU64>,
     #[cfg(target_os = "linux")]
     device: Mutex<Option<Arc<Mutex<device::SmdrDevice>>>>,
 }
@@ -261,6 +262,7 @@ impl<T: PortRelease> PortManager<T> {
                 max_waiters,
                 release_step_timeout,
                 leased: Arc::new(AtomicBool::new(false)),
+                lease_epoch: Arc::new(AtomicU64::new(0)),
                 #[cfg(target_os = "linux")]
                 device: Mutex::new(None),
             }),
@@ -313,6 +315,7 @@ impl<T: PortRelease> PortManager<T> {
             });
         };
         state.holder = Some(job_id.to_string());
+        self.shared.lease_epoch.fetch_add(1, Ordering::SeqCst);
         self.shared.leased.store(true, Ordering::SeqCst);
         drop(state);
         if let Err(e) = self
@@ -358,6 +361,7 @@ impl<T: PortRelease> PortManager<T> {
         Ok(device::SmdrDeviceHandle::new(
             opened,
             Arc::clone(&self.shared.leased),
+            Arc::clone(&self.shared.lease_epoch),
         ))
     }
 

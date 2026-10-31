@@ -310,3 +310,53 @@ fn a_programming_device_ends_binary_before_bye_then_drops_dtr() {
     let (seen, _pty) = pbx.join().unwrap();
     assert_eq!(seen, [&END_BINARY[..], b"BYE\r\n"].concat());
 }
+
+#[test]
+fn smdr_resume_after_a_lease_reapplies_raw_termios() {
+    use kxtd1232::Transport;
+
+    let mut pty = pty();
+    let pm = manager();
+    let mut smdr = pm
+        .open_smdr_device(&pty.path, SmdrLineOptions::default())
+        .unwrap();
+    let lease = pm
+        .request_lease("job-1", std::time::Duration::from_millis(50))
+        .unwrap();
+    let mut dev = pm
+        .open_programming_device(&lease, &pty.path, SmdrLineOptions::default())
+        .unwrap();
+    dev.send(b"X").unwrap();
+    let mut t = termios::tcgetattr(&pty.slave).unwrap();
+    t.input_flags |= InputFlags::IXOFF;
+    t.local_flags |= LocalFlags::ECHO;
+    termios::tcsetattr(&pty.slave, SetArg::TCSANOW, &t).unwrap();
+    drop(dev);
+    lease.release().unwrap();
+    let dirty = termios::tcgetattr(&pty.slave).unwrap();
+    assert!(dirty.input_flags.contains(InputFlags::IXOFF));
+    assert!(dirty.local_flags.contains(LocalFlags::ECHO));
+    let mut drain = [0u8; 64];
+    let _ = std::io::Read::read(&mut pty.master, &mut drain);
+    pty.master.write_all(b"10/30/26\r\n").unwrap();
+    assert!(smdr.recv(1000).unwrap().starts_with(b"10/30/26"));
+    let t = termios::tcgetattr(&pty.slave).unwrap();
+    for (name, flag) in CLEARED_INPUT_FLAGS {
+        assert!(
+            !t.input_flags.contains(flag),
+            "{name} still set after resume"
+        );
+    }
+    for (name, flag) in CLEARED_LOCAL_FLAGS {
+        assert!(
+            !t.local_flags.contains(flag),
+            "{name} still set after resume"
+        );
+    }
+    assert!(!t.control_flags.contains(ControlFlags::CRTSCTS));
+    assert!(t
+        .control_flags
+        .contains(ControlFlags::CS8 | ControlFlags::CREAD | ControlFlags::CLOCAL));
+    assert_eq!(termios::cfgetispeed(&t), BaudRate::B9600);
+    assert_eq!(termios::cfgetospeed(&t), BaudRate::B9600);
+}
