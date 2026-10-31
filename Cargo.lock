@@ -1521,6 +1521,7 @@ dependencies = [
  "kxtd1232-sim",
  "nix 0.29.0",
  "rusqlite",
+ "rustix",
  "serde",
  "serde_json",
  "serial_test",

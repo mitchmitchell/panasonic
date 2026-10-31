@@ -31,12 +31,25 @@ pub const BYE: &[u8] = b"BYE\r\n";
 pub const PRG: &[u8] = b"PRG\r\n";
 pub const ECS_OF: &[u8] = b"ECS OF\r\n";
 
+pub const DTR_LOW_PERIOD: Duration = Duration::from_millis(300);
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum DtrError {
+    #[error("DTR drop (B0): {0}")]
+    Hangup(String),
+    #[error("restoring line speed after the DTR drop: {0}")]
+    Restore(String),
+    #[error("line speed after the DTR drop reads back as {got}, expected {expected}")]
+    SpeedMismatch { expected: String, got: String },
+}
+
 pub trait PortRelease: Transport {
-    fn drop_dtr(&mut self) -> Result<(), TransportError>;
+    fn drop_dtr(&mut self) -> Result<(), DtrError>;
 }
 
 impl PortRelease for SimTransport {
-    fn drop_dtr(&mut self) -> Result<(), TransportError> {
+    fn drop_dtr(&mut self) -> Result<(), DtrError> {
         self.reconnect();
         Ok(())
     }
@@ -65,11 +78,19 @@ impl SessionMode {
     }
 }
 
+const RECV_OTHER_ERROR_AS_NO_ACK_REASON: &str = "TransportError is non_exhaustive and NothingWritten is send-side only; any such recv error means no acknowledging reply arrived, so the step counts as unacknowledged and release still ends with the DTR drop, which is the spec's recovery for an unresponsive unit";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WaitFailure {
+    NoAck,
+    LinkDropped,
+}
+
 fn wait_for(
     t: &mut impl Transport,
     timeout: Duration,
     done: impl Fn(&[u8]) -> bool,
-) -> Result<(), Vec<u8>> {
+) -> Result<(), (WaitFailure, Vec<u8>)> {
     let deadline = Instant::now() + timeout;
     let mut got = Vec::new();
     loop {
@@ -78,12 +99,20 @@ fn wait_for(
         }
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
-            return Err(got);
+            return Err((WaitFailure::NoAck, got));
         }
         let ms = u64::try_from(remaining.as_millis()).unwrap_or(u64::MAX);
         match t.recv(ms) {
             Ok(bytes) => got.extend(bytes),
-            Err(_) => return Err(got),
+            Err(TransportError::Timeout) => return Err((WaitFailure::NoAck, got)),
+            Err(TransportError::LinkDown(_)) => return Err((WaitFailure::LinkDropped, got)),
+            Err(_) => {
+                tracing::warn!(
+                    reason = RECV_OTHER_ERROR_AS_NO_ACK_REASON,
+                    "recv returned a non-timeout, non-link-down error during a release ack wait"
+                );
+                return Err((WaitFailure::NoAck, got));
+            }
         }
     }
 }
@@ -115,12 +144,26 @@ fn end_binary(t: &mut impl Transport, step_timeout: Duration) -> Result<(), Port
         got.windows(END_BINARY_ACK.len())
             .any(|w| w == END_BINARY_ACK)
     })
-    .map_err(|got| PortReleaseError::EndBinaryNotAcked { got })
+    .map_err(|(why, got)| match why {
+        WaitFailure::NoAck => PortReleaseError::EndBinaryNotAcked {
+            got: ReplyBytes(got),
+        },
+        WaitFailure::LinkDropped => PortReleaseError::EndBinaryLinkDropped {
+            got: ReplyBytes(got),
+        },
+    })
 }
 
 fn bye(t: &mut impl Transport, step_timeout: Duration) -> Result<(), PortReleaseError> {
     t.send(BYE).map_err(PortReleaseError::ByeSend)?;
-    wait_for(t, step_timeout, has_ok_line).map_err(|got| PortReleaseError::ByeNotAcked { got })
+    wait_for(t, step_timeout, has_ok_line).map_err(|(why, got)| match why {
+        WaitFailure::NoAck => PortReleaseError::ByeNotAcked {
+            got: ReplyBytes(got),
+        },
+        WaitFailure::LinkDropped => PortReleaseError::ByeLinkDropped {
+            got: ReplyBytes(got),
+        },
+    })
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -418,19 +461,46 @@ impl<T: PortRelease> Drop for ProgrammingLease<T> {
     }
 }
 
+#[derive(Clone, PartialEq, Eq)]
+pub struct ReplyBytes(Vec<u8>);
+
+impl ReplyBytes {
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub fn bytes(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for ReplyBytes {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "ReplyBytes({} bytes withheld)", self.0.len())
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum PortReleaseError {
     #[error("end-binary 02 0B 0D not sent: {0:?}")]
     EndBinarySend(TransportError),
-    #[error("end-binary not acknowledged with 03 0B 00 0E; got {got:02X?}")]
-    EndBinaryNotAcked { got: Vec<u8> },
+    #[error("end-binary not acknowledged with 03 0B 00 0E ({} reply bytes withheld)", got.len())]
+    EndBinaryNotAcked { got: ReplyBytes },
+    #[error("link dropped while waiting for the end-binary ack ({} reply bytes withheld)", got.len())]
+    EndBinaryLinkDropped { got: ReplyBytes },
     #[error("BYE not sent: {0:?}")]
     ByeSend(TransportError),
-    #[error("BYE not acknowledged with OK; got {got:02X?}")]
-    ByeNotAcked { got: Vec<u8> },
-    #[error("DTR drop failed: {0:?}")]
-    DropDtr(TransportError),
+    #[error("BYE not acknowledged with OK ({} reply bytes withheld)", got.len())]
+    ByeNotAcked { got: ReplyBytes },
+    #[error("link dropped while waiting for the BYE OK ({} reply bytes withheld)", got.len())]
+    ByeLinkDropped { got: ReplyBytes },
+    #[error("DTR drop failed: {0}")]
+    DropDtr(DtrError),
     #[error("lease journal: {0}")]
     Journal(std::io::Error),
 }

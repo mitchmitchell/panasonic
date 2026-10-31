@@ -37,6 +37,8 @@ pub enum DeviceError {
     Termios(Errno),
     #[error("the SMDR device is already open in this PortManager")]
     AlreadyOpen,
+    #[error("TIOCEXCL: {0}")]
+    Exclusive(Errno),
     #[error("a programming open needs this PortManager's held programming lease")]
     NoLease,
     #[error("termios flag {0} still set after tcsetattr")]
@@ -47,32 +49,98 @@ pub(crate) struct SmdrDevice {
     file: Flock<File>,
 }
 
-impl SmdrDevice {
-    pub(crate) fn open(path: &Path, options: SmdrLineOptions) -> Result<Self, DeviceError> {
-        let file = std::fs::OpenOptions::new()
-            .read(true)
-            .write(false)
-            .custom_flags(nix::libc::O_NOCTTY | nix::libc::O_NONBLOCK)
-            .open(path)
-            .map_err(DeviceError::Open)?;
-        let file = Flock::lock(file, FlockArg::LockExclusiveNonblock).map_err(|(_, e)| {
-            if e == Errno::EWOULDBLOCK {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Access {
+    ReadOnly,
+    ReadWrite,
+}
+
+pub(crate) enum Exclusion<'held> {
+    Own,
+    UnderHeld(&'held File),
+}
+
+pub(crate) enum OpenedPort {
+    Own(Flock<File>),
+    UnderHeld(File),
+}
+
+impl OpenedPort {
+    fn file(&self) -> &File {
+        match self {
+            Self::Own(f) => f,
+            Self::UnderHeld(f) => f,
+        }
+    }
+}
+
+fn open_raw(path: &Path, access: Access) -> Result<File, DeviceError> {
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(access == Access::ReadWrite)
+        .custom_flags(nix::libc::O_NOCTTY | nix::libc::O_NONBLOCK)
+        .open(path)
+        .map_err(|e| {
+            if e.raw_os_error() == Some(nix::libc::EBUSY) {
                 DeviceError::Locked
             } else {
-                DeviceError::Flock(e)
+                DeviceError::Open(e)
             }
-        })?;
-        if !nix::unistd::isatty(file.as_raw_fd()).map_err(DeviceError::Isatty)? {
-            return Err(DeviceError::NotATty);
+        })
+}
+
+fn set_tiocexcl(file: &File) -> Result<(), DeviceError> {
+    rustix::termios::ioctl_tiocexcl(file)
+        .map_err(|e| DeviceError::Exclusive(Errno::from_raw(e.raw_os_error())))
+}
+
+pub(crate) fn open_exclusive(
+    path: &Path,
+    access: Access,
+    exclusion: Exclusion<'_>,
+    options: SmdrLineOptions,
+) -> Result<OpenedPort, DeviceError> {
+    let port = match exclusion {
+        Exclusion::Own => {
+            let file = open_raw(path, access)?;
+            let locked = Flock::lock(file, FlockArg::LockExclusiveNonblock).map_err(|(_, e)| {
+                if e == Errno::EWOULDBLOCK {
+                    DeviceError::Locked
+                } else {
+                    DeviceError::Flock(e)
+                }
+            })?;
+            OpenedPort::Own(locked)
         }
-        let mut t = termios::tcgetattr(&*file).map_err(DeviceError::Termios)?;
-        apply_smdr_termios(&mut t, options)?;
-        termios::tcsetattr(&*file, SetArg::TCSANOW, &t).map_err(DeviceError::Termios)?;
-        verify_smdr_termios(
-            &termios::tcgetattr(&*file).map_err(DeviceError::Termios)?,
-            options,
-        )?;
-        Ok(Self { file })
+        Exclusion::UnderHeld(held) => {
+            rustix::termios::ioctl_tiocnxcl(held)
+                .map_err(|e| DeviceError::Exclusive(Errno::from_raw(e.raw_os_error())))?;
+            let opened = open_raw(path, access);
+            set_tiocexcl(held)?;
+            OpenedPort::UnderHeld(opened?)
+        }
+    };
+    let file = port.file();
+    if !nix::unistd::isatty(file.as_raw_fd()).map_err(DeviceError::Isatty)? {
+        return Err(DeviceError::NotATty);
+    }
+    set_tiocexcl(file)?;
+    let mut t = termios::tcgetattr(file).map_err(DeviceError::Termios)?;
+    apply_smdr_termios(&mut t, options)?;
+    termios::tcsetattr(file, SetArg::TCSANOW, &t).map_err(DeviceError::Termios)?;
+    verify_smdr_termios(
+        &termios::tcgetattr(file).map_err(DeviceError::Termios)?,
+        options,
+    )?;
+    Ok(port)
+}
+
+impl SmdrDevice {
+    pub(crate) fn open(path: &Path, options: SmdrLineOptions) -> Result<Self, DeviceError> {
+        match open_exclusive(path, Access::ReadOnly, Exclusion::Own, options)? {
+            OpenedPort::Own(file) => Ok(Self { file }),
+            OpenedPort::UnderHeld(_) => Err(DeviceError::Locked),
+        }
     }
 
     fn access_mode_is_read_only(&self) -> Result<bool, Errno> {
@@ -169,25 +237,9 @@ pub(crate) enum FlockCover {
     Own,
 }
 
-enum ProgrammingFile {
-    CoveredBySmdr {
-        file: File,
-        _smdr: Arc<Mutex<SmdrDevice>>,
-    },
-    Locked(Flock<File>),
-}
-
-impl ProgrammingFile {
-    fn file(&self) -> &File {
-        match self {
-            Self::CoveredBySmdr { file, .. } => file,
-            Self::Locked(f) => f,
-        }
-    }
-}
-
 pub struct ProgrammingDevice<'lease> {
-    file: ProgrammingFile,
+    file: OpenedPort,
+    _smdr: Option<Arc<Mutex<SmdrDevice>>>,
     session: super::SessionMode,
     ended: bool,
     _lease: PhantomData<&'lease ()>,
@@ -199,40 +251,27 @@ impl ProgrammingDevice<'_> {
         options: SmdrLineOptions,
         cover: FlockCover,
     ) -> Result<Self, DeviceError> {
-        let raw = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .custom_flags(nix::libc::O_NOCTTY | nix::libc::O_NONBLOCK)
-            .open(path)
-            .map_err(DeviceError::Open)?;
-        let file = match cover {
-            FlockCover::HeldBySmdr(smdr) => ProgrammingFile::CoveredBySmdr {
-                file: raw,
-                _smdr: smdr,
-            },
-            FlockCover::Own => ProgrammingFile::Locked(
-                Flock::lock(raw, FlockArg::LockExclusiveNonblock).map_err(|(_, e)| {
-                    if e == Errno::EWOULDBLOCK {
-                        DeviceError::Locked
-                    } else {
-                        DeviceError::Flock(e)
-                    }
-                })?,
+        let (file, smdr) = match cover {
+            FlockCover::HeldBySmdr(smdr) => {
+                let opened = {
+                    let held = smdr.lock().unwrap_or_else(super::recover_from_poison);
+                    open_exclusive(
+                        path,
+                        Access::ReadWrite,
+                        Exclusion::UnderHeld(&held.file),
+                        options,
+                    )?
+                };
+                (opened, Some(smdr))
+            }
+            FlockCover::Own => (
+                open_exclusive(path, Access::ReadWrite, Exclusion::Own, options)?,
+                None,
             ),
         };
-        let fd = file.file();
-        if !nix::unistd::isatty(fd.as_raw_fd()).map_err(DeviceError::Isatty)? {
-            return Err(DeviceError::NotATty);
-        }
-        let mut t = termios::tcgetattr(fd).map_err(DeviceError::Termios)?;
-        apply_smdr_termios(&mut t, options)?;
-        termios::tcsetattr(fd, SetArg::TCSANOW, &t).map_err(DeviceError::Termios)?;
-        verify_smdr_termios(
-            &termios::tcgetattr(fd).map_err(DeviceError::Termios)?,
-            options,
-        )?;
         Ok(Self {
             file,
+            _smdr: smdr,
             session: super::SessionMode::SignedOut,
             ended: false,
             _lease: PhantomData,
@@ -240,7 +279,7 @@ impl ProgrammingDevice<'_> {
     }
 
     pub fn holds_own_flock(&self) -> bool {
-        matches!(self.file, ProgrammingFile::Locked(_))
+        matches!(self.file, OpenedPort::Own(_))
     }
 
     pub fn session_mode(&self) -> super::SessionMode {
@@ -296,12 +335,29 @@ impl Transport for ProgrammingDevice<'_> {
 }
 
 impl super::PortRelease for ProgrammingDevice<'_> {
-    fn drop_dtr(&mut self) -> Result<(), TransportError> {
+    fn drop_dtr(&mut self) -> Result<(), super::DtrError> {
         let fd = self.file.file();
-        let hangup = termios::tcgetattr(fd).and_then(|mut t| {
-            termios::cfsetspeed(&mut t, BaudRate::B0)?;
-            termios::tcsetattr(fd, SetArg::TCSANOW, &t)
-        });
-        hangup.map_err(|e| TransportError::NothingWritten(format!("DTR drop (B0): {e}")))
+        let mut t = termios::tcgetattr(fd).map_err(|e| super::DtrError::Hangup(e.to_string()))?;
+        termios::cfsetspeed(&mut t, BaudRate::B0)
+            .and_then(|()| termios::tcsetattr(fd, SetArg::TCSANOW, &t))
+            .map_err(|e| super::DtrError::Hangup(e.to_string()))?;
+        std::thread::sleep(super::DTR_LOW_PERIOD);
+        restore_line_speed(fd)
     }
+}
+
+fn restore_line_speed(fd: &File) -> Result<(), super::DtrError> {
+    let mut t = termios::tcgetattr(fd).map_err(|e| super::DtrError::Restore(e.to_string()))?;
+    termios::cfsetspeed(&mut t, SMDR_BAUD)
+        .and_then(|()| termios::tcsetattr(fd, SetArg::TCSANOW, &t))
+        .map_err(|e| super::DtrError::Restore(e.to_string()))?;
+    let back = termios::tcgetattr(fd).map_err(|e| super::DtrError::Restore(e.to_string()))?;
+    let (ispeed, ospeed) = (termios::cfgetispeed(&back), termios::cfgetospeed(&back));
+    if ispeed != SMDR_BAUD || ospeed != SMDR_BAUD {
+        return Err(super::DtrError::SpeedMismatch {
+            expected: format!("{SMDR_BAUD:?}"),
+            got: format!("in {ispeed:?} / out {ospeed:?}"),
+        });
+    }
+    Ok(())
 }

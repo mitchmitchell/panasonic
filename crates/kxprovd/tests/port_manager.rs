@@ -389,3 +389,112 @@ fn a_lease_request_is_not_held_up_by_a_long_smdr_read() {
     lease.release().unwrap();
     let _ = reader.join().unwrap();
 }
+
+#[test]
+fn release_after_the_password_but_before_ecs_of_sends_no_bye_and_drops_dtr() {
+    let dir = tempfile::tempdir().unwrap();
+    let pm = manager(&dir, 1);
+    let mut lease = pm
+        .request_lease("job-1", Duration::from_millis(50))
+        .unwrap();
+    lease.send(b"\r\n").unwrap();
+    let signon = kxtd1232::SignOn::default();
+    read_until(&mut lease, signon.password_prompt.as_bytes());
+    lease.send(b"1234\r").unwrap();
+    read_until(&mut lease, signon.mode_start.as_bytes());
+    assert_eq!(lease.session_mode(), SessionMode::SignedOut);
+    lease.release().unwrap();
+    assert_eq!(pm.mode(), PortMode::Smdr);
+    let sent = pm.inspect_transport(|t| t.sent.clone()).unwrap();
+    assert!(sent.ends_with(b"1234\r"), "{sent:?}");
+    assert_eq!(position(&sent, BYE), None);
+    assert_eq!(position(&sent, &END_BINARY), None);
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PortEvent {
+    RecvStart,
+    RecvEnd,
+    Send,
+    DropDtr,
+}
+
+struct TimedPort {
+    log: Arc<Mutex<Vec<PortEvent>>>,
+}
+
+impl TimedPort {
+    fn push(&self, e: PortEvent) {
+        self.log.lock().unwrap().push(e);
+    }
+}
+
+impl Transport for TimedPort {
+    fn send(&mut self, _data: &[u8]) -> Result<(), kxtd1232::TransportError> {
+        self.push(PortEvent::Send);
+        Ok(())
+    }
+
+    fn recv(&mut self, timeout_ms: u64) -> Result<Vec<u8>, kxtd1232::TransportError> {
+        self.push(PortEvent::RecvStart);
+        std::thread::sleep(Duration::from_millis(timeout_ms));
+        self.push(PortEvent::RecvEnd);
+        Err(kxtd1232::TransportError::Timeout)
+    }
+
+    fn now_ms(&mut self) -> u64 {
+        0
+    }
+}
+
+impl kxprovd::port::PortRelease for TimedPort {
+    fn drop_dtr(&mut self) -> Result<(), kxprovd::port::DtrError> {
+        self.push(PortEvent::DropDtr);
+        Ok(())
+    }
+}
+
+#[test]
+fn an_smdr_read_slice_ends_before_any_programming_send() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let pm = PortManager::new(
+        TimedPort {
+            log: Arc::clone(&log),
+        },
+        LeaseJournal::new(dir.path().join("lease.jsonl")),
+        1,
+    );
+    let mut smdr = pm.smdr_handle();
+    let reader = std::thread::spawn(move || {
+        for _ in 0..6 {
+            let _ = smdr.recv(200);
+        }
+    });
+    while !log.lock().unwrap().contains(&PortEvent::RecvStart) {
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    let mut lease = pm.request_lease("job-1", Duration::from_secs(2)).unwrap();
+    lease.send(b"X").unwrap();
+    lease.release().unwrap();
+    reader.join().unwrap();
+    let log = log.lock().unwrap().clone();
+    let send_at = log.iter().position(|e| *e == PortEvent::Send).unwrap();
+    let mut open_slice = false;
+    for e in &log[..send_at] {
+        match e {
+            PortEvent::RecvStart => open_slice = true,
+            PortEvent::RecvEnd => open_slice = false,
+            _ => {}
+        }
+    }
+    assert!(
+        !open_slice,
+        "send landed inside an SMDR read slice: {log:?}"
+    );
+    let dtr_at = log.iter().position(|e| *e == PortEvent::DropDtr).unwrap();
+    assert!(
+        log[dtr_at..].contains(&PortEvent::RecvStart),
+        "SMDR reads did not resume after release: {log:?}"
+    );
+}

@@ -36,7 +36,7 @@ const CHILD_ENV: &str = "KXPROVD_SMDR_LOCK_CHILD_PATH";
 
 struct Pty {
     master: std::fs::File,
-    _slave: std::os::fd::OwnedFd,
+    slave: std::os::fd::OwnedFd,
     path: PathBuf,
 }
 
@@ -49,7 +49,7 @@ fn pty() -> Pty {
     termios::tcsetattr(&p.slave, SetArg::TCSANOW, &t).unwrap();
     Pty {
         master: std::fs::File::from(p.master),
-        _slave: p.slave,
+        slave: p.slave,
         path,
     }
 }
@@ -58,8 +58,7 @@ fn pty() -> Pty {
 fn open_clears_raw_mode_flags_and_reads_them_back() {
     let pty = pty();
     let _dev = open_smdr_device(&pty.path, SmdrLineOptions::default()).unwrap();
-    let probe = std::fs::File::open(&pty.path).unwrap();
-    let t = termios::tcgetattr(&probe).unwrap();
+    let t = termios::tcgetattr(&pty.slave).unwrap();
     for (name, flag) in CLEARED_INPUT_FLAGS {
         assert!(!t.input_flags.contains(flag), "{name} still set");
     }
@@ -225,13 +224,52 @@ fn a_programming_open_under_the_smdr_flock_pauses_smdr_reads_and_writes_to_the_p
     let mut buf = [0u8; 16];
     let n = pty.master.read(&mut buf).unwrap();
     assert_eq!(&buf[..n], b"PRG\r\n");
+    let started = std::time::Instant::now();
     assert!(matches!(
         dev.end(std::time::Duration::from_millis(100)),
         Err(kxprovd::port::PortReleaseError::EndBinaryNotAcked { .. })
     ));
+    assert!(started.elapsed() >= kxprovd::port::DTR_LOW_PERIOD);
+    let t = termios::tcgetattr(&pty.slave).unwrap();
+    assert_eq!(termios::cfgetispeed(&t), BaudRate::B9600);
+    assert_eq!(termios::cfgetospeed(&t), BaudRate::B9600);
     lease.release().unwrap();
     pty.master.write_all(b"10/30/26\r\n").unwrap();
     assert!(smdr.recv(1000).unwrap().starts_with(b"10/30/26"));
+    assert!(matches!(
+        std::fs::File::open(&pty.path),
+        Err(e) if e.raw_os_error() == Some(nix::libc::EBUSY)
+    ));
+}
+
+#[test]
+fn an_smdr_open_sets_tiocexcl_so_a_plain_open_is_refused() {
+    let pty = pty();
+    let _smdr = open_smdr_device(&pty.path, SmdrLineOptions::default()).unwrap();
+    assert!(matches!(
+        std::fs::File::open(&pty.path),
+        Err(e) if e.raw_os_error() == Some(nix::libc::EBUSY)
+    ));
+}
+
+#[test]
+fn a_tiocexcl_holder_without_flock_excludes_smdr_and_programming_opens() {
+    let pty = pty();
+    let other = std::fs::File::open(&pty.path).unwrap();
+    rustix::termios::ioctl_tiocexcl(&other).unwrap();
+    assert!(matches!(
+        open_smdr_device(&pty.path, SmdrLineOptions::default()),
+        Err(DeviceError::Locked)
+    ));
+    let pm = manager();
+    let lease = pm
+        .request_lease("job-1", std::time::Duration::from_millis(50))
+        .unwrap();
+    assert!(matches!(
+        pm.open_programming_device(&lease, &pty.path, SmdrLineOptions::default()),
+        Err(DeviceError::Locked)
+    ));
+    rustix::termios::ioctl_tiocnxcl(&other).unwrap();
 }
 
 #[test]
