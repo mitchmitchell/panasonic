@@ -26,10 +26,20 @@ fn write_tokens(path: &std::path::Path) {
 const MAX_LIVE_PROBE_THREADS: usize = TokenStore::MAX_LIVE_DISK_PROBE_THREADS;
 const MAX_OS_THREAD_DELTA: usize = 2;
 
-fn proc_self_task_count() -> usize {
+/// OS threads in this process named `token-reload-probe`.
+///
+/// The kernel truncates `comm` to 15 bytes, so the prefix is compared. Only
+/// probe threads are counted so threads of tests running in parallel in the
+/// same binary do not affect the result.
+fn probe_os_thread_count() -> usize {
+    const PROBE_COMM: &str = "token-reload-pr";
     std::fs::read_dir("/proc/self/task")
-        .map(|d| d.count())
-        .unwrap_or(0)
+        .expect("/proc/self/task")
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            std::fs::read_to_string(e.path().join("comm")).is_ok_and(|c| c.trim_end() == PROBE_COMM)
+        })
+        .count()
 }
 
 fn wait_live_at_most_cap(store: &TokenStore, deadline: Instant) {
@@ -45,15 +55,13 @@ fn wait_live_at_most_cap(store: &TokenStore, deadline: Instant) {
 }
 
 fn wait_live_probe_threads_drained(store: &TokenStore, deadline: Instant) {
-    while store.live_disk_probe_threads_for_test() > 0 {
-        assert!(
-            Instant::now() < deadline,
-            "probe threads did not drain (live={}, abandoned={})",
-            store.live_disk_probe_threads_for_test(),
-            store.leaked_disk_probe_threads_for_test()
-        );
-        std::thread::sleep(Duration::from_millis(10));
-    }
+    assert!(
+        store
+            .wait_probe_threads_exited_for_test(deadline.saturating_duration_since(Instant::now())),
+        "probe threads did not drain (live={}, abandoned={})",
+        store.live_disk_probe_threads_for_test(),
+        store.leaked_disk_probe_threads_for_test()
+    );
 }
 
 /// Pair FIFO ends without blocking `open()` deadlocks (reader/writer peer wait).
@@ -141,8 +149,8 @@ fn fifo_tokens_single_probe_thread_fast_fail_and_recovery() {
     let stop = Arc::new(AtomicBool::new(false));
     let max_live = Arc::new(AtomicUsize::new(0));
     let saw_outstanding = Arc::new(AtomicBool::new(false));
-    let slow_calls = Arc::new(AtomicUsize::new(0));
     let fast_denies = Arc::new(AtomicUsize::new(0));
+    let slow_calls = Arc::new(AtomicUsize::new(0));
     let started = Instant::now();
     let wall = Duration::from_secs(15);
     let measure_fast_after = started + Duration::from_secs(3);
@@ -153,8 +161,8 @@ fn fifo_tokens_single_probe_thread_fast_fail_and_recovery() {
         let stop = Arc::clone(&stop);
         let max_live = Arc::clone(&max_live);
         let saw_outstanding = Arc::clone(&saw_outstanding);
-        let slow_calls = Arc::clone(&slow_calls);
         let fast_denies = Arc::clone(&fast_denies);
+        let slow_calls = Arc::clone(&slow_calls);
         handles.push(std::thread::spawn(move || {
             while !stop.load(Ordering::Relaxed) && started.elapsed() < wall {
                 let live = store.live_disk_probe_threads_for_test();
@@ -163,17 +171,17 @@ fn fifo_tokens_single_probe_thread_fast_fail_and_recovery() {
                     saw_outstanding.store(true, Ordering::Relaxed);
                 }
                 let live_at_start = store.live_disk_probe_threads_for_test();
-                let t0 = Instant::now();
+                let waits_before = TokenStore::reload_waits_on_this_thread_for_test();
                 let res = store.verify_bearer(kxprovd::test_util::WRITER_SECRET, 0, Scope::Plan);
-                let elapsed = t0.elapsed();
+                let waited = TokenStore::reload_waits_on_this_thread_for_test() > waits_before;
                 match res {
                     Err(TokenError::StoreUnavailable)
                         if Instant::now() >= measure_fast_after && live_at_start > 0 =>
                     {
-                        if elapsed <= Duration::from_millis(100) {
-                            fast_denies.fetch_add(1, Ordering::Relaxed);
-                        } else {
+                        if waited {
                             slow_calls.fetch_add(1, Ordering::Relaxed);
+                        } else {
+                            fast_denies.fetch_add(1, Ordering::Relaxed);
                         }
                     }
                     Err(TokenError::StoreUnavailable) => {}
@@ -208,7 +216,7 @@ fn fifo_tokens_single_probe_thread_fast_fail_and_recovery() {
     );
     assert!(
         slow_calls.load(Ordering::Relaxed) <= 1,
-        "calls after the first probe must not wait on the reload window (slow={})",
+        "calls after the first probe must not wait on the reload window (waits={})",
         slow_calls.load(Ordering::Relaxed)
     );
 
@@ -251,14 +259,10 @@ fn six_fifo_hangs_cap_live_threads_and_fast_fail_closed() {
         let starter_handle = std::thread::spawn(move || {
             let _ = starter.verify_bearer(kxprovd::test_util::WRITER_SECRET, 0, Scope::Plan);
         });
-        let probe_deadline = Instant::now() + Duration::from_secs(5);
-        while store.live_disk_probe_threads_for_test() == 0 {
-            assert!(
-                Instant::now() < probe_deadline,
-                "iteration {i} probe never started"
-            );
-            std::thread::sleep(Duration::from_millis(5));
-        }
+        assert!(
+            store.wait_probe_thread_started_for_test(FAST_FAIL_HANG_LIMIT),
+            "iteration {i} probe never started"
+        );
         max_live = max_live.max(store.live_disk_probe_threads_for_test());
         let live_before = store.live_disk_probe_threads_for_test();
         let t0 = Instant::now();
@@ -288,12 +292,8 @@ fn six_fifo_hangs_cap_live_threads_and_fast_fail_closed() {
         std::fs::remove_file(&path).ok();
         write_tokens(&path);
         let _ = starter_handle.join();
-        let drain = Instant::now() + Duration::from_secs(8);
-        while store.live_disk_probe_threads_for_test() > 0 && Instant::now() < drain {
-            std::thread::sleep(Duration::from_millis(25));
-        }
         assert!(
-            Instant::now() < drain,
+            store.wait_probe_threads_exited_for_test(Duration::from_secs(10)),
             "iteration {i} probe threads did not drain"
         );
     }
@@ -314,14 +314,20 @@ fn five_fifo_replace_cycles_os_thread_count_bounded() {
         .verify_bearer(kxprovd::test_util::WRITER_SECRET, 0, Scope::Plan)
         .expect("warm");
 
-    let baseline = proc_self_task_count();
+    TokenStore::join_probe_threads_for_test();
+    assert_eq!(
+        probe_os_thread_count(),
+        0,
+        "probe threads from earlier tests still running"
+    );
+    let baseline = probe_os_thread_count();
     let mut peak_delta = 0usize;
     for i in 0..5 {
         std::fs::remove_file(&path).ok();
         use nix::sys::stat::Mode;
         nix::unistd::mkfifo(&path, Mode::S_IRUSR | Mode::S_IWUSR).expect("mkfifo");
         let _ = store.verify_bearer(kxprovd::test_util::WRITER_SECRET, 0, Scope::Plan);
-        let delta = proc_self_task_count().saturating_sub(baseline);
+        let delta = probe_os_thread_count().saturating_sub(baseline);
         peak_delta = peak_delta.max(delta);
         assert!(
             store.live_disk_probe_threads_for_test() <= MAX_LIVE_PROBE_THREADS,
@@ -331,10 +337,11 @@ fn five_fifo_replace_cycles_os_thread_count_bounded() {
         std::fs::remove_file(&path).ok();
         write_tokens(&path);
         auth_recovers_after_replace(&store, &path);
-        let drain = Instant::now() + Duration::from_secs(3);
-        while store.live_disk_probe_threads_for_test() > 0 && Instant::now() < drain {
-            std::thread::sleep(Duration::from_millis(25));
-        }
+        assert!(
+            store.wait_probe_threads_exited_for_test(Duration::from_secs(10)),
+            "probe threads did not drain"
+        );
+        TokenStore::join_probe_threads_for_test();
     }
     assert!(
         peak_delta <= MAX_OS_THREAD_DELTA,
