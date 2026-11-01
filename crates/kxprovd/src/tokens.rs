@@ -279,12 +279,12 @@ impl Drop for ProbeThreadSlotGuard {
     }
 }
 
-/// Locks `mutex` from a `Drop` impl, recovering the guard if it is poisoned.
+/// Locks `mutex`, recovering the guard if it is poisoned.
 ///
 /// Every value behind these locks is a counter, map or flag that each writer
 /// leaves consistent before it can panic, so the data stays valid after
-/// poisoning. Panicking here instead would abort the process when the drop
-/// runs during unwinding.
+/// poisoning. Panicking here instead would abort the process when a caller
+/// runs during unwinding, such as a `Drop` impl.
 fn lock_ignoring_poison<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex
         .lock()
@@ -1366,9 +1366,10 @@ impl TokenStore {
         }
         match probe {
             DiskProbe::Ok(raw) => {
+                let delta = Self::apply_reloaded_bytes(state, raw)?;
                 Self::clear_reload_outage(state, flight);
                 state.merge_generation = state.merge_generation.wrapping_add(1);
-                Self::apply_reloaded_bytes(state, raw)
+                Ok(delta)
             }
             DiskProbe::UnchangedBad => {
                 if state.store_unavailable {
@@ -2030,6 +2031,79 @@ mod tests {
         let back = |t: Instant| t.checked_sub(by).expect("backdate within Instant range");
         state.reload_failure_since = state.reload_failure_since.map(back);
         state.stale_since = state.stale_since.map(back);
+    }
+
+    #[test]
+    fn ok_probe_failing_validation_keeps_the_latch_for_an_older_still_bad() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("tokens.json");
+        write_tokens_revoking_writer(&path, false);
+        let store = TokenStore::load_insecure(path.clone()).expect("load");
+        let mut file = crate::test_util::default_tokens_file();
+        let mut duplicate = None;
+        for t in &mut file.tokens {
+            if t.id.as_str() == "writer" {
+                t.revoked = true;
+                duplicate = Some(t.clone());
+            }
+        }
+        file.tokens
+            .push(duplicate.expect("default file has a writer token"));
+        TokenStore::write_test_file(&path, &file).expect("write duplicate-id tokens");
+        let invalid_raw = std::fs::read(&path).expect("read duplicate-id tokens");
+        let start = Instant::now()
+            .checked_sub(Duration::from_secs(30))
+            .expect("backdate within Instant range");
+        let mut state = store.inner.lock().unwrap();
+        state.reload_failure_since = Some(start);
+        state.stale_since = Some(start);
+        state.reload_transient_done = true;
+        state.reload_failed_disk_fingerprint = Some(DiskFingerprint::Unreadable);
+        TokenStore::latch_store_unavailable(&mut state);
+        let plan_generation = state.merge_generation;
+        assert!(
+            TokenStore::merge_disk_probe(
+                &mut state,
+                &store.transient_flight,
+                plan_generation,
+                DiskProbe::Ok(invalid_raw),
+            )
+            .is_err(),
+            "a duplicate-id file must fail validation"
+        );
+        assert!(state.store_unavailable, "a failed apply cleared the latch");
+        assert_eq!(
+            state.stale_since,
+            Some(start),
+            "a failed apply moved stale_since"
+        );
+        assert_eq!(
+            state.merge_generation, plan_generation,
+            "a failed apply bumped merge_generation"
+        );
+        let concurrent = TokenStore::merge_disk_probe(
+            &mut state,
+            &store.transient_flight,
+            plan_generation,
+            DiskProbe::StillBad {
+                fp: DiskFingerprint::Unreadable,
+                outage_start: start,
+                last_bad_read: Instant::now(),
+            },
+        );
+        assert!(
+            matches!(concurrent, Err(TokenError::StoreUnavailable)),
+            "the concurrent StillBad was dropped instead of failing closed"
+        );
+        assert!(state.store_unavailable);
+        assert_eq!(state.stale_since, Some(start));
+        drop(state);
+        let answer = store.verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan);
+        assert!(
+            answer.is_err(),
+            "a token revoked on disk was served from cache after a latched outage: {answer:?}"
+        );
+        assert!(store.inner.lock().unwrap().store_unavailable);
     }
 
     #[test]
@@ -2731,24 +2805,25 @@ mod tests {
         std::fs::write(&path, b"{bad").unwrap();
         let leaders_before = store.transient_flight.leaders.load(Ordering::Acquire);
         let barrier = Arc::new(Barrier::new(4));
-        let wall = Instant::now();
         let handles: Vec<_> = (0..4)
             .map(|_| {
                 let store = Arc::clone(&store);
                 let barrier = Arc::clone(&barrier);
                 std::thread::spawn(move || {
                     barrier.wait();
+                    let waits_before = TokenStore::reload_waits_on_this_thread_for_test();
                     let _ = store.verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan);
+                    TokenStore::reload_waits_on_this_thread_for_test() - waits_before
                 })
             })
             .collect();
         for h in handles {
-            h.join().expect("join");
+            let waits = h.join().expect("join");
+            assert!(
+                waits <= 1,
+                "each concurrent first-outage verify must block at most once, on its bounded wait; blocked {waits} times"
+            );
         }
-        assert!(
-            wall.elapsed() <= Duration::from_secs(10),
-            "four concurrent first-outage verifies hung: the 10 s limit only catches a deadlock"
-        );
         assert_eq!(
             store.transient_flight.leaders.load(Ordering::Acquire) - leaders_before,
             1,
