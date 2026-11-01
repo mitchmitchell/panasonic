@@ -1765,6 +1765,57 @@ mod tests {
 
     const TEST_BODY_BOUND: Duration = Duration::from_secs(60);
 
+    /// Describes every thread of this process from `/proc/self/task`: name,
+    /// scheduler state, the kernel function it sleeps in, its current syscall
+    /// and, where the kernel allows it, its kernel stack. Lets a test that hit
+    /// [`TEST_BODY_BOUND`] show where each thread was stuck.
+    fn thread_dump() -> String {
+        let read = |path: std::path::PathBuf| {
+            std::fs::read_to_string(&path)
+                .map(|text| text.trim().to_string())
+                .unwrap_or_else(|e| format!("<{}: {e}>", path.display()))
+        };
+        let tasks = match std::fs::read_dir("/proc/self/task") {
+            Ok(tasks) => tasks,
+            Err(e) => return format!("thread dump unavailable: /proc/self/task: {e}"),
+        };
+        let mut dirs: Vec<std::path::PathBuf> = tasks
+            .filter_map(|entry| entry.ok().map(|e| e.path()))
+            .collect();
+        dirs.sort();
+        let mut out = format!("thread dump ({} threads):\n", dirs.len());
+        for dir in dirs {
+            let stat = read(dir.join("stat"));
+            let state = stat
+                .rsplit_once(") ")
+                .and_then(|(_, rest)| rest.split_whitespace().next())
+                .unwrap_or("?")
+                .to_string();
+            out.push_str(&format!(
+                "tid {} name={} state={} wchan={} syscall={}\n  stack: {}\n",
+                dir.file_name()
+                    .map_or_else(String::new, |n| n.to_string_lossy().into_owned()),
+                read(dir.join("comm")),
+                state,
+                read(dir.join("wchan")),
+                read(dir.join("syscall")),
+                read(dir.join("stack")).replace('\n', "\n         "),
+            ));
+        }
+        out
+    }
+
+    #[test]
+    fn thread_dump_lists_the_calling_thread() {
+        let dump = thread_dump();
+        assert!(dump.starts_with("thread dump ("), "{dump}");
+        let name = std::thread::current()
+            .name()
+            .map(|n| n.chars().take(15).collect::<String>())
+            .expect("test threads are named");
+        assert!(dump.contains(&format!("name={name}")), "{dump}");
+    }
+
     /// Runs a test body on its own thread and fails the test if it has not
     /// finished within [`TEST_BODY_BOUND`], so a blocking wait that never
     /// returns becomes a failure instead of hanging the suite. The bound is a
@@ -1782,7 +1833,8 @@ mod tests {
             done_rx.recv_timeout(TEST_BODY_BOUND)
         {
             panic!(
-                "test body did not finish within {TEST_BODY_BOUND:?}: a blocking wait never returned"
+                "test body did not finish within {TEST_BODY_BOUND:?}: a blocking wait never returned\n{}",
+                thread_dump()
             );
         }
         if let Err(payload) = handle.join() {
