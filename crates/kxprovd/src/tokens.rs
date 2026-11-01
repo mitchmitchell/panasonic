@@ -102,6 +102,9 @@ enum TransientFlightState {
 struct TransientReloadFlight {
     inner: Mutex<TransientFlightState>,
     cv: Condvar,
+    /// How many callers have led a transient retry window.
+    #[cfg(test)]
+    leaders: AtomicUsize,
 }
 
 #[cfg(feature = "test-util")]
@@ -188,6 +191,8 @@ impl TransientReloadFlight {
         Self {
             inner: Mutex::new(TransientFlightState::Idle),
             cv: Condvar::new(),
+            #[cfg(test)]
+            leaders: AtomicUsize::new(0),
         }
     }
 
@@ -1051,6 +1056,8 @@ impl TokenStore {
                 }
                 TransientFlightState::Idle => {
                     *guard = TransientFlightState::Running;
+                    #[cfg(test)]
+                    flight.leaders.fetch_add(1, Ordering::AcqRel);
                     drop(guard);
                     let _leader =
                         TransientProbeLeaderGuard::new(flight, Self::timed_out_disk_probe());
@@ -2029,6 +2036,7 @@ mod tests {
             .verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan)
             .expect("warm");
         std::fs::write(&path, b"{bad").unwrap();
+        let leaders_before = store.transient_flight.leaders.load(Ordering::Acquire);
         let barrier = Arc::new(Barrier::new(4));
         let wall = Instant::now();
         let handles: Vec<_> = (0..4)
@@ -2045,7 +2053,12 @@ mod tests {
             h.join().expect("join");
         }
         assert!(
-            wall.elapsed() <= Duration::from_secs(2) + Duration::from_millis(300),
+            wall.elapsed() <= Duration::from_secs(10),
+            "four concurrent first-outage verifies hung: the 10 s limit only catches a deadlock"
+        );
+        assert_eq!(
+            store.transient_flight.leaders.load(Ordering::Acquire) - leaders_before,
+            1,
             "four concurrent first-outage verifies must share one transient retry window"
         );
     }
