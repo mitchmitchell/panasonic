@@ -2064,13 +2064,18 @@ mod tests {
             let _hang = ReloadProbeHangGuard::enable(&store);
             for i in 0..6 {
                 let wall = Instant::now();
-                assert!(
-                    matches!(
-                        store.verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan),
-                        Err(TokenError::StoreUnavailable)
-                    ),
-                    "call {i} must fail closed"
-                );
+                let result = store.verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan);
+                if i == 0 {
+                    assert!(
+                        result.is_ok(),
+                        "the first hung probe starts the grace and serves cached entries"
+                    );
+                } else {
+                    assert!(
+                        matches!(result, Err(TokenError::StoreUnavailable)),
+                        "call {i} must fail closed once the grace has run out"
+                    );
+                }
                 assert!(
                     wall.elapsed() <= hang_limit,
                     "call {i} hung: the 10 s limit only catches a deadlock, not slowness"
@@ -2126,13 +2131,18 @@ mod tests {
             {
                 let _hang = ReloadProbeHangGuard::enable(&store);
                 let wall = Instant::now();
-                assert!(
-                    matches!(
-                        store.verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan),
-                        Err(TokenError::StoreUnavailable)
-                    ),
-                    "round {round} must fail closed"
-                );
+                let result = store.verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan);
+                if round == 0 {
+                    assert!(
+                        result.is_ok(),
+                        "the first hung probe starts the grace and serves cached entries"
+                    );
+                } else {
+                    assert!(
+                        matches!(result, Err(TokenError::StoreUnavailable)),
+                        "round {round} must fail closed once the grace has run out"
+                    );
+                }
                 assert!(
                     wall.elapsed() <= hang_limit,
                     "round {round} hung: the 10 s limit only catches a deadlock, not slowness"
@@ -2164,10 +2174,9 @@ mod tests {
         {
             let _hang = ReloadProbeHangGuard::enable(&store);
             let wall = Instant::now();
-            assert!(matches!(
-                store.verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan),
-                Err(TokenError::StoreUnavailable)
-            ));
+            store
+                .verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan)
+                .expect("the first hung probe starts the grace and serves cached entries");
             assert!(
                 wall.elapsed() <= hang_limit,
                 "first hung probe call hung: the 10 s limit only catches a deadlock, not slowness"
