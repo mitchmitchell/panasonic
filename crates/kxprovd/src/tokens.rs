@@ -2273,6 +2273,53 @@ mod tests {
         ));
     }
 
+    /// Merges a first stall that began half a grace plus one delivery
+    /// deadline before now and timed out one deadline later, and checks that
+    /// its answer at the observed timeout was served from cache. Returns the
+    /// stall start and the outage start.
+    fn seed_first_stall_half_a_grace_ago(store: &TokenStore) -> (Instant, Instant) {
+        let grace = TokenStore::reload_grace_duration();
+        let deadline = TokenStore::probe_delivery_deadline();
+        let stall_start = Instant::now()
+            .checked_sub(deadline + grace / 2)
+            .expect("backdate within Instant range");
+        let observed_timeout = stall_start + deadline;
+        let mut state = store.inner.lock().unwrap();
+        assert!(
+            TokenStore::merge_at_current_generation(
+                &mut state,
+                &store.transient_flight,
+                TokenStore::timed_out_disk_probe(observed_timeout, stall_start),
+            )
+            .is_ok(),
+            "a first timeout starts the grace; cached entries are served"
+        );
+        assert!(
+            TokenStore::enforce_max_stale_serve(&mut state, observed_timeout).is_ok(),
+            "the first stall is answered from cache before the bound"
+        );
+        assert!(!state.store_unavailable, "a first timeout must not latch");
+        assert_eq!(state.stale_since, Some(stall_start));
+        assert_eq!(state.reload_failure_since, Some(observed_timeout));
+        assert!(state.reload_transient_done);
+        (stall_start, observed_timeout)
+    }
+
+    /// Runs one verify whose probe never delivers and returns its answer and
+    /// how many times it blocked.
+    fn verify_with_hung_probe(
+        store: &TokenStore,
+    ) -> (Result<(), TokenError>, usize, std::sync::mpsc::Sender<()>) {
+        store.clear_probe_fast_fail_window_for_test();
+        let release = block_next_probe_delivery(store);
+        let waits_before = TokenStore::reload_waits_on_this_thread_for_test();
+        let answer = store
+            .verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan)
+            .map(|_| ());
+        let waits = TokenStore::reload_waits_on_this_thread_for_test() - waits_before;
+        (answer, waits, release)
+    }
+
     #[test]
     fn stall_after_a_timeout_is_admitted_inside_grace_but_fails_closed_past_max_stale_serve() {
         let grace = Duration::from_millis(1000);
@@ -2281,57 +2328,35 @@ mod tests {
         let path = tmp.path().join("tokens.json");
         write_tokens_revoking_writer(&path, false);
         let store = TokenStore::load_insecure(path.clone()).expect("load");
+        let (stall_start, outage_start) = seed_first_stall_half_a_grace_ago(&store);
 
-        let first = block_next_probe_delivery(&store);
-        store
-            .verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan)
-            .expect("a first timeout starts the grace; cached entries are served");
-        let timeout_at = Instant::now();
-        let outage_start = store
-            .inner
-            .lock()
-            .unwrap()
-            .reload_failure_since
-            .expect("timeout starts an outage");
-
-        backdate_outage_for_test(&store, grace / 2);
-        let outage_start = outage_start - grace / 2;
-        let timeout_at = timeout_at - grace / 2;
-        store.clear_probe_fast_fail_window_for_test();
-        let second = block_next_probe_delivery(&store);
-        let second_called = Instant::now();
-        assert!(matches!(
-            store.verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan),
-            Err(TokenError::StoreUnavailable)
-        ));
-        assert!(
-            second_called < timeout_at + grace,
-            "the second stall must begin inside the grace for this check to mean anything"
+        let (answer, waits, second) = verify_with_hung_probe(&store);
+        assert_eq!(
+            waits, 1,
+            "the second stall must be admitted to its own probe and block once on its delivery wait"
         );
+        assert!(
+            matches!(answer, Err(TokenError::StoreUnavailable)),
+            "its answer lands past max_stale_serve from the first stall, so it fails closed: {answer:?}"
+        );
+        assert!(Instant::now() > stall_start + TokenStore::max_stale_serve());
         {
             let state = store.inner.lock().unwrap();
-            assert!(
-                state.store_unavailable,
-                "its answer lands past max_stale_serve from the first stall, so it fails closed"
-            );
+            assert!(state.store_unavailable);
             assert_eq!(state.reload_failure_since, Some(outage_start));
+            assert_eq!(state.stale_since, Some(stall_start));
         }
 
         backdate_outage_for_test(&store, grace);
         let outage_start = outage_start - grace;
-        store.clear_probe_fast_fail_window_for_test();
-        let third = block_next_probe_delivery(&store);
-        assert!(matches!(
-            store.verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan),
-            Err(TokenError::StoreUnavailable)
-        ));
+        let (answer, _, third) = verify_with_hung_probe(&store);
+        assert!(matches!(answer, Err(TokenError::StoreUnavailable)));
         {
             let state = store.inner.lock().unwrap();
             assert!(state.store_unavailable, "past the grace it fails closed");
             assert_eq!(state.reload_failure_since, Some(outage_start));
         }
 
-        first.send(()).expect("release first probe");
         second.send(()).expect("release second probe");
         third.send(()).expect("release third probe");
         assert!(store.wait_probe_threads_exited_for_test(Duration::from_secs(10)));
@@ -2465,58 +2490,22 @@ mod tests {
         let path = tmp.path().join("tokens.json");
         write_tokens_revoking_writer(&path, false);
         let store = TokenStore::load_insecure(path.clone()).expect("load");
-
-        let first = block_next_probe_delivery(&store);
-        let before_first = Instant::now();
-        store
-            .verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan)
-            .expect("the first stall is answered from cache before the bound");
-        let (stall_start, outage_start) = {
-            let state = store.inner.lock().unwrap();
-            (
-                state.stale_since.expect("a stall records when it began"),
-                state
-                    .reload_failure_since
-                    .expect("timeout starts an outage"),
-            )
-        };
-        assert!(stall_start >= before_first);
+        let (stall_start, outage_start) = seed_first_stall_half_a_grace_ago(&store);
         assert!(
-            Instant::now() <= stall_start + bound,
-            "the first answer must land inside the bound for this check to mean anything"
-        );
-        first.send(()).expect("release first probe");
-        assert!(
-            store.wait_probe_threads_exited_for_test(Duration::from_secs(10)),
-            "the abandoned first probe must exit so the second request can spawn its own"
+            outage_start + grace / 2 < stall_start + bound,
+            "a request half a grace after the timeout is admitted before the bound"
         );
 
-        let target_age = bound - Duration::from_millis(300);
-        let age = stall_start.elapsed();
-        let (stall_start, outage_start) = if age < target_age {
-            backdate_outage_for_test(&store, target_age - age);
-            (
-                stall_start - (target_age - age),
-                outage_start - (target_age - age),
-            )
-        } else {
-            (stall_start, outage_start)
-        };
-        store.clear_probe_fast_fail_window_for_test();
-        let second = block_next_probe_delivery(&store);
-        let second_called = Instant::now();
-        assert!(
-            second_called < stall_start + bound && second_called < outage_start + grace,
-            "the second request must be admitted before the bound and inside the grace"
+        let (answer, waits, second) = verify_with_hung_probe(&store);
+        assert_eq!(
+            waits, 1,
+            "the request must be admitted to its own probe and block once on its delivery wait"
         );
-        assert!(matches!(
-            store.verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan),
-            Err(TokenError::StoreUnavailable)
-        ));
         assert!(
-            Instant::now() > stall_start + bound,
-            "its answer arrived past the bound, so cached entries must not be returned"
+            matches!(answer, Err(TokenError::StoreUnavailable)),
+            "its answer arrived past the bound, so cached entries must not be returned: {answer:?}"
         );
+        assert!(Instant::now() > stall_start + bound);
         assert!(store.inner.lock().unwrap().store_unavailable);
 
         second.send(()).expect("release second probe");
