@@ -242,7 +242,7 @@ token_sha256_hex = "020202020202020202020202020202020202020202020202020202020202
 "#,
         )
         .unwrap();
-        std::env::set_var("KXPROV_SKIP_SECRET_FILE_CHECKS", "1");
+        crate::secret_file::set_skip_secret_file_checks(true);
         let store = McpTokenStore::from_file(&path).expect("load");
         let bearer = "live-token-value";
         let hash_hex = hash_token_for_file(bearer);
@@ -287,7 +287,7 @@ token_sha256_hex = "020202020202020202020202020202020202020202020202020202020202
 "#
         );
         std::fs::write(&path, body).unwrap();
-        std::env::set_var("KXPROV_SKIP_SECRET_FILE_CHECKS", "1");
+        crate::secret_file::set_skip_secret_file_checks(true);
         let store = McpTokenStore::from_file(&path).expect("load");
         assert!(store.verify_bearer(bearer).is_some());
 
@@ -333,20 +333,22 @@ pub fn hash_token_for_file(bearer: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::secret_file::skip_secret_file_checks;
+    use crate::secret_file::{set_skip_secret_file_checks, skip_secret_file_checks};
     use std::os::unix::fs::PermissionsExt;
 
     #[test]
-    fn skip_secret_file_checks_only_honors_env_in_test_builds() {
-        let prev = std::env::var("KXPROV_SKIP_SECRET_FILE_CHECKS").ok();
-        std::env::remove_var("KXPROV_SKIP_SECRET_FILE_CHECKS");
-        assert!(!skip_secret_file_checks());
+    fn skip_secret_file_checks_is_scoped_to_the_setting_thread() {
+        set_skip_secret_file_checks(false);
         std::env::set_var("KXPROV_SKIP_SECRET_FILE_CHECKS", "1");
-        assert!(skip_secret_file_checks());
-        match prev {
-            Some(v) => std::env::set_var("KXPROV_SKIP_SECRET_FILE_CHECKS", v),
-            None => std::env::remove_var("KXPROV_SKIP_SECRET_FILE_CHECKS"),
-        }
+        let other = std::thread::spawn(|| {
+            set_skip_secret_file_checks(true);
+            skip_secret_file_checks()
+        })
+        .join()
+        .expect("setter thread");
+        assert!(other);
+        assert!(!skip_secret_file_checks());
+        std::env::remove_var("KXPROV_SKIP_SECRET_FILE_CHECKS");
     }
 
     fn write_tokens(path: &std::path::Path, body: &str) {
@@ -375,7 +377,7 @@ role = "approver"
 token_sha256_hex = "0202020202020202020202020202020202020202020202020202020202020202"
 "#,
         );
-        std::env::set_var("KXPROV_SKIP_SECRET_FILE_CHECKS", "1");
+        crate::secret_file::set_skip_secret_file_checks(true);
         let result = McpTokenStore::from_file(&path);
         let err = result.err().expect("load should fail");
         assert!(err.to_string().contains("exactly one approver"));
@@ -401,7 +403,7 @@ role = "communications"
 token_sha256_hex = "0202020202020202020202020202020202020202020202020202020202020202"
 "#,
         );
-        std::env::set_var("KXPROV_SKIP_SECRET_FILE_CHECKS", "1");
+        crate::secret_file::set_skip_secret_file_checks(true);
         let store = McpTokenStore::from_file(&path).expect("load skips expired entries");
         let guard = store.cache.lock().expect("cache");
         assert_eq!(guard.by_hash.len(), 1);
