@@ -415,6 +415,16 @@ impl TokenStore {
         !result.timed_out()
     }
 
+    /// Blocks until the probe fast-fail window latched by an earlier call has
+    /// ended, so the next call is not refused by it.
+    #[cfg(feature = "test-util")]
+    pub fn wait_probe_fast_fail_window_closed_for_test(&self) {
+        let until = *lock_ignoring_poison(&self.probe_fast_fail_until);
+        if let Some(until) = until {
+            std::thread::sleep(until.saturating_duration_since(Instant::now()));
+        }
+    }
+
     /// Joins every `token-reload-probe` thread spawned so far in this process,
     /// so each one has fully left `/proc/self/task` when this returns.
     ///
