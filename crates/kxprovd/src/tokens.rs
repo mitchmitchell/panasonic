@@ -1340,33 +1340,41 @@ impl TokenStore {
         TokenError::StoreUnavailable
     }
 
-    /// Whether `probe` is a bad result from a plan taken before a newer good
-    /// merge, so it says nothing about the store as it is now.
-    fn bad_probe_predates_newer_generation(
-        state: &TokenState,
-        plan_generation: u64,
-        probe: &DiskProbe,
-    ) -> bool {
-        !matches!(probe, DiskProbe::Ok(_)) && state.merge_generation != plan_generation
+    /// Whether `probe` comes from a plan taken before a newer good merge, so
+    /// it says nothing about the store as it is now.
+    fn probe_predates_newer_generation(state: &TokenState, plan_generation: u64) -> bool {
+        state.merge_generation != plan_generation
     }
 
     /// Merges `probe`, taken from a plan that saw `plan_generation`.
     ///
-    /// A bad result (`StillBad`, `UnchangedBad`, or a timeout's synthetic
-    /// `StillBad`) from before a newer good merge is dropped: it cannot
-    /// re-open the outage, move `stale_since`, or latch the store.
+    /// Any result from before a newer good merge is dropped. A bad one
+    /// (`StillBad`, `UnchangedBad`, or a timeout's synthetic `StillBad`)
+    /// cannot re-open the outage, move `stale_since`, or latch the store, and
+    /// an `Ok` cannot replace the newer entries with older bytes, which could
+    /// un-revoke a token. The next refresh plans again and re-reads the disk.
+    ///
+    /// An `Ok` whose bytes fail to apply leaves the outage state and the
+    /// generation as they were but resets the transient flight, so the next
+    /// call re-reads the disk instead of reusing the invalid result.
     fn merge_disk_probe(
         state: &mut TokenState,
         flight: &TransientReloadFlight,
         plan_generation: u64,
         probe: DiskProbe,
     ) -> Result<TokenRefreshDelta, TokenError> {
-        if Self::bad_probe_predates_newer_generation(state, plan_generation, &probe) {
+        if Self::probe_predates_newer_generation(state, plan_generation) {
             return Ok(Self::empty_refresh_delta());
         }
         match probe {
             DiskProbe::Ok(raw) => {
-                let delta = Self::apply_reloaded_bytes(state, raw)?;
+                let delta = match Self::apply_reloaded_bytes(state, raw) {
+                    Ok(delta) => delta,
+                    Err(e) => {
+                        flight.reset();
+                        return Err(e);
+                    }
+                };
                 Self::clear_reload_outage(state, flight);
                 state.merge_generation = state.merge_generation.wrapping_add(1);
                 Ok(delta)
@@ -2124,6 +2132,86 @@ mod tests {
             state.reload_failure_since.is_none() && state.stale_since.is_none(),
             "the stale bad probe re-opened the outage"
         );
+    }
+
+    fn write_tokens_with_duplicate_writer(path: &Path) {
+        let mut file = crate::test_util::default_tokens_file();
+        let writer = file
+            .tokens
+            .iter()
+            .find(|t| t.id.as_str() == "writer")
+            .cloned()
+            .expect("default file has a writer token");
+        file.tokens.push(writer);
+        TokenStore::write_test_file(path, &file).expect("write duplicate-id tokens");
+    }
+
+    #[test]
+    fn fixing_a_file_that_failed_validation_restores_auth_on_the_next_verify() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("tokens.json");
+        write_tokens_revoking_writer(&path, false);
+        let store = TokenStore::load_insecure(path.clone()).expect("load");
+        write_tokens_with_duplicate_writer(&path);
+        assert!(
+            store
+                .verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan)
+                .is_err(),
+            "a file that parses but fails validation must not be applied"
+        );
+        write_tokens_revoking_writer(&path, false);
+        store.clear_probe_fast_fail_window_for_test();
+        let answer = store.verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan);
+        assert!(
+            answer.is_ok(),
+            "the next verify after the file is fixed must re-read the disk and authenticate: {answer:?}"
+        );
+    }
+
+    #[test]
+    fn late_ok_from_an_older_plan_does_not_replace_newer_entries() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("tokens.json");
+        write_tokens_revoking_writer(&path, false);
+        let older_bytes = std::fs::read(&path).expect("read older tokens");
+        let store = TokenStore::load_insecure(path.clone()).expect("load");
+        let mut state = store.inner.lock().unwrap();
+        let plan_generation = state.merge_generation;
+        write_tokens_revoking_writer(&path, true);
+        let revoked = std::fs::read(&path).expect("read revoked tokens");
+        TokenStore::merge_at_current_generation(
+            &mut state,
+            &store.transient_flight,
+            DiskProbe::Ok(revoked),
+        )
+        .expect("newer good merge revokes the writer");
+        let newer_generation = state.merge_generation;
+        let late = TokenStore::merge_disk_probe(
+            &mut state,
+            &store.transient_flight,
+            plan_generation,
+            DiskProbe::Ok(older_bytes),
+        )
+        .expect("a late Ok from an older plan is dropped, not an error");
+        assert!(
+            late.reactivated.is_empty(),
+            "the late Ok reported a reactivation"
+        );
+        assert_eq!(state.merge_generation, newer_generation);
+        let writer = TokenStore::find_entry(
+            &state.entries,
+            &hash_bearer_secret(crate::test_util::WRITER_SECRET),
+        )
+        .expect("writer entry is kept");
+        assert!(
+            writer.revoked,
+            "a late Ok from an older plan un-revoked the writer"
+        );
+        drop(state);
+        assert!(matches!(
+            store.verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan),
+            Err(TokenError::Revoked)
+        ));
     }
 
     #[test]
