@@ -1764,9 +1764,10 @@ mod tests {
         store
             .verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan)
             .expect("reload recovers after hung probe");
-        assert!(
-            store.wait_probe_threads_exited_for_test(Duration::from_secs(10)),
-            "recovery probe thread did not exit after sending its result"
+        assert_eq!(
+            store.live_disk_probe_threads_for_test(),
+            0,
+            "the recovery probe must release its slot before it hands back its result"
         );
         assert_eq!(store.leaked_disk_probe_threads_for_test(), 0);
     }
@@ -2005,6 +2006,11 @@ mod tests {
             store
                 .verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan)
                 .expect("warm load");
+            assert_eq!(
+                store.live_disk_probe_threads_for_test(),
+                0,
+                "iteration {i}: a finished probe must not hold its slot into the next call"
+            );
             write_tokens_revoking_writer(&path, true);
             let err = store
                 .verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan)
