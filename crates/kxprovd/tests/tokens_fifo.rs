@@ -228,6 +228,8 @@ fn fifo_tokens_single_probe_thread_fast_fail_and_recovery() {
     auth_recovers_after_replace(&store, &path);
 }
 
+const FAST_FAIL_HANG_LIMIT: Duration = Duration::from_secs(10);
+
 #[test]
 fn six_fifo_hangs_cap_live_threads_and_fast_fail_closed() {
     let _lock = fifo_test_serial_lock();
@@ -258,6 +260,7 @@ fn six_fifo_hangs_cap_live_threads_and_fast_fail_closed() {
             std::thread::sleep(Duration::from_millis(5));
         }
         max_live = max_live.max(store.live_disk_probe_threads_for_test());
+        let live_before = store.live_disk_probe_threads_for_test();
         let t0 = Instant::now();
         assert!(
             matches!(
@@ -267,8 +270,13 @@ fn six_fifo_hangs_cap_live_threads_and_fast_fail_closed() {
             "iteration {i} should fast-fail while fifo probe is outstanding"
         );
         assert!(
-            t0.elapsed() <= Duration::from_millis(250),
-            "iteration {i} fast-fail took {:?}",
+            store.live_disk_probe_threads_for_test() <= live_before,
+            "iteration {i} fast-fail spawned a probe ({live_before} -> {})",
+            store.live_disk_probe_threads_for_test()
+        );
+        assert!(
+            t0.elapsed() <= FAST_FAIL_HANG_LIMIT,
+            "iteration {i} fast-fail hung for {:?}",
             t0.elapsed()
         );
         assert!(

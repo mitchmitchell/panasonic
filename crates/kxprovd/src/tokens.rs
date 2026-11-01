@@ -7,8 +7,6 @@ use kxprov_api::{
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-#[cfg(feature = "test-util")]
-use std::sync::atomic::AtomicU64;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, Weak};
 use std::time::{Duration, Instant};
@@ -122,9 +120,6 @@ pub struct TokenStore {
     reload_probe_hang: Arc<AtomicBool>,
 }
 
-#[cfg(feature = "test-util")]
-static RELOAD_GRACE_OVERRIDE_MS: AtomicU64 = AtomicU64::new(0);
-
 struct TokenRefreshDelta {
     newly_revoked: Vec<TokenId>,
     reactivated: Vec<TokenId>,
@@ -210,14 +205,14 @@ struct ProbeThreadAliveGuard {
 
 impl Drop for ProbeThreadAliveGuard {
     fn drop(&mut self) {
+        let mut map = self
+            .abandoned_refcounts
+            .lock()
+            .expect("abandoned probe lock");
         if !self.was_abandoned.load(Ordering::Acquire) {
             return;
         }
         if let Some(id) = self.identity {
-            let mut map = self
-                .abandoned_refcounts
-                .lock()
-                .expect("abandoned probe lock");
             if let Some(n) = map.get_mut(&id) {
                 *n = n.saturating_sub(1);
                 if *n == 0 {
@@ -299,16 +294,6 @@ impl TokenStore {
     }
 
     #[cfg(feature = "test-util")]
-    pub fn set_reload_grace_for_test(grace: Duration) {
-        RELOAD_GRACE_OVERRIDE_MS.store(grace.as_millis() as u64, Ordering::Relaxed);
-    }
-
-    #[cfg(feature = "test-util")]
-    pub fn clear_reload_grace_override_for_test() {
-        RELOAD_GRACE_OVERRIDE_MS.store(0, Ordering::Relaxed);
-    }
-
-    #[cfg(feature = "test-util")]
     pub fn live_disk_probe_threads_for_test(&self) -> usize {
         self.probe_threads_alive.load(Ordering::Acquire)
     }
@@ -380,6 +365,10 @@ impl TokenStore {
         if self.disk_probe_live.load(Ordering::Acquire) == 0 {
             return;
         }
+        let mut refcounts = self
+            .abandoned_probe_refcounts
+            .lock()
+            .expect("abandoned probe lock");
         let mut owned_abandon = false;
         if let Some(flag) = self
             .active_probe_abandon
@@ -393,21 +382,15 @@ impl TokenStore {
             let _ = self
                 .disk_probe_live
                 .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_sub(1));
-        }
-        let stuck_id = *self
-            .probe_path_identity
-            .lock()
-            .expect("probe path identity lock");
-        if owned_abandon {
+            let stuck_id = *self
+                .probe_path_identity
+                .lock()
+                .expect("probe path identity lock");
             if let Some(id) = stuck_id {
-                self.abandoned_probe_refcounts
-                    .lock()
-                    .expect("abandoned probe lock")
-                    .entry(id)
-                    .and_modify(|n| *n += 1)
-                    .or_insert(1);
+                refcounts.entry(id).and_modify(|n| *n += 1).or_insert(1);
             }
         }
+        drop(refcounts);
         *self
             .probe_path_identity
             .lock()
@@ -542,17 +525,6 @@ impl TokenStore {
     const RELOAD_GRACE: Duration = Duration::from_secs(2);
     const RELOAD_MAX_ATTEMPTS: usize = 3;
 
-    #[cfg(feature = "test-util")]
-    fn reload_grace_duration() -> Duration {
-        let ms = RELOAD_GRACE_OVERRIDE_MS.load(Ordering::Relaxed);
-        if ms > 0 {
-            Duration::from_millis(ms)
-        } else {
-            Self::RELOAD_GRACE
-        }
-    }
-
-    #[cfg(not(feature = "test-util"))]
     fn reload_grace_duration() -> Duration {
         Self::RELOAD_GRACE
     }
@@ -1020,6 +992,11 @@ impl TokenStore {
         }
     }
 
+    fn fail_closed(&self) -> TokenError {
+        let mut state = self.inner.lock().expect("token store lock");
+        Self::latch_store_unavailable(&mut state)
+    }
+
     fn refresh_if_modified(&self) -> Result<TokenRefreshDelta, TokenError> {
         let plan = {
             let state = self.inner.lock().expect("token store lock");
@@ -1042,16 +1019,21 @@ impl TokenStore {
 
         let during_outage = Self::reload_plan_in_outage(&plan);
         if self.disk_reload_blocked_now(during_outage, &plan.path) {
-            return Err(TokenError::StoreUnavailable);
+            return Err(self.fail_closed());
         }
         if during_outage {
             self.reconcile_stuck_probe_for_path(&plan.path);
         }
 
         let probe = if plan.transient_done {
-            self.run_disk_probe_off_thread(plan)?
+            self.run_disk_probe_off_thread(plan)
         } else {
-            self.coordinated_transient_probe(&self.transient_flight, plan)?
+            self.coordinated_transient_probe(&self.transient_flight, plan)
+        };
+        let probe = match probe {
+            Ok(p) => p,
+            Err(TokenError::StoreUnavailable) => return Err(self.fail_closed()),
+            Err(e) => return Err(e),
         };
 
         let mut state = self.inner.lock().expect("token store lock");
