@@ -902,6 +902,11 @@ impl TokenStore {
     /// A probe that delivered nothing is an outage that began at
     /// `outage_start`; `last_bad_read` is the last moment the file is known to
     /// have been unavailable, which decides whether the grace has run out.
+    ///
+    /// For a caller that gave up waiting, the outage begins when the timeout is
+    /// observed unless an earlier outage is already running, and the stall is
+    /// judged by when its probe started: a stall that began inside the grace is
+    /// served from cache, one that began after it fails closed.
     fn timed_out_disk_probe(outage_start: Instant, last_bad_read: Instant) -> DiskProbe {
         DiskProbe::StillBad {
             fp: DiskFingerprint::Unreadable,
@@ -949,9 +954,19 @@ impl TokenStore {
         };
         let probe_started = Instant::now();
         let timed_out = || {
-            Self::timed_out_disk_probe(plan_outage_start.unwrap_or(probe_started), probe_started)
+            Self::timed_out_disk_probe(
+                plan_outage_start.unwrap_or_else(Instant::now),
+                probe_started,
+            )
         };
-        let deadline = probe_started + Self::probe_delivery_deadline();
+        let deadline = probe_started
+            .checked_add(Self::probe_delivery_deadline())
+            .unwrap_or_else(|| {
+                tracing::warn!(
+                    "token-reload-probe delivery deadline overflows Instant; the probe is treated as timed out so the normal grace applies"
+                );
+                probe_started
+            });
         let (tx, rx) = std::sync::mpsc::sync_channel(1);
         let probe_alive = Arc::clone(&self.probe_threads_alive);
         let exit_signal = Arc::clone(&self.probe_exit_signal);
@@ -1920,7 +1935,7 @@ mod tests {
     }
 
     #[test]
-    fn probe_timeout_is_an_outage_from_probe_start_with_normal_grace() {
+    fn probe_timeout_is_an_outage_from_the_observed_timeout_with_normal_grace() {
         let _grace = GraceOverride::set(Duration::from_millis(50));
         let tmp = tempfile::tempdir().expect("tempdir");
         let path = tmp.path().join("tokens.json");
@@ -1940,8 +1955,8 @@ mod tests {
                 .expect("timeout starts an outage")
         };
         assert!(
-            outage_start >= before_first,
-            "the outage must start when the probe started, not be backdated"
+            outage_start >= before_first + TokenStore::probe_delivery_deadline(),
+            "the outage must start when the timeout was observed, not be backdated"
         );
 
         store.wait_probe_fast_fail_window_closed_for_test();
@@ -1979,6 +1994,73 @@ mod tests {
             store.verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan),
             Err(TokenError::Revoked)
         ));
+    }
+
+    #[test]
+    fn stall_after_a_timeout_is_served_inside_grace_from_the_timeout_then_fails_closed() {
+        let grace = Duration::from_millis(500);
+        let _grace = GraceOverride::set(grace);
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("tokens.json");
+        write_tokens_revoking_writer(&path, false);
+        let store = TokenStore::load_insecure(path.clone()).expect("load");
+
+        let first = block_next_probe_delivery(&store);
+        store
+            .verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan)
+            .expect("a first timeout starts the grace; cached entries are served");
+        let timeout_at = Instant::now();
+        let outage_start = store
+            .inner
+            .lock()
+            .unwrap()
+            .reload_failure_since
+            .expect("timeout starts an outage");
+
+        std::thread::sleep((outage_start + grace / 2).saturating_duration_since(Instant::now()));
+        store.wait_probe_fast_fail_window_closed_for_test();
+        let second = block_next_probe_delivery(&store);
+        let second_called = Instant::now();
+        store
+            .verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan)
+            .expect("a stall inside the grace measured from the timeout is served from cache");
+        assert!(
+            second_called < timeout_at + grace,
+            "the second stall must begin inside the grace for this check to mean anything"
+        );
+        {
+            let state = store.inner.lock().unwrap();
+            assert!(!state.store_unavailable, "inside the grace nothing latches");
+            assert_eq!(state.reload_failure_since, Some(outage_start));
+        }
+
+        std::thread::sleep((outage_start + grace).saturating_duration_since(Instant::now()));
+        store.wait_probe_fast_fail_window_closed_for_test();
+        let third = block_next_probe_delivery(&store);
+        assert!(matches!(
+            store.verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan),
+            Err(TokenError::StoreUnavailable)
+        ));
+        {
+            let state = store.inner.lock().unwrap();
+            assert!(state.store_unavailable, "past the grace it fails closed");
+            assert_eq!(state.reload_failure_since, Some(outage_start));
+        }
+
+        first.send(()).expect("release first probe");
+        second.send(()).expect("release second probe");
+        third.send(()).expect("release third probe");
+        assert!(store.wait_probe_threads_exited_for_test(Duration::from_secs(10)));
+        store.wait_probe_fast_fail_window_closed_for_test();
+        store
+            .verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan)
+            .expect("a good probe ends the outage");
+        {
+            let state = store.inner.lock().unwrap();
+            assert!(!state.store_unavailable);
+            assert!(state.reload_failure_since.is_none());
+        }
+        assert_eq!(store.leaked_disk_probe_threads_for_test(), 0);
     }
 
     #[test]
@@ -2132,17 +2214,10 @@ mod tests {
                 let _hang = ReloadProbeHangGuard::enable(&store);
                 let wall = Instant::now();
                 let result = store.verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan);
-                if round == 0 {
-                    assert!(
-                        result.is_ok(),
-                        "the first hung probe starts the grace and serves cached entries"
-                    );
-                } else {
-                    assert!(
-                        matches!(result, Err(TokenError::StoreUnavailable)),
-                        "round {round} must fail closed once the grace has run out"
-                    );
-                }
+                assert!(
+                    result.is_ok(),
+                    "round {round}: a hung probe that starts inside the grace serves cached entries"
+                );
                 assert!(
                     wall.elapsed() <= hang_limit,
                     "round {round} hung: the 10 s limit only catches a deadlock, not slowness"
