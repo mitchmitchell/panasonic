@@ -227,6 +227,19 @@ impl TransientReloadFlight {
         *guard = TransientFlightState::Idle;
         self.cv.notify_all();
     }
+
+    /// Resets the flight only if it still holds the `Ok` result with exactly
+    /// `raw`, so a caller that consumed a published result that failed to
+    /// apply cannot knock a newer leader's `Running` flight, or a newer
+    /// result, back to `Idle`.
+    fn reset_if_done_with_ok(&self, raw: &[u8]) {
+        let mut guard = self.inner.lock().expect("transient flight lock");
+        if matches!(&*guard, TransientFlightState::Done(DiskProbe::Ok(held)) if held.as_slice() == raw)
+        {
+            *guard = TransientFlightState::Idle;
+            self.cv.notify_all();
+        }
+    }
 }
 
 /// If the leader panics before publishing `Done`, unblock waiters instead of wedging auth.
@@ -1355,8 +1368,9 @@ impl TokenStore {
     /// un-revoke a token. The next refresh plans again and re-reads the disk.
     ///
     /// An `Ok` whose bytes fail to apply leaves the outage state and the
-    /// generation as they were but resets the transient flight, so the next
-    /// call re-reads the disk instead of reusing the invalid result.
+    /// generation as they were. It resets the transient flight only while the
+    /// flight still holds that same result, so the next call re-reads the
+    /// disk instead of reusing it, and a newer leader is left alone.
     fn merge_disk_probe(
         state: &mut TokenState,
         flight: &TransientReloadFlight,
@@ -1368,10 +1382,10 @@ impl TokenStore {
         }
         match probe {
             DiskProbe::Ok(raw) => {
-                let delta = match Self::apply_reloaded_bytes(state, raw) {
+                let delta = match Self::apply_reloaded_bytes(state, raw.clone()) {
                     Ok(delta) => delta,
                     Err(e) => {
-                        flight.reset();
+                        flight.reset_if_done_with_ok(&raw);
                         return Err(e);
                     }
                 };
@@ -2165,6 +2179,42 @@ mod tests {
         assert!(
             answer.is_ok(),
             "the next verify after the file is fixed must re-read the disk and authenticate: {answer:?}"
+        );
+    }
+
+    #[test]
+    fn late_failed_apply_does_not_reset_a_newer_running_leader() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("tokens.json");
+        write_tokens_revoking_writer(&path, false);
+        let store = TokenStore::load_insecure(path.clone()).expect("load");
+        write_tokens_with_duplicate_writer(&path);
+        let invalid = std::fs::read(&path).expect("read duplicate-id tokens");
+        *store.transient_flight.inner.lock().unwrap() =
+            TransientFlightState::Done(DiskProbe::Ok(invalid.clone()));
+        store.transient_flight.reset_if_done_with_ok(&invalid);
+        assert!(
+            matches!(
+                *store.transient_flight.inner.lock().unwrap(),
+                TransientFlightState::Idle
+            ),
+            "the caller that consumed the published invalid result resets the flight"
+        );
+        *store.transient_flight.inner.lock().unwrap() = TransientFlightState::Running;
+        let mut state = store.inner.lock().unwrap();
+        assert!(TokenStore::merge_at_current_generation(
+            &mut state,
+            &store.transient_flight,
+            DiskProbe::Ok(invalid),
+        )
+        .is_err());
+        drop(state);
+        assert!(
+            matches!(
+                *store.transient_flight.inner.lock().unwrap(),
+                TransientFlightState::Running
+            ),
+            "a late follower's failed apply knocked the newer leader's flight back to Idle"
         );
     }
 
