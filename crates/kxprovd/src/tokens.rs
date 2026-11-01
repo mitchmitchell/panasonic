@@ -280,7 +280,7 @@ impl TokenStore {
         Self::load_unchecked(path)
     }
 
-    #[cfg(feature = "test-util")]
+    #[cfg(any(test, feature = "test-util"))]
     pub fn load_insecure(path: PathBuf) -> Result<Self, TokenError> {
         Self::load_unchecked_insecure(path)
     }
@@ -498,7 +498,7 @@ impl TokenStore {
         Ok(Self::wrap_state(state))
     }
 
-    #[cfg(feature = "test-util")]
+    #[cfg(any(test, feature = "test-util"))]
     fn load_unchecked_insecure(path: PathBuf) -> Result<Self, TokenError> {
         let mut state = Self::read_state(&path)?;
         state.enforce_secure_reload = false;

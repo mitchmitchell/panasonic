@@ -50,6 +50,8 @@ jobs:
       - run: cargo test -p kxprovd --features test-util --locked -- --test-threads=1
       - run: cargo test -p kxtd1232-sim --features faults --locked
       - run: cargo test -p kxprov-gw --features test-secret-skip --locked
+      - run: cargo test -p kxprovd --lib --no-default-features --features inprocess-sim,kxprov-api/sim-fault-triggers --locked
+      - run: cargo test --workspace --exclude kxprovd --exclude kxprov-gw --all-features --locked --no-run
       - name: A4 local stack smoke (debug sim build)
         run: bash scripts/run-a4.sh smoke
       - name: H5 tool absent from default workspace build
