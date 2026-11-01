@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <title>Call log · kx-provision</title>
+  {% include "_head.html" %}
+</head>
+<body>
+  {% include "_header.html" %}
+  <main>
+    <h1>Call log</h1>
+    <p class="help">Calls the phone system reported, newest first. Times are US Central. This page is read-only.</p>
+    <form method="get" action="/calls" class="calls-filter">
+      <label>
+        From
+        <span class="field-help">First day to show (YYYY-MM-DD). Leave both dates empty for the last 24 hours.</span>
+        <input name="from" value="{{ from_value }}">
+      </label>
+      <label>
+        To
+        <span class="field-help">Last day to show (YYYY-MM-DD). At most 31 days in one view.</span>
+        <input name="to" value="{{ to_value }}">
+      </label>
+      <label>
+        Extension
+        <input name="ext" value="{{ ext_value }}">
+      </label>
+      <label>
+        Direction
+        <select name="direction">
+          <option value=""{% if direction_value == "" %} selected{% endif %}>Any</option>
+          <option value="incoming"{% if direction_value == "incoming" %} selected{% endif %}>Incoming</option>
+          <option value="outgoing"{% if direction_value == "outgoing" %} selected{% endif %}>Outgoing</option>
+        </select>
+      </label>
+      <button type="submit">Show calls</button>
+    </form>
+    {% if show_error %}
+    <p class="inline-error" role="alert">{{ error }}</p>
+    {% else %}
+    {% if calls.is_empty() %}
+    <p class="empty-state">No calls in this range.</p>
+    {% else %}
+    <table class="calls">
+      <thead>
+        <tr><th>Time</th><th>Extension</th><th>Line</th><th>Direction</th><th>Number</th><th>Caller ID</th><th>Ring (s)</th><th>Duration (s)</th></tr>
+      </thead>
+      <tbody>
+        {% for c in calls %}
+        <tr><td>{{ c.time }}</td><td>{{ c.ext }}</td><td>{{ c.co }}</td><td>{{ c.direction }}</td><td>{{ c.number }}</td><td>{{ c.cid_text }}</td><td>{{ c.ring_s }}</td><td>{{ c.duration_s }}</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% endif %}
+    {% if show_next %}
+    <p><a href="{{ next_href }}">Older calls</a></p>
+    {% endif %}
+    {% endif %}
+    <p><a href="/">Back to kx-provision</a></p>
+  </main>
+</body>
+</html>

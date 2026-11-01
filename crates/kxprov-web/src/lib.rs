@@ -1,3 +1,4 @@
+mod calls;
 mod csrf;
 mod expiry;
 mod fields;
@@ -32,6 +33,7 @@ pub use login_limit::{LoginGateError, LoginPrecheck, LoginRateLimiter};
 pub struct ClientIpPolicy {
     pub trust_x_forwarded_for: bool,
 }
+pub use calls::{call_log_message, query_from_form, CallsQuery, CALLS_PAGE_SIZE};
 pub use session::{
     absolute_session_valid, enforce_absolute_session_limit, is_n1_unregistered_web_path,
     now_unix_ms, reject_authenticated_login, require_web_session, SESSION_AUTH_KEY,
@@ -64,6 +66,7 @@ pub fn router(state: WebState) -> Router {
         .route("/read", post(read_record))
         .route("/plan", post(plan_change))
         .route("/api/plan", post(plan_change))
+        .route("/calls", get(calls::calls_page))
         .with_state(state)
 }
 
