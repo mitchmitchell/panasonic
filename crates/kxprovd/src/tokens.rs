@@ -1809,11 +1809,13 @@ mod tests {
     fn thread_dump_lists_the_calling_thread() {
         let dump = thread_dump();
         assert!(dump.starts_with("thread dump ("), "{dump}");
-        let name = std::thread::current()
-            .name()
-            .map(|n| n.chars().take(15).collect::<String>())
-            .expect("test threads are named");
-        assert!(dump.contains(&format!("name={name}")), "{dump}");
+        let own_task = std::fs::read_link("/proc/thread-self").expect("/proc/thread-self");
+        let tid = own_task
+            .file_name()
+            .and_then(|t| t.to_str())
+            .expect("thread-self ends in the tid")
+            .to_owned();
+        assert!(dump.contains(&format!("tid {tid} ")), "{dump}");
     }
 
     /// Runs a test body on its own thread and fails the test if it has not
