@@ -298,7 +298,7 @@ fn six_fifo_hangs_cap_live_threads_and_fast_fail_closed() {
             store.wait_probe_threads_exited_for_test(Duration::from_secs(10)),
             "iteration {i} probe threads did not drain"
         );
-        store.wait_probe_fast_fail_window_closed_for_test();
+        store.clear_probe_fast_fail_window_for_test();
         store
             .verify_bearer(kxprovd::test_util::WRITER_SECRET, 0, Scope::Plan)
             .unwrap_or_else(|e| panic!("iteration {i} store did not recover: {e}"));

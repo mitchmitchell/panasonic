@@ -64,6 +64,9 @@ struct TokenState {
     reload_transient_done: bool,
     /// Fingerprint of the last failed on-disk payload (avoid re-reading unchanged bad bytes).
     reload_failed_disk_fingerprint: Option<DiskFingerprint>,
+    /// Bumped by every good merge. A bad probe whose plan saw an older value
+    /// predates that recovery and must not re-open or latch the outage.
+    merge_generation: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,6 +82,7 @@ struct ReloadPlan {
     outage_start: Option<Instant>,
     transient_done: bool,
     failed_fp: Option<DiskFingerprint>,
+    merge_generation: u64,
     probe_cancel: Arc<AtomicBool>,
     #[cfg(feature = "test-util")]
     probe_hang: Arc<AtomicBool>,
@@ -125,6 +129,12 @@ type AbandonHook = Box<dyn FnOnce() + Send>;
 
 #[cfg(test)]
 thread_local! {
+    /// Test-only override of [`TokenStore::reload_grace_duration`].
+    ///
+    /// Thread-local, so it affects only the thread that set it: the caller
+    /// that computes the grace and the delivery deadline. A
+    /// `token-reload-probe` thread never sees it, so a helper using this stops
+    /// working if any grace or deadline is ever computed on the probe thread.
     static RELOAD_GRACE_OVERRIDE: std::cell::Cell<Option<Duration>> = const { std::cell::Cell::new(None) };
 }
 
@@ -161,6 +171,10 @@ pub struct TokenStore {
     /// releases the probe slot.
     #[cfg(test)]
     after_merge_hook: Arc<Mutex<Option<AbandonHook>>>,
+    /// Runs on the caller after its probe timed out and was abandoned, before
+    /// the timeout is merged.
+    #[cfg(test)]
+    after_timeout_hook: Arc<Mutex<Option<AbandonHook>>>,
 }
 
 struct TokenRefreshDelta {
@@ -192,6 +206,8 @@ impl Clone for TokenStore {
             before_send_hook: Arc::clone(&self.before_send_hook),
             #[cfg(test)]
             after_merge_hook: Arc::clone(&self.after_merge_hook),
+            #[cfg(test)]
+            after_timeout_hook: Arc::clone(&self.after_timeout_hook),
         }
     }
 }
@@ -480,14 +496,13 @@ impl TokenStore {
         !result.timed_out()
     }
 
-    /// Blocks until the probe fast-fail window latched by an earlier call has
-    /// ended, so the next call is not refused by it.
+    /// Ends the probe fast-fail window latched by an earlier call, so the next
+    /// call is not refused by it. Clears the latch directly instead of
+    /// sleeping until it expires, so tests neither pay real time nor depend on
+    /// the scheduler waking them in time.
     #[cfg(feature = "test-util")]
-    pub fn wait_probe_fast_fail_window_closed_for_test(&self) {
-        let until = *lock_ignoring_poison(&self.probe_fast_fail_until);
-        if let Some(until) = until {
-            std::thread::sleep(until.saturating_duration_since(Instant::now()));
-        }
+    pub fn clear_probe_fast_fail_window_for_test(&self) {
+        *lock_ignoring_poison(&self.probe_fast_fail_until) = None;
     }
 
     /// Joins every `token-reload-probe` thread spawned so far in this process,
@@ -542,6 +557,8 @@ impl TokenStore {
             before_send_hook: Arc::new(Mutex::new(None)),
             #[cfg(test)]
             after_merge_hook: Arc::new(Mutex::new(None)),
+            #[cfg(test)]
+            after_timeout_hook: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -582,10 +599,7 @@ impl TokenStore {
         if self.disk_probe_live.load(Ordering::Acquire) == 0 {
             return;
         }
-        let mut refcounts = self
-            .abandoned_probe_refcounts
-            .lock()
-            .expect("abandoned probe lock");
+        let mut refcounts = lock_ignoring_poison(&self.abandoned_probe_refcounts);
         if let Some(active) = self
             .active_probe_abandon
             .lock()
@@ -626,10 +640,7 @@ impl TokenStore {
             return true;
         }
         if let Some(id) = path_identity(path) {
-            if self
-                .abandoned_probe_refcounts
-                .lock()
-                .expect("abandoned probe lock")
+            if lock_ignoring_poison(&self.abandoned_probe_refcounts)
                 .get(&id)
                 .is_some_and(|n| *n > 0)
             {
@@ -1075,6 +1086,7 @@ impl TokenStore {
         if timeout.is_zero() {
             self.latch_probe_fast_fail();
             self.abandon_stuck_probe();
+            self.run_after_timeout_hook();
             return Ok(ProbeOutcome {
                 probe: timed_out(),
                 slot: None,
@@ -1090,11 +1102,19 @@ impl TokenStore {
             Err(_) => {
                 self.latch_probe_fast_fail();
                 self.abandon_stuck_probe();
+                self.run_after_timeout_hook();
                 Ok(ProbeOutcome {
                     probe: timed_out(),
                     slot: None,
                 })
             }
+        }
+    }
+
+    fn run_after_timeout_hook(&self) {
+        #[cfg(test)]
+        if let Some(hook) = lock_ignoring_poison(&self.after_timeout_hook).take() {
+            hook();
         }
     }
 
@@ -1244,6 +1264,7 @@ impl TokenStore {
             store_unavailable_logged: false,
             reload_transient_done: false,
             reload_failed_disk_fingerprint: None,
+            merge_generation: 0,
         })
     }
 
@@ -1261,6 +1282,7 @@ impl TokenStore {
             store_unavailable_logged: false,
             reload_transient_done: false,
             reload_failed_disk_fingerprint: None,
+            merge_generation: 0,
         })
     }
 
@@ -1318,14 +1340,34 @@ impl TokenStore {
         TokenError::StoreUnavailable
     }
 
+    /// Whether `probe` is a bad result from a plan taken before a newer good
+    /// merge, so it says nothing about the store as it is now.
+    fn bad_probe_predates_newer_generation(
+        state: &TokenState,
+        plan_generation: u64,
+        probe: &DiskProbe,
+    ) -> bool {
+        !matches!(probe, DiskProbe::Ok(_)) && state.merge_generation != plan_generation
+    }
+
+    /// Merges `probe`, taken from a plan that saw `plan_generation`.
+    ///
+    /// A bad result (`StillBad`, `UnchangedBad`, or a timeout's synthetic
+    /// `StillBad`) from before a newer good merge is dropped: it cannot
+    /// re-open the outage, move `stale_since`, or latch the store.
     fn merge_disk_probe(
         state: &mut TokenState,
         flight: &TransientReloadFlight,
+        plan_generation: u64,
         probe: DiskProbe,
     ) -> Result<TokenRefreshDelta, TokenError> {
+        if Self::bad_probe_predates_newer_generation(state, plan_generation, &probe) {
+            return Ok(Self::empty_refresh_delta());
+        }
         match probe {
             DiskProbe::Ok(raw) => {
                 Self::clear_reload_outage(state, flight);
+                state.merge_generation = state.merge_generation.wrapping_add(1);
                 Self::apply_reloaded_bytes(state, raw)
             }
             DiskProbe::UnchangedBad => {
@@ -1416,12 +1458,14 @@ impl TokenStore {
                 outage_start: state.reload_failure_since,
                 transient_done: state.reload_transient_done,
                 failed_fp: state.reload_failed_disk_fingerprint,
+                merge_generation: state.merge_generation,
                 probe_cancel: Arc::new(AtomicBool::new(false)),
                 #[cfg(feature = "test-util")]
                 probe_hang: Arc::clone(&self.reload_probe_hang),
             }
         };
 
+        let plan_generation = plan.merge_generation;
         let during_outage = Self::reload_plan_in_outage(&plan);
         if self.disk_reload_blocked_now(during_outage, &plan.path) {
             return Err(self.fail_closed(during_outage));
@@ -1443,10 +1487,11 @@ impl TokenStore {
 
         let mut state = self.inner.lock().expect("token store lock");
         let merged =
-            Self::merge_disk_probe(&mut state, &self.transient_flight, probe).and_then(|delta| {
-                Self::enforce_max_stale_serve(&mut state, Instant::now())?;
-                Ok(delta)
-            });
+            Self::merge_disk_probe(&mut state, &self.transient_flight, plan_generation, probe)
+                .and_then(|delta| {
+                    Self::enforce_max_stale_serve(&mut state, Instant::now())?;
+                    Ok(delta)
+                });
         #[cfg(test)]
         if slot.is_some() {
             if let Some(hook) = lock_ignoring_poison(&self.after_merge_hook).take() {
@@ -1514,8 +1559,10 @@ impl TokenStore {
             })
             .map(|t| t.id.clone())
             .collect();
+        let merge_generation = state.merge_generation;
         *state = fresh;
         state.enforce_secure_reload = enforce_secure;
+        state.merge_generation = merge_generation;
         Ok(TokenRefreshDelta {
             newly_revoked,
             reactivated,
@@ -1634,6 +1681,7 @@ impl TokenStore {
             store_unavailable_logged: false,
             reload_transient_done: false,
             reload_failed_disk_fingerprint: None,
+            merge_generation: 0,
         };
         Self::wrap_state(state)
     }
@@ -1966,6 +2014,103 @@ mod tests {
         assert!(store.probe_path_identity.lock().unwrap().is_none());
     }
 
+    impl TokenStore {
+        fn merge_at_current_generation(
+            state: &mut TokenState,
+            flight: &TransientReloadFlight,
+            probe: DiskProbe,
+        ) -> Result<TokenRefreshDelta, TokenError> {
+            let generation = state.merge_generation;
+            Self::merge_disk_probe(state, flight, generation, probe)
+        }
+    }
+
+    fn backdate_outage_for_test(store: &TokenStore, by: Duration) {
+        let mut state = store.inner.lock().unwrap();
+        let back = |t: Instant| t.checked_sub(by).expect("backdate within Instant range");
+        state.reload_failure_since = state.reload_failure_since.map(back);
+        state.stale_since = state.stale_since.map(back);
+    }
+
+    #[test]
+    fn timed_out_merge_after_a_newer_good_merge_does_not_reopen_the_outage() {
+        let grace = Duration::from_millis(50);
+        let _grace = GraceOverride::set(grace);
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("tokens.json");
+        write_tokens_revoking_writer(&path, false);
+        let store = TokenStore::load_insecure(path.clone()).expect("load");
+        {
+            let mut state = store.inner.lock().unwrap();
+            let start = Instant::now()
+                .checked_sub(grace * 4)
+                .expect("backdate within Instant range");
+            state.reload_failure_since = Some(start);
+            state.stale_since = Some(start);
+            state.reload_transient_done = true;
+            state.reload_failed_disk_fingerprint = Some(DiskFingerprint::Unreadable);
+        }
+        let release = block_next_probe_delivery(&store);
+        let good_merged = Arc::new(AtomicBool::new(false));
+        {
+            let merging = store.clone();
+            let good_path = path.clone();
+            let merged = Arc::clone(&good_merged);
+            *store.after_timeout_hook.lock().unwrap() = Some(Box::new(move || {
+                let raw = std::fs::read(&good_path).expect("read good tokens");
+                let mut state = merging.inner.lock().unwrap();
+                TokenStore::merge_at_current_generation(
+                    &mut state,
+                    &merging.transient_flight,
+                    DiskProbe::Ok(raw),
+                )
+                .expect("good merge");
+                merged.store(true, Ordering::Release);
+            }));
+        }
+        let answer = store.verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan);
+        assert!(
+            good_merged.load(Ordering::Acquire),
+            "the first probe must time out so the good merge lands between its timeout and its merge"
+        );
+        assert!(
+            answer.is_ok(),
+            "a timeout older than a good merge must not refuse a valid store: {answer:?}"
+        );
+        {
+            let state = store.inner.lock().unwrap();
+            assert!(
+                !state.store_unavailable,
+                "the stale timeout latched the store"
+            );
+            assert!(
+                state.reload_failure_since.is_none() && state.stale_since.is_none(),
+                "the stale timeout re-opened the outage"
+            );
+            assert!(!state.reload_transient_done);
+        }
+        let mut state = store.inner.lock().unwrap();
+        let stale_generation = state.merge_generation.wrapping_sub(1);
+        assert!(TokenStore::merge_disk_probe(
+            &mut state,
+            &store.transient_flight,
+            stale_generation,
+            DiskProbe::UnchangedBad,
+        )
+        .is_ok());
+        assert!(!state.store_unavailable);
+        assert!(state.reload_failure_since.is_none());
+        drop(state);
+        release.send(()).expect("release probe");
+        assert!(store.wait_probe_threads_exited_for_test(Duration::from_secs(10)));
+        store.clear_probe_fast_fail_window_for_test();
+        write_tokens_revoking_writer(&path, true);
+        assert!(matches!(
+            store.verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan),
+            Err(TokenError::Revoked)
+        ));
+    }
+
     struct GraceOverride;
 
     impl GraceOverride {
@@ -2017,7 +2162,7 @@ mod tests {
             "the outage must start when the timeout was observed, not be backdated"
         );
 
-        store.wait_probe_fast_fail_window_closed_for_test();
+        store.clear_probe_fast_fail_window_for_test();
         let second = block_next_probe_delivery(&store);
         assert!(matches!(
             store.verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan),
@@ -2036,7 +2181,7 @@ mod tests {
         first.send(()).expect("release first probe");
         second.send(()).expect("release second probe");
         assert!(store.wait_probe_threads_exited_for_test(Duration::from_secs(10)));
-        store.wait_probe_fast_fail_window_closed_for_test();
+        store.clear_probe_fast_fail_window_for_test();
         store
             .verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan)
             .expect("a good probe ends the outage");
@@ -2075,8 +2220,10 @@ mod tests {
             .reload_failure_since
             .expect("timeout starts an outage");
 
-        std::thread::sleep((outage_start + grace / 2).saturating_duration_since(Instant::now()));
-        store.wait_probe_fast_fail_window_closed_for_test();
+        backdate_outage_for_test(&store, grace / 2);
+        let outage_start = outage_start - grace / 2;
+        let timeout_at = timeout_at - grace / 2;
+        store.clear_probe_fast_fail_window_for_test();
         let second = block_next_probe_delivery(&store);
         let second_called = Instant::now();
         assert!(matches!(
@@ -2096,8 +2243,9 @@ mod tests {
             assert_eq!(state.reload_failure_since, Some(outage_start));
         }
 
-        std::thread::sleep((outage_start + grace).saturating_duration_since(Instant::now()));
-        store.wait_probe_fast_fail_window_closed_for_test();
+        backdate_outage_for_test(&store, grace);
+        let outage_start = outage_start - grace;
+        store.clear_probe_fast_fail_window_for_test();
         let third = block_next_probe_delivery(&store);
         assert!(matches!(
             store.verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan),
@@ -2113,7 +2261,7 @@ mod tests {
         second.send(()).expect("release second probe");
         third.send(()).expect("release third probe");
         assert!(store.wait_probe_threads_exited_for_test(Duration::from_secs(10)));
-        store.wait_probe_fast_fail_window_closed_for_test();
+        store.clear_probe_fast_fail_window_for_test();
         store
             .verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan)
             .expect("a good probe ends the outage");
@@ -2142,21 +2290,28 @@ mod tests {
         let observed_timeout = stall_start + TokenStore::probe_delivery_deadline();
         let mut state = store.inner.lock().unwrap();
         let timed_out = TokenStore::timed_out_disk_probe(observed_timeout, stall_start);
-        assert!(
-            TokenStore::merge_disk_probe(&mut state, &store.transient_flight, timed_out).is_ok()
-        );
+        assert!(TokenStore::merge_at_current_generation(
+            &mut state,
+            &store.transient_flight,
+            timed_out
+        )
+        .is_ok());
         assert_eq!(state.stale_since, Some(stall_start));
         let later =
             TokenStore::timed_out_disk_probe(observed_timeout, observed_timeout + grace / 4);
-        assert!(TokenStore::merge_disk_probe(&mut state, &store.transient_flight, later).is_ok());
+        assert!(TokenStore::merge_at_current_generation(
+            &mut state,
+            &store.transient_flight,
+            later
+        )
+        .is_ok());
         assert_eq!(
             state.stale_since,
             Some(stall_start),
             "a later stall must not move the start the bound is measured from"
         );
 
-        let shift = Duration::ZERO;
-        let measured_from = stall_start + shift;
+        let measured_from = stall_start;
         assert!(
             TokenStore::enforce_max_stale_serve(&mut state, measured_from + bound).is_ok(),
             "an answer exactly at the bound is still served"
@@ -2207,11 +2362,18 @@ mod tests {
             "the abandoned first probe must exit so the second request can spawn its own"
         );
 
-        std::thread::sleep(
-            (stall_start + bound - Duration::from_millis(300))
-                .saturating_duration_since(Instant::now()),
-        );
-        store.wait_probe_fast_fail_window_closed_for_test();
+        let target_age = bound - Duration::from_millis(300);
+        let age = stall_start.elapsed();
+        let (stall_start, outage_start) = if age < target_age {
+            backdate_outage_for_test(&store, target_age - age);
+            (
+                stall_start - (target_age - age),
+                outage_start - (target_age - age),
+            )
+        } else {
+            (stall_start, outage_start)
+        };
+        store.clear_probe_fast_fail_window_for_test();
         let second = block_next_probe_delivery(&store);
         let second_called = Instant::now();
         assert!(
@@ -2230,7 +2392,7 @@ mod tests {
 
         second.send(()).expect("release second probe");
         assert!(store.wait_probe_threads_exited_for_test(Duration::from_secs(10)));
-        store.wait_probe_fast_fail_window_closed_for_test();
+        store.clear_probe_fast_fail_window_for_test();
         store
             .verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan)
             .expect("a good probe ends the outage");
@@ -2272,11 +2434,16 @@ mod tests {
         let first_start = Instant::now();
         let mut state = store.inner.lock().unwrap();
         let first = TokenStore::timed_out_disk_probe(first_start, first_start);
-        assert!(TokenStore::merge_disk_probe(&mut state, &store.transient_flight, first).is_ok());
+        assert!(TokenStore::merge_at_current_generation(
+            &mut state,
+            &store.transient_flight,
+            first
+        )
+        .is_ok());
         let later_start = first_start + grace / 2;
         let later = TokenStore::timed_out_disk_probe(later_start, first_start + grace);
         assert!(matches!(
-            TokenStore::merge_disk_probe(&mut state, &store.transient_flight, later),
+            TokenStore::merge_at_current_generation(&mut state, &store.transient_flight, later),
             Err(TokenError::StoreUnavailable)
         ));
         assert_eq!(state.reload_failure_since, Some(first_start));
@@ -2296,7 +2463,12 @@ mod tests {
             last_bad_read: outage_start + TokenStore::reload_grace_duration() / 2,
         };
         let mut state = store.inner.lock().unwrap();
-        assert!(TokenStore::merge_disk_probe(&mut state, &store.transient_flight, probe).is_ok());
+        assert!(TokenStore::merge_at_current_generation(
+            &mut state,
+            &store.transient_flight,
+            probe
+        )
+        .is_ok());
         assert!(
             !state.store_unavailable,
             "the file was last seen bad inside the grace, so merging late must not latch"
@@ -2464,7 +2636,7 @@ mod tests {
             "first hung probe call hung: the 10 s limit only catches a deadlock, not slowness"
         );
 
-        store.wait_probe_fast_fail_window_closed_for_test();
+        store.clear_probe_fast_fail_window_for_test();
         let second = block_next_probe_delivery(&store);
         let wall2 = Instant::now();
         assert!(matches!(
@@ -2482,7 +2654,7 @@ mod tests {
             store.wait_probe_threads_exited_for_test(Duration::from_secs(10)),
             "probe thread did not finish after it was released"
         );
-        store.wait_probe_fast_fail_window_closed_for_test();
+        store.clear_probe_fast_fail_window_for_test();
         write_tokens_revoking_writer(&path, false);
         store
             .verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan)
@@ -2663,7 +2835,7 @@ mod tests {
                 .expect_err("revoke must be visible immediately");
             if matches!(err, TokenError::StoreUnavailable) {
                 assert!(store.wait_probe_threads_exited_for_test(Duration::from_secs(10)));
-                store.wait_probe_fast_fail_window_closed_for_test();
+                store.clear_probe_fast_fail_window_for_test();
                 err = store
                     .verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan)
                     .expect_err("revoke must be visible once the stalled probe is gone");
