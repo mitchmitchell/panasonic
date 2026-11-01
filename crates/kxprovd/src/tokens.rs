@@ -2328,6 +2328,61 @@ mod tests {
     }
 
     #[test]
+    fn fast_bad_read_inside_grace_after_a_timeout_is_served_from_cache_and_does_not_latch() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("tokens.json");
+        write_tokens_revoking_writer(&path, false);
+        let store = TokenStore::load_insecure(path.clone()).expect("load");
+        let grace = TokenStore::reload_grace_duration();
+        let now = Instant::now();
+        let stall_start = now
+            .checked_sub(TokenStore::probe_delivery_deadline() + grace / 2)
+            .expect("backdate within Instant range");
+        let observed_timeout = stall_start + TokenStore::probe_delivery_deadline();
+        let mut state = store.inner.lock().unwrap();
+        assert!(TokenStore::merge_at_current_generation(
+            &mut state,
+            &store.transient_flight,
+            TokenStore::timed_out_disk_probe(observed_timeout, stall_start)
+        )
+        .is_ok());
+        assert!(!state.store_unavailable, "a single timeout must not latch");
+
+        let fast_bad = DiskProbe::StillBad {
+            fp: DiskFingerprint::Unreadable,
+            outage_start: now,
+            last_bad_read: now,
+        };
+        assert!(
+            TokenStore::merge_at_current_generation(&mut state, &store.transient_flight, fast_bad)
+                .is_ok(),
+            "a fast bad read half a grace after the timeout is served from cache"
+        );
+        assert!(
+            TokenStore::merge_at_current_generation(
+                &mut state,
+                &store.transient_flight,
+                DiskProbe::UnchangedBad
+            )
+            .is_ok(),
+            "an unchanged bad file half a grace after the timeout is served from cache"
+        );
+        assert!(TokenStore::enforce_max_stale_serve(&mut state, now).is_ok());
+        assert!(
+            !state.store_unavailable,
+            "reads inside the grace must not latch"
+        );
+        assert_eq!(state.reload_failure_since, Some(observed_timeout));
+        assert_eq!(state.stale_since, Some(stall_start));
+        let writer = TokenStore::find_entry(
+            &state.entries,
+            &hash_bearer_secret(crate::test_util::WRITER_SECRET),
+        )
+        .expect("cached entries are kept for serving");
+        assert!(!writer.revoked);
+    }
+
+    #[test]
     fn request_admitted_before_max_stale_serve_whose_probe_stalls_past_it_fails_closed() {
         let grace = Duration::from_millis(2000);
         let _grace = GraceOverride::set(grace);
