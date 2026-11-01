@@ -692,13 +692,13 @@ impl super::PortRelease for ProgrammingDevice<'_> {
     }
 }
 
-pub struct LeasedDevice<T: super::PortRelease> {
+pub struct LeasedDevice {
     line: ProgrammingLine,
-    lease: super::ProgrammingLease<T>,
+    lease: super::ProgrammingLease<()>,
 }
 
-impl<T: super::PortRelease> LeasedDevice<T> {
-    pub(crate) fn new(line: ProgrammingLine, lease: super::ProgrammingLease<T>) -> Self {
+impl LeasedDevice {
+    pub(crate) fn new(line: ProgrammingLine, lease: super::ProgrammingLease<()>) -> Self {
         Self { line, lease }
     }
 
@@ -727,7 +727,7 @@ impl<T: super::PortRelease> LeasedDevice<T> {
     }
 }
 
-impl<T: super::PortRelease> Transport for LeasedDevice<T> {
+impl Transport for LeasedDevice {
     fn send(&mut self, data: &[u8]) -> Result<(), TransportError> {
         self.line.send(data)
     }

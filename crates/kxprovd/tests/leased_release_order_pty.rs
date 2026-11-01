@@ -6,7 +6,7 @@
 
 use kxprovd::port::device::{LeasedDevice, SmdrLineOptions};
 use kxprovd::port::journal::LeaseJournal;
-use kxprovd::port::{DeviceLine, PortManager, PortMode};
+use kxprovd::port::{PortManager, PortMode};
 use kxprovd::smdr_reader::SmdrSource;
 use kxtd1232::{Transport, TransportError};
 use std::io::Write;
@@ -27,14 +27,14 @@ fn release_keeps_smdr_paused_until_dtr_drop_and_flush(how: Release) {
     let mut master = std::fs::File::from(p.master);
     let _slave = p.slave;
     let pm = Arc::new(PortManager::new(
-        DeviceLine,
+        (),
         LeaseJournal::new(dir.path().join("lease.jsonl")),
         1,
     ));
     let mut smdr = pm
         .open_smdr_device(&path, SmdrLineOptions::default())
         .unwrap();
-    let mut dev: LeasedDevice<DeviceLine> = pm
+    let mut dev: LeasedDevice = pm
         .open_leased_device(
             "job-order",
             Duration::from_secs(2),
@@ -106,11 +106,7 @@ fn line_speed_reads_b0_during_the_hold(path_kind: HoldPath) {
     let path = nix::unistd::ttyname(&p.slave).unwrap();
     let _master = std::fs::File::from(p.master);
     let slave = Arc::new(p.slave);
-    let pm = PortManager::new(
-        DeviceLine,
-        LeaseJournal::new(dir.path().join("lease.jsonl")),
-        1,
-    );
+    let pm = PortManager::new((), LeaseJournal::new(dir.path().join("lease.jsonl")), 1);
     let mut dev = pm
         .open_leased_device(
             "job-b0",

@@ -1,0 +1,18 @@
+error[E0277]: the trait bound `(): PortRelease` is not satisfied
+  --> tests/ui/arbiter_lease_not_transport.rs:11:21
+   |
+11 |     needs_transport(lease);
+   |     --------------- ^^^^^ the trait `PortRelease` is not implemented for `()`
+   |     |
+   |     required by a bound introduced by this call
+   |
+   = help: the following other types implement trait `PortRelease`:
+             ProgrammingDevice<'_>
+             ProgrammingLine
+             kxtd1232_sim::SimTransport
+   = note: required for `ProgrammingLease<()>` to implement `kxtd1232::Transport`
+note: required by a bound in `needs_transport`
+  --> tests/ui/arbiter_lease_not_transport.rs:4:23
+   |
+4  | fn needs_transport<T: Transport>(_: T) {}
+   |                       ^^^^^^^^^ required by this bound in `needs_transport`
