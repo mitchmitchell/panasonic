@@ -769,6 +769,27 @@ impl TokenStore {
         Self::reload_grace_duration().saturating_add(Self::PROBE_DELIVERY_SLACK)
     }
 
+    /// Worst-case time a stale or revoked cached entry can still be served,
+    /// measured from when the first stalled probe began.
+    ///
+    /// A stalled probe is abandoned after [`Self::probe_delivery_deadline`];
+    /// the outage starts when that timeout is observed, and cached entries are
+    /// served for a further [`Self::reload_grace_duration`] before bearer access
+    /// fails closed. That is `2 * RELOAD_GRACE + PROBE_DELIVERY_SLACK`, 4.3 s in
+    /// production. Saturates at [`Duration::MAX`] instead of panicking.
+    #[cfg_attr(
+        not(all(test, feature = "test-util")),
+        expect(
+            dead_code,
+            reason = "documents the stale-serve bound; only tests read it at runtime"
+        )
+    )]
+    fn max_stale_serve() -> Duration {
+        Self::probe_delivery_deadline()
+            .checked_add(Self::reload_grace_duration())
+            .unwrap_or(Duration::MAX)
+    }
+
     #[cfg(unix)]
     fn fifo_fingerprint(path: &Path) -> Option<DiskFingerprint> {
         use std::os::unix::fs::{FileTypeExt, MetadataExt};
@@ -2070,6 +2091,75 @@ mod tests {
             assert!(state.reload_failure_since.is_none());
         }
         assert_eq!(store.leaked_disk_probe_threads_for_test(), 0);
+    }
+
+    #[test]
+    fn max_stale_serve_is_two_graces_plus_delivery_slack() {
+        assert_eq!(TokenStore::max_stale_serve(), Duration::from_millis(4300));
+    }
+
+    #[test]
+    fn stale_serve_is_bounded_by_max_stale_serve_from_the_first_stall_start() {
+        let grace = Duration::from_millis(1000);
+        let _grace = GraceOverride::set(grace);
+        let bound = TokenStore::max_stale_serve();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("tokens.json");
+        write_tokens_revoking_writer(&path, false);
+        let store = TokenStore::load_insecure(path.clone()).expect("load");
+
+        let first = block_next_probe_delivery(&store);
+        let stall_start = Instant::now();
+        store
+            .verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan)
+            .expect("the first stall starts the grace; cached entries are served");
+
+        std::thread::sleep(
+            (stall_start + bound - grace / 2).saturating_duration_since(Instant::now()),
+        );
+        store.wait_probe_fast_fail_window_closed_for_test();
+        let second = block_next_probe_delivery(&store);
+        let second_called = Instant::now();
+        store
+            .verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan)
+            .expect("a stall that begins before the bound is served from cache");
+        assert!(
+            second_called < stall_start + bound,
+            "the second stall must begin before the bound for this check to mean anything"
+        );
+        assert!(!store.inner.lock().unwrap().store_unavailable);
+
+        std::thread::sleep((stall_start + bound).saturating_duration_since(Instant::now()));
+        store.wait_probe_fast_fail_window_closed_for_test();
+        let third = block_next_probe_delivery(&store);
+        let third_called = Instant::now();
+        assert!(matches!(
+            store.verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan),
+            Err(TokenError::StoreUnavailable)
+        ));
+        assert!(third_called >= stall_start + bound);
+        assert!(store.inner.lock().unwrap().store_unavailable);
+
+        first.send(()).expect("release first probe");
+        second.send(()).expect("release second probe");
+        third.send(()).expect("release third probe");
+        assert!(store.wait_probe_threads_exited_for_test(Duration::from_secs(10)));
+        store.wait_probe_fast_fail_window_closed_for_test();
+        store
+            .verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan)
+            .expect("a good probe ends the outage");
+        {
+            let state = store.inner.lock().unwrap();
+            assert!(!state.store_unavailable);
+            assert!(state.reload_failure_since.is_none());
+        }
+        assert_eq!(store.leaked_disk_probe_threads_for_test(), 0);
+
+        write_tokens_revoking_writer(&path, true);
+        assert!(matches!(
+            store.verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan),
+            Err(TokenError::Revoked)
+        ));
     }
 
     #[test]
