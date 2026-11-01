@@ -8,11 +8,12 @@ error[E0277]: the trait bound `SmdrHandle<SimTransport>: kxtd1232::Transport` is
    |
    = help: the following other types implement trait `kxtd1232::Transport`:
              AnyTransport
+             LeasedDevice
              ProgrammingDevice<'_>
              ProgrammingLease<T>
+             ProgrammingLine
              SimTransport
              SimTransportBridge
-             TokioSerialTransport
 note: required by a bound in `needs_transport`
   --> tests/ui/smdr_handle_not_transport.rs:5:23
    |

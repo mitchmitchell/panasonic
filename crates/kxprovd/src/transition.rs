@@ -125,8 +125,12 @@ pub fn caller_id_wire_digest(wire: &std::collections::HashMap<u8, Vec<u8>>) -> S
     hex::encode(h.finalize())
 }
 
-pub fn live_caller_id_digest(config: &Config) -> Result<String, TransitionError> {
-    let transport = open(config).map_err(TransitionError::Transport)?;
+pub fn live_caller_id_digest(
+    config: &Config,
+    port: &crate::port::DeviceArbiter,
+    holder: &str,
+) -> Result<String, TransitionError> {
+    let transport = open(config, port, holder).map_err(TransitionError::Transport)?;
     let mut client = crate::transport::client(config, transport, kxtd1232::frame::Access::ReadOnly);
     crate::transport::login(&mut client, &config.password)?;
     let mut wire = std::collections::HashMap::new();
@@ -138,15 +142,18 @@ pub fn live_caller_id_digest(config: &Config) -> Result<String, TransitionError>
     Ok(caller_id_wire_digest(&wire))
 }
 
+pub const SET_MODE_HOLDER: &str = "set-mode-production-verify";
+
 /// N2: entering Production — compare live 0x24/0x25 to latest **Production-mode** backup.
 pub fn verify_enter_production(
     config: &Config,
+    port: &crate::port::DeviceArbiter,
     backups: &BackupStore,
 ) -> Result<(), TransitionError> {
     let expected = backups
         .latest_prod_caller_id_digest()
         .ok_or(TransitionError::NoDigest)?;
-    let live = live_caller_id_digest(config)?;
+    let live = live_caller_id_digest(config, port, SET_MODE_HOLDER)?;
     if live != expected {
         return Err(TransitionError::Mismatch);
     }
@@ -155,10 +162,11 @@ pub fn verify_enter_production(
 
 pub fn verify_enter_production_or_block(
     config: &Config,
+    port: &crate::port::DeviceArbiter,
     backups: &BackupStore,
     transition: &TransitionBlockStore,
 ) -> Result<(), TransitionError> {
-    match verify_enter_production(config, backups) {
+    match verify_enter_production(config, port, backups) {
         Ok(()) => Ok(()),
         Err(e @ TransitionError::Mismatch) => {
             transition

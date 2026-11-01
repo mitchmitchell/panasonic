@@ -20,6 +20,7 @@ use tokio::sync::RwLock;
 
 pub struct WorkerCtx {
     pub config: Config,
+    pub port: Arc<crate::port::DeviceArbiter>,
     pub profile: Arc<RwLock<Profile>>,
     pub plans: PlanStore,
     pub backups: BackupStore,
@@ -116,9 +117,9 @@ pub(crate) fn log_pbx_error(e: &kxtd1232::Error) {
 
 async fn execute_job_inner(ctx: &WorkerCtx, job_id: &str, kind: JobKind) -> JobOutcome {
     match kind {
-        JobKind::ReadFields { params } => run_read(ctx, params).await,
-        JobKind::PlanChange { params, token_id } => run_plan(ctx, params, token_id).await,
-        JobKind::BackupNow { operational_mode } => run_backup(ctx, operational_mode).await,
+        JobKind::ReadFields { params } => run_read(ctx, job_id, params).await,
+        JobKind::PlanChange { params, token_id } => run_plan(ctx, job_id, params, token_id).await,
+        JobKind::BackupNow { operational_mode } => run_backup(ctx, job_id, operational_mode).await,
         JobKind::ApplyPlan {
             plan_id,
             diff_hash,
@@ -127,8 +128,12 @@ async fn execute_job_inner(ctx: &WorkerCtx, job_id: &str, kind: JobKind) -> JobO
     }
 }
 
-fn open_client(ctx: &WorkerCtx, access: Access) -> Result<Client<AnyTransport>, JobOutcome> {
-    let transport = open(&ctx.config).map_err(|e| JobOutcome::Err {
+fn open_client(
+    ctx: &WorkerCtx,
+    job_id: &str,
+    access: Access,
+) -> Result<Client<AnyTransport>, JobOutcome> {
+    let transport = open(&ctx.config, &ctx.port, job_id).map_err(|e| JobOutcome::Err {
         code: "transport".into(),
         message: e,
     })?;
@@ -137,9 +142,10 @@ fn open_client(ctx: &WorkerCtx, access: Access) -> Result<Client<AnyTransport>, 
 
 fn with_client<T>(
     ctx: &WorkerCtx,
+    job_id: &str,
     f: impl FnOnce(&mut Client<AnyTransport>) -> Result<T, kxtd1232::Error>,
 ) -> Result<T, JobOutcome> {
-    let mut client = open_client(ctx, Access::ReadOnly)?;
+    let mut client = open_client(ctx, job_id, Access::ReadOnly)?;
     f(&mut client).map_err(|e| {
         log_pbx_error(&e);
         JobOutcome::Err {
@@ -149,7 +155,11 @@ fn with_client<T>(
     })
 }
 
-async fn run_read(ctx: &WorkerCtx, params: kxprov_api::ReadFieldsParams) -> JobOutcome {
+async fn run_read(
+    ctx: &WorkerCtx,
+    job_id: &str,
+    params: kxprov_api::ReadFieldsParams,
+) -> JobOutcome {
     let kind = field_kind_wire(params.kind);
     if u32::from(params.first) + u32::from(params.count) > u32::from(kind.records()) {
         return JobOutcome::Err {
@@ -160,7 +170,7 @@ async fn run_read(ctx: &WorkerCtx, params: kxprov_api::ReadFieldsParams) -> JobO
     let pwd = ctx.config.password.clone();
     let first = params.first;
     let count = params.count;
-    let rows = match with_client(ctx, |c| {
+    let rows = match with_client(ctx, job_id, |c| {
         crate::transport::login(c, &pwd)?;
         let raw = c.read_records(kind.table(), first, count)?;
         let _ = c.end_binary();
@@ -191,6 +201,7 @@ async fn run_read(ctx: &WorkerCtx, params: kxprov_api::ReadFieldsParams) -> JobO
 
 async fn run_plan(
     ctx: &WorkerCtx,
+    job_id: &str,
     params: kxprov_api::PlanChangeParams,
     token_id: TokenId,
 ) -> JobOutcome {
@@ -213,7 +224,7 @@ async fn run_plan(
         };
     }
     let pwd = ctx.config.password.clone();
-    let plan = match with_client(ctx, |c| {
+    let plan = match with_client(ctx, job_id, |c| {
         crate::transport::login(c, &pwd)?;
         let base = c.read_table(kind.table())?;
         let plan = build_plan(kind.table(), &base, &[patch], Granularity::Chunk)?;
@@ -245,7 +256,11 @@ async fn run_plan(
     })
 }
 
-async fn run_backup(ctx: &WorkerCtx, operational_mode: OperationalMode) -> JobOutcome {
+async fn run_backup(
+    ctx: &WorkerCtx,
+    worker_job_id: &str,
+    operational_mode: OperationalMode,
+) -> JobOutcome {
     let job_id = crate::queue::next_job_id();
     let temp = ctx
         .config
@@ -256,7 +271,7 @@ async fn run_backup(ctx: &WorkerCtx, operational_mode: OperationalMode) -> JobOu
         temp_path: temp.display().to_string(),
     });
     let pwd = ctx.config.password.clone();
-    let transport = match open(&ctx.config) {
+    let transport = match open(&ctx.config, &ctx.port, worker_job_id) {
         Ok(t) => t,
         Err(e) => {
             return JobOutcome::Err {
@@ -407,12 +422,16 @@ async fn run_apply_job(
     }
     match run_apply(
         &ctx.config,
+        &ctx.port,
         profile,
         &ctx.plans,
         &ctx.backups,
-        &plan_id,
-        &diff_hash,
-        &token_id,
+        crate::apply::ApplyJob {
+            job_id,
+            plan_id: &plan_id,
+            diff_hash: &diff_hash,
+            token: &token_id,
+        },
     ) {
         Ok(_blocks) => {
             if let Err(e) = ctx.plans.mark_applied(&plan_id, now_ms()) {
@@ -507,6 +526,7 @@ mod prod_gate_tests {
         }
         let cfg = Config::sim_test(data.clone(), data.join("kxprovd.sock"), 1000);
         WorkerCtx {
+            port: crate::transport::device_arbiter(&cfg),
             config: cfg,
             profile: Arc::new(RwLock::new(Profile::Prod)),
             plans: PlanStore::new(data.join("plans")).expect("plans"),
@@ -530,7 +550,7 @@ mod prod_gate_tests {
         let mut ctx = test_worker_ctx(&tmp, false);
         ctx.config.password = "not-the-sim-password".into();
         let (cap, guard) = super::log_redaction_tests::capture();
-        let outcome = run_backup(&ctx, OperationalMode::Testing).await;
+        let outcome = run_backup(&ctx, "job-test", OperationalMode::Testing).await;
         drop(guard);
         let out = cap.text();
         assert!(

@@ -7,6 +7,8 @@ use kxprov_api::{DiffHash, PlanId, Profile};
 
 pub fn verify_live_diff_hash(
     config: &Config,
+    port: &crate::port::DeviceArbiter,
+    holder: &str,
     profile: Profile,
     plans: &PlanStore,
     plan_id: &PlanId,
@@ -16,7 +18,7 @@ pub fn verify_live_diff_hash(
     if rec.diff_hash != *expected {
         return Err(PlanError::DiffMismatch);
     }
-    let transport = open(config).map_err(|_| PlanError::NotFound)?;
+    let transport = open(config, port, holder).map_err(|_| PlanError::NotFound)?;
     let mut client = crate::transport::client(config, transport, kxtd1232::frame::Access::ReadOnly);
     crate::transport::login(&mut client, &config.password).map_err(|_| PlanError::NotFound)?;
     let table = client

@@ -9,21 +9,24 @@ mod sim;
 pub use sim::SimTransportBridge;
 
 #[cfg(target_os = "linux")]
-pub use serial::TokioSerialTransport;
+pub use serial::{open_leased, SerialTransport, SHARED_PORT_BAUD};
 #[cfg(target_os = "linux")]
 pub(crate) use serial::{recv_with_poll, send_all_port};
 
 #[cfg(not(target_os = "linux"))]
-pub use serial_stub::TokioSerialTransport;
+pub use serial_stub::SerialTransport;
 
 use crate::config::{Config, TransportKind};
+use crate::port::journal::LeaseJournal;
+use crate::port::{DeviceArbiter, PortManager, DEFAULT_MAX_LEASE_WAITERS};
 use kxtd1232::frame::Access;
 use kxtd1232::{Client, Transport};
+use std::sync::Arc;
 
 pub enum AnyTransport {
     #[cfg(feature = "inprocess-sim")]
     Sim(Box<SimTransportBridge>),
-    Serial(TokioSerialTransport),
+    Serial(Box<SerialTransport>),
 }
 
 impl Transport for AnyTransport {
@@ -68,7 +71,15 @@ impl Transport for AnyTransport {
     }
 }
 
-pub fn open(config: &Config) -> Result<AnyTransport, String> {
+pub fn device_arbiter(config: &Config) -> Arc<DeviceArbiter> {
+    Arc::new(PortManager::new(
+        (),
+        LeaseJournal::new(config.data_dir.join("port-lease.jsonl")),
+        DEFAULT_MAX_LEASE_WAITERS,
+    ))
+}
+
+pub fn open(config: &Config, port: &DeviceArbiter, job_id: &str) -> Result<AnyTransport, String> {
     match config.transport {
         TransportKind::Sim => {
             #[cfg(feature = "inprocess-sim")]
@@ -84,13 +95,33 @@ pub fn open(config: &Config) -> Result<AnyTransport, String> {
                 Err("in-process sim transport not enabled in this build".into())
             }
         }
-        TransportKind::Serial => TokioSerialTransport::open(
-            &config.serial_device,
-            config.timing.link_baud,
-            config.timing.send_bound_ms,
-        )
-        .map(AnyTransport::Serial),
+        TransportKind::Serial => open_serial(config, port, job_id),
     }
+}
+
+#[cfg(target_os = "linux")]
+fn open_serial(
+    config: &Config,
+    port: &DeviceArbiter,
+    job_id: &str,
+) -> Result<AnyTransport, String> {
+    open_leased(
+        port,
+        &config.serial_device,
+        job_id,
+        config.timing.link_baud,
+        config.timing.send_bound_ms,
+    )
+    .map(|t| AnyTransport::Serial(Box::new(t)))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn open_serial(
+    _config: &Config,
+    _port: &DeviceArbiter,
+    _job_id: &str,
+) -> Result<AnyTransport, String> {
+    Err("serial transport requires Linux".into())
 }
 
 pub fn login(client: &mut Client<AnyTransport>, password: &str) -> Result<(), kxtd1232::Error> {

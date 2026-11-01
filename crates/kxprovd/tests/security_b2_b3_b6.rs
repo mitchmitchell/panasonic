@@ -43,7 +43,12 @@ async fn b2_stale_testing_mode_backup_ignored_for_prod_transition() {
             tmp.path().join("kxprovd.sock"),
             uid,
         );
-        kxprovd::transition::live_caller_id_digest(&cfg).unwrap()
+        kxprovd::transition::live_caller_id_digest(
+            &cfg,
+            &kxprovd::transport::device_arbiter(&cfg),
+            "test",
+        )
+        .unwrap()
     };
     write_testing_mode_backup_meta(&test_root.join("backups"), &live_digest);
 

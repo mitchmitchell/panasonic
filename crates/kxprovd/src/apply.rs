@@ -31,15 +31,27 @@ pub enum ApplyError {
     Transport(String),
 }
 
+pub struct ApplyJob<'a> {
+    pub job_id: &'a str,
+    pub plan_id: &'a kxprov_api::PlanId,
+    pub diff_hash: &'a kxprov_api::DiffHash,
+    pub token: &'a kxprov_api::TokenId,
+}
+
 pub fn run_apply(
     config: &Config,
+    port: &crate::port::DeviceArbiter,
     profile: Profile,
     plans: &PlanStore,
     backups: &BackupStore,
-    plan_id: &kxprov_api::PlanId,
-    diff_hash: &kxprov_api::DiffHash,
-    token: &kxprov_api::TokenId,
+    job: ApplyJob<'_>,
 ) -> Result<usize, ApplyError> {
+    let ApplyJob {
+        job_id,
+        plan_id,
+        diff_hash,
+        token,
+    } = job;
     let sim_transport = config.transport == crate::config::TransportKind::Sim;
     if !sim_transport {
         return Err(ApplyError::NotSim);
@@ -48,7 +60,7 @@ pub fn run_apply(
     let now = now_ms();
     let rec = plans.verify_for_apply(plan_id, diff_hash, profile, token, now)?;
     backups.require_backup_for_write(profile)?;
-    verify_live_diff_hash(config, profile, plans, plan_id, diff_hash)?;
+    verify_live_diff_hash(config, port, job_id, profile, plans, plan_id, diff_hash)?;
     let writes: Vec<ChunkWrite> = rec
         .writes
         .iter()
@@ -61,7 +73,7 @@ pub fn run_apply(
         })
         .collect();
     let pwd = config.password.clone();
-    let transport = open(config).map_err(ApplyError::Transport)?;
+    let transport = open(config, port, job_id).map_err(ApplyError::Transport)?;
     let mut client = crate::transport::client(config, transport, Access::ReadWrite);
     crate::transport::login(&mut client, &pwd)?;
     for w in &writes {
