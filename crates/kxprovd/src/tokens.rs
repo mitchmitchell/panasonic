@@ -1741,6 +1741,33 @@ mod tests {
     use super::*;
     use kxprov_api::hash_bearer_secret;
 
+    const TEST_BODY_BOUND: Duration = Duration::from_secs(60);
+
+    /// Runs a test body on its own thread and fails the test if it has not
+    /// finished within [`TEST_BODY_BOUND`], so a blocking wait that never
+    /// returns becomes a failure instead of hanging the suite. The bound is a
+    /// safety net for hangs, not a timing assertion.
+    fn run_bounded(body: impl FnOnce() + Send + 'static) {
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+        let handle = std::thread::Builder::new()
+            .name("bounded-test-body".into())
+            .spawn(move || {
+                let _signals_done_on_drop = done_tx;
+                body();
+            })
+            .expect("spawn test body thread");
+        if let Err(std::sync::mpsc::RecvTimeoutError::Timeout) =
+            done_rx.recv_timeout(TEST_BODY_BOUND)
+        {
+            panic!(
+                "test body did not finish within {TEST_BODY_BOUND:?}: a blocking wait never returned"
+            );
+        }
+        if let Err(payload) = handle.join() {
+            std::panic::resume_unwind(payload);
+        }
+    }
+
     #[test]
     fn approve_scope_requires_configured_cos_token_id() {
         let file = TokensFile {
@@ -1889,130 +1916,134 @@ mod tests {
 
     #[test]
     fn probe_exiting_while_abandon_holds_the_lock_leaves_no_refcount() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let path = tmp.path().join("tokens.json");
-        write_tokens_revoking_writer(&path, false);
-        let store = TokenStore::load_insecure(path.clone()).expect("load");
-        let ticket = arm_active_probe(&store, &path);
-        let (at_lock_tx, at_lock_rx) = std::sync::mpsc::channel();
-        *ticket.exit_lock_hook.lock().unwrap() = Some(Box::new(move || {
-            at_lock_tx.send(()).unwrap();
-        }));
-        let watched = Arc::clone(&ticket);
-        let exiter_store = store.clone();
-        let (done_tx, done_rx) = std::sync::mpsc::channel();
-        let done_rx = Arc::new(Mutex::new(done_rx));
-        let hook_rx = Arc::clone(&done_rx);
-        let exiter = Arc::new(Mutex::new(None));
-        let exiter_slot = Arc::clone(&exiter);
-        *store.abandon_hook.lock().unwrap() = Some(Box::new(move || {
-            *exiter_slot.lock().unwrap() = Some(std::thread::spawn(move || {
-                probe_thread_exit(&exiter_store, ticket);
-                done_tx.send(()).unwrap();
+        run_bounded(|| {
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let path = tmp.path().join("tokens.json");
+            write_tokens_revoking_writer(&path, false);
+            let store = TokenStore::load_insecure(path.clone()).expect("load");
+            let ticket = arm_active_probe(&store, &path);
+            let (at_lock_tx, at_lock_rx) = std::sync::mpsc::channel();
+            *ticket.exit_lock_hook.lock().unwrap() = Some(Box::new(move || {
+                at_lock_tx.send(()).unwrap();
             }));
-            assert!(
+            let watched = Arc::clone(&ticket);
+            let exiter_store = store.clone();
+            let (done_tx, done_rx) = std::sync::mpsc::channel();
+            let done_rx = Arc::new(Mutex::new(done_rx));
+            let hook_rx = Arc::clone(&done_rx);
+            let exiter = Arc::new(Mutex::new(None));
+            let exiter_slot = Arc::clone(&exiter);
+            *store.abandon_hook.lock().unwrap() = Some(Box::new(move || {
+                *exiter_slot.lock().unwrap() = Some(std::thread::spawn(move || {
+                    probe_thread_exit(&exiter_store, ticket);
+                    done_tx.send(()).unwrap();
+                }));
+                assert!(
                 at_lock_rx.recv_timeout(Duration::from_secs(10)).is_ok(),
                 "exiting probe never reached the refcount lock: the 10 s limit only catches a deadlock"
             );
-            assert!(
-                !watched.exited.load(Ordering::Acquire),
-                "probe marked itself exited before taking the refcount lock"
-            );
-            assert!(
-                hook_rx
-                    .lock()
-                    .unwrap()
-                    .recv_timeout(Duration::from_secs(2))
-                    .is_err(),
-                "probe exit finished while abandon held the refcount lock"
-            );
-        }));
-        store.abandon_stuck_probe();
-        let handle = exiter.lock().unwrap().take().expect("hook ran");
-        handle.join().expect("exiter");
-        done_rx.lock().unwrap().recv().expect("exiter finished");
-        assert_eq!(store.leaked_disk_probe_threads_for_test(), 0);
-        assert!(!store.disk_probe_spawn_denied(&path));
+                assert!(
+                    !watched.exited.load(Ordering::Acquire),
+                    "probe marked itself exited before taking the refcount lock"
+                );
+                assert!(
+                    hook_rx
+                        .lock()
+                        .unwrap()
+                        .recv_timeout(Duration::from_secs(2))
+                        .is_err(),
+                    "probe exit finished while abandon held the refcount lock"
+                );
+            }));
+            store.abandon_stuck_probe();
+            let handle = exiter.lock().unwrap().take().expect("hook ran");
+            handle.join().expect("exiter");
+            done_rx.lock().unwrap().recv().expect("exiter finished");
+            assert_eq!(store.leaked_disk_probe_threads_for_test(), 0);
+            assert!(!store.disk_probe_spawn_denied(&path));
+        });
     }
 
     #[test]
     fn probe_slot_is_held_until_the_result_is_merged_then_freed() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let path = tmp.path().join("tokens.json");
-        write_tokens_revoking_writer(&path, false);
-        let store = TokenStore::load_insecure(path.clone()).expect("load");
-        let live_before_send = Arc::new(AtomicUsize::new(usize::MAX));
-        let second_probe_started = Arc::new(AtomicBool::new(true));
-        {
-            let live = Arc::clone(&live_before_send);
-            let started = Arc::clone(&second_probe_started);
-            let probing = store.clone();
-            let probe_path = path.clone();
-            *store.before_send_hook.lock().unwrap() = Some(Box::new(move || {
-                live.store(
-                    probing.disk_probe_live.load(Ordering::Acquire),
-                    Ordering::Release,
+        run_bounded(|| {
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let path = tmp.path().join("tokens.json");
+            write_tokens_revoking_writer(&path, false);
+            let store = TokenStore::load_insecure(path.clone()).expect("load");
+            let live_before_send = Arc::new(AtomicUsize::new(usize::MAX));
+            let second_probe_started = Arc::new(AtomicBool::new(true));
+            {
+                let live = Arc::clone(&live_before_send);
+                let started = Arc::clone(&second_probe_started);
+                let probing = store.clone();
+                let probe_path = path.clone();
+                *store.before_send_hook.lock().unwrap() = Some(Box::new(move || {
+                    live.store(
+                        probing.disk_probe_live.load(Ordering::Acquire),
+                        Ordering::Release,
+                    );
+                    let ticket = ProbeTicket::new(path_identity(&probe_path));
+                    let second = probing.try_begin_disk_probe(
+                        &probe_path,
+                        Arc::new(AtomicBool::new(false)),
+                        &ticket,
+                    );
+                    started.store(second.is_some(), Ordering::Release);
+                }));
+            }
+            let live_at_merge = Arc::new(AtomicUsize::new(usize::MAX));
+            {
+                let live = Arc::clone(&live_at_merge);
+                let merging = store.clone();
+                *store.after_merge_hook.lock().unwrap() = Some(Box::new(move || {
+                    live.store(
+                        merging.disk_probe_live.load(Ordering::Acquire),
+                        Ordering::Release,
+                    );
+                }));
+            }
+            let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+            *store.after_send_hook.lock().unwrap() = Some(Box::new(move || {
+                assert!(
+                    release_rx.recv_timeout(Duration::from_secs(10)).is_ok(),
+                    "test never released the probe thread: the 10 s limit only catches a deadlock"
                 );
-                let ticket = ProbeTicket::new(path_identity(&probe_path));
-                let second = probing.try_begin_disk_probe(
-                    &probe_path,
-                    Arc::new(AtomicBool::new(false)),
-                    &ticket,
-                );
-                started.store(second.is_some(), Ordering::Release);
             }));
-        }
-        let live_at_merge = Arc::new(AtomicUsize::new(usize::MAX));
-        {
-            let live = Arc::clone(&live_at_merge);
-            let merging = store.clone();
-            *store.after_merge_hook.lock().unwrap() = Some(Box::new(move || {
-                live.store(
-                    merging.disk_probe_live.load(Ordering::Acquire),
-                    Ordering::Release,
-                );
-            }));
-        }
-        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
-        *store.after_send_hook.lock().unwrap() = Some(Box::new(move || {
-            assert!(
-                release_rx.recv_timeout(Duration::from_secs(10)).is_ok(),
-                "test never released the probe thread: the 10 s limit only catches a deadlock"
+            write_tokens_revoking_writer(&path, true);
+            assert!(matches!(
+                store.verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan),
+                Err(TokenError::Revoked)
+            ));
+            let live_after_merge = store.disk_probe_live.load(Ordering::Acquire);
+            let threads_after_merge = store.live_disk_probe_threads_for_test();
+            release_tx.send(()).expect("release probe thread");
+            assert!(store.wait_probe_threads_exited_for_test(Duration::from_secs(10)));
+            assert_eq!(
+                live_before_send.load(Ordering::Acquire),
+                1,
+                "the probe slot was free before the result was delivered"
             );
-        }));
-        write_tokens_revoking_writer(&path, true);
-        assert!(matches!(
-            store.verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan),
-            Err(TokenError::Revoked)
-        ));
-        let live_after_merge = store.disk_probe_live.load(Ordering::Acquire);
-        let threads_after_merge = store.live_disk_probe_threads_for_test();
-        release_tx.send(()).expect("release probe thread");
-        assert!(store.wait_probe_threads_exited_for_test(Duration::from_secs(10)));
-        assert_eq!(
-            live_before_send.load(Ordering::Acquire),
-            1,
-            "the probe slot was free before the result was delivered"
-        );
-        assert_eq!(
-            live_at_merge.load(Ordering::Acquire),
-            1,
-            "the probe slot was free before the result was merged"
-        );
-        assert!(
-            !second_probe_started.load(Ordering::Acquire),
-            "a second probe started while the first result was undelivered"
-        );
-        assert_eq!(
-            live_after_merge, 0,
-            "the probe slot stayed busy after the result was merged"
-        );
-        assert_eq!(
-            threads_after_merge, 0,
-            "a finished probe thread still counted as alive after sending its result"
-        );
-        assert!(store.active_probe_abandon.lock().unwrap().is_none());
-        assert!(store.probe_path_identity.lock().unwrap().is_none());
+            assert_eq!(
+                live_at_merge.load(Ordering::Acquire),
+                1,
+                "the probe slot was free before the result was merged"
+            );
+            assert!(
+                !second_probe_started.load(Ordering::Acquire),
+                "a second probe started while the first result was undelivered"
+            );
+            assert_eq!(
+                live_after_merge, 0,
+                "the probe slot stayed busy after the result was merged"
+            );
+            assert_eq!(
+                threads_after_merge, 0,
+                "a finished probe thread still counted as alive after sending its result"
+            );
+            assert!(store.active_probe_abandon.lock().unwrap().is_none());
+            assert!(store.probe_path_identity.lock().unwrap().is_none());
+        });
     }
 
     impl TokenStore {
@@ -2108,81 +2139,83 @@ mod tests {
 
     #[test]
     fn timed_out_merge_after_a_newer_good_merge_does_not_reopen_the_outage() {
-        let grace = Duration::from_millis(50);
-        let _grace = GraceOverride::set(grace);
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let path = tmp.path().join("tokens.json");
-        write_tokens_revoking_writer(&path, false);
-        let store = TokenStore::load_insecure(path.clone()).expect("load");
-        {
-            let mut state = store.inner.lock().unwrap();
-            let start = Instant::now()
-                .checked_sub(grace * 4)
-                .expect("backdate within Instant range");
-            state.reload_failure_since = Some(start);
-            state.stale_since = Some(start);
-            state.reload_transient_done = true;
-            state.reload_failed_disk_fingerprint = Some(DiskFingerprint::Unreadable);
-        }
-        let release = block_next_probe_delivery(&store);
-        let good_merged = Arc::new(AtomicBool::new(false));
-        {
-            let merging = store.clone();
-            let good_path = path.clone();
-            let merged = Arc::clone(&good_merged);
-            *store.after_timeout_hook.lock().unwrap() = Some(Box::new(move || {
-                let raw = std::fs::read(&good_path).expect("read good tokens");
-                let mut state = merging.inner.lock().unwrap();
-                TokenStore::merge_at_current_generation(
-                    &mut state,
-                    &merging.transient_flight,
-                    DiskProbe::Ok(raw),
-                )
-                .expect("good merge");
-                merged.store(true, Ordering::Release);
-            }));
-        }
-        let answer = store.verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan);
-        assert!(
+        run_bounded(|| {
+            let grace = Duration::from_millis(50);
+            let _grace = GraceOverride::set(grace);
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let path = tmp.path().join("tokens.json");
+            write_tokens_revoking_writer(&path, false);
+            let store = TokenStore::load_insecure(path.clone()).expect("load");
+            {
+                let mut state = store.inner.lock().unwrap();
+                let start = Instant::now()
+                    .checked_sub(grace * 4)
+                    .expect("backdate within Instant range");
+                state.reload_failure_since = Some(start);
+                state.stale_since = Some(start);
+                state.reload_transient_done = true;
+                state.reload_failed_disk_fingerprint = Some(DiskFingerprint::Unreadable);
+            }
+            let release = block_next_probe_delivery(&store);
+            let good_merged = Arc::new(AtomicBool::new(false));
+            {
+                let merging = store.clone();
+                let good_path = path.clone();
+                let merged = Arc::clone(&good_merged);
+                *store.after_timeout_hook.lock().unwrap() = Some(Box::new(move || {
+                    let raw = std::fs::read(&good_path).expect("read good tokens");
+                    let mut state = merging.inner.lock().unwrap();
+                    TokenStore::merge_at_current_generation(
+                        &mut state,
+                        &merging.transient_flight,
+                        DiskProbe::Ok(raw),
+                    )
+                    .expect("good merge");
+                    merged.store(true, Ordering::Release);
+                }));
+            }
+            let answer = store.verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan);
+            assert!(
             good_merged.load(Ordering::Acquire),
             "the first probe must time out so the good merge lands between its timeout and its merge"
         );
-        assert!(
-            answer.is_ok(),
-            "a timeout older than a good merge must not refuse a valid store: {answer:?}"
-        );
-        {
-            let state = store.inner.lock().unwrap();
             assert!(
-                !state.store_unavailable,
-                "the stale timeout latched the store"
+                answer.is_ok(),
+                "a timeout older than a good merge must not refuse a valid store: {answer:?}"
             );
-            assert!(
-                state.reload_failure_since.is_none() && state.stale_since.is_none(),
-                "the stale timeout re-opened the outage"
-            );
-            assert!(!state.reload_transient_done);
-        }
-        let mut state = store.inner.lock().unwrap();
-        let stale_generation = state.merge_generation.wrapping_sub(1);
-        assert!(TokenStore::merge_disk_probe(
-            &mut state,
-            &store.transient_flight,
-            stale_generation,
-            DiskProbe::UnchangedBad,
-        )
-        .is_ok());
-        assert!(!state.store_unavailable);
-        assert!(state.reload_failure_since.is_none());
-        drop(state);
-        release.send(()).expect("release probe");
-        assert!(store.wait_probe_threads_exited_for_test(Duration::from_secs(10)));
-        store.clear_probe_fast_fail_window_for_test();
-        write_tokens_revoking_writer(&path, true);
-        assert!(matches!(
-            store.verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan),
-            Err(TokenError::Revoked)
-        ));
+            {
+                let state = store.inner.lock().unwrap();
+                assert!(
+                    !state.store_unavailable,
+                    "the stale timeout latched the store"
+                );
+                assert!(
+                    state.reload_failure_since.is_none() && state.stale_since.is_none(),
+                    "the stale timeout re-opened the outage"
+                );
+                assert!(!state.reload_transient_done);
+            }
+            let mut state = store.inner.lock().unwrap();
+            let stale_generation = state.merge_generation.wrapping_sub(1);
+            assert!(TokenStore::merge_disk_probe(
+                &mut state,
+                &store.transient_flight,
+                stale_generation,
+                DiskProbe::UnchangedBad,
+            )
+            .is_ok());
+            assert!(!state.store_unavailable);
+            assert!(state.reload_failure_since.is_none());
+            drop(state);
+            release.send(()).expect("release probe");
+            assert!(store.wait_probe_threads_exited_for_test(Duration::from_secs(10)));
+            store.clear_probe_fast_fail_window_for_test();
+            write_tokens_revoking_writer(&path, true);
+            assert!(matches!(
+                store.verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan),
+                Err(TokenError::Revoked)
+            ));
+        });
     }
 
     struct GraceOverride;
@@ -2213,64 +2246,66 @@ mod tests {
 
     #[test]
     fn probe_timeout_is_an_outage_from_the_observed_timeout_with_normal_grace() {
-        let _grace = GraceOverride::set(Duration::from_millis(50));
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let path = tmp.path().join("tokens.json");
-        write_tokens_revoking_writer(&path, false);
-        let store = TokenStore::load_insecure(path.clone()).expect("load");
+        run_bounded(|| {
+            let _grace = GraceOverride::set(Duration::from_millis(50));
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let path = tmp.path().join("tokens.json");
+            write_tokens_revoking_writer(&path, false);
+            let store = TokenStore::load_insecure(path.clone()).expect("load");
 
-        let first = block_next_probe_delivery(&store);
-        let before_first = Instant::now();
-        store
-            .verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan)
-            .expect("an undelivered probe starts the grace; cached entries are served");
-        let outage_start = {
-            let state = store.inner.lock().unwrap();
-            assert!(!state.store_unavailable, "a first timeout must not latch");
-            state
-                .reload_failure_since
-                .expect("timeout starts an outage")
-        };
-        assert!(
-            outage_start >= before_first + TokenStore::probe_delivery_deadline(),
-            "the outage must start when the timeout was observed, not be backdated"
-        );
-
-        store.clear_probe_fast_fail_window_for_test();
-        let second = block_next_probe_delivery(&store);
-        assert!(matches!(
-            store.verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan),
-            Err(TokenError::StoreUnavailable)
-        ));
-        {
-            let state = store.inner.lock().unwrap();
-            assert!(state.store_unavailable, "past the grace it fails closed");
-            assert_eq!(
-                state.reload_failure_since,
-                Some(outage_start),
-                "a second timeout must not move the outage start"
+            let first = block_next_probe_delivery(&store);
+            let before_first = Instant::now();
+            store
+                .verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan)
+                .expect("an undelivered probe starts the grace; cached entries are served");
+            let outage_start = {
+                let state = store.inner.lock().unwrap();
+                assert!(!state.store_unavailable, "a first timeout must not latch");
+                state
+                    .reload_failure_since
+                    .expect("timeout starts an outage")
+            };
+            assert!(
+                outage_start >= before_first + TokenStore::probe_delivery_deadline(),
+                "the outage must start when the timeout was observed, not be backdated"
             );
-        }
 
-        first.send(()).expect("release first probe");
-        second.send(()).expect("release second probe");
-        assert!(store.wait_probe_threads_exited_for_test(Duration::from_secs(10)));
-        store.clear_probe_fast_fail_window_for_test();
-        store
-            .verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan)
-            .expect("a good probe ends the outage");
-        {
-            let state = store.inner.lock().unwrap();
-            assert!(!state.store_unavailable);
-            assert!(state.reload_failure_since.is_none());
-        }
-        assert_eq!(store.leaked_disk_probe_threads_for_test(), 0);
+            store.clear_probe_fast_fail_window_for_test();
+            let second = block_next_probe_delivery(&store);
+            assert!(matches!(
+                store.verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan),
+                Err(TokenError::StoreUnavailable)
+            ));
+            {
+                let state = store.inner.lock().unwrap();
+                assert!(state.store_unavailable, "past the grace it fails closed");
+                assert_eq!(
+                    state.reload_failure_since,
+                    Some(outage_start),
+                    "a second timeout must not move the outage start"
+                );
+            }
 
-        write_tokens_revoking_writer(&path, true);
-        assert!(matches!(
-            store.verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan),
-            Err(TokenError::Revoked)
-        ));
+            first.send(()).expect("release first probe");
+            second.send(()).expect("release second probe");
+            assert!(store.wait_probe_threads_exited_for_test(Duration::from_secs(10)));
+            store.clear_probe_fast_fail_window_for_test();
+            store
+                .verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan)
+                .expect("a good probe ends the outage");
+            {
+                let state = store.inner.lock().unwrap();
+                assert!(!state.store_unavailable);
+                assert!(state.reload_failure_since.is_none());
+            }
+            assert_eq!(store.leaked_disk_probe_threads_for_test(), 0);
+
+            write_tokens_revoking_writer(&path, true);
+            assert!(matches!(
+                store.verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan),
+                Err(TokenError::Revoked)
+            ));
+        });
     }
 
     /// Merges a first stall that began half a grace plus one delivery
@@ -2322,54 +2357,56 @@ mod tests {
 
     #[test]
     fn stall_after_a_timeout_is_admitted_inside_grace_but_fails_closed_past_max_stale_serve() {
-        let grace = Duration::from_millis(1000);
-        let _grace = GraceOverride::set(grace);
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let path = tmp.path().join("tokens.json");
-        write_tokens_revoking_writer(&path, false);
-        let store = TokenStore::load_insecure(path.clone()).expect("load");
-        let (stall_start, outage_start) = seed_first_stall_half_a_grace_ago(&store);
+        run_bounded(|| {
+            let grace = Duration::from_millis(1000);
+            let _grace = GraceOverride::set(grace);
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let path = tmp.path().join("tokens.json");
+            write_tokens_revoking_writer(&path, false);
+            let store = TokenStore::load_insecure(path.clone()).expect("load");
+            let (stall_start, outage_start) = seed_first_stall_half_a_grace_ago(&store);
 
-        let (answer, waits, second) = verify_with_hung_probe(&store);
-        assert_eq!(
+            let (answer, waits, second) = verify_with_hung_probe(&store);
+            assert_eq!(
             waits, 1,
             "the second stall must be admitted to its own probe and block once on its delivery wait"
         );
-        assert!(
+            assert!(
             matches!(answer, Err(TokenError::StoreUnavailable)),
             "its answer lands past max_stale_serve from the first stall, so it fails closed: {answer:?}"
         );
-        assert!(Instant::now() > stall_start + TokenStore::max_stale_serve());
-        {
-            let state = store.inner.lock().unwrap();
-            assert!(state.store_unavailable);
-            assert_eq!(state.reload_failure_since, Some(outage_start));
-            assert_eq!(state.stale_since, Some(stall_start));
-        }
+            assert!(Instant::now() > stall_start + TokenStore::max_stale_serve());
+            {
+                let state = store.inner.lock().unwrap();
+                assert!(state.store_unavailable);
+                assert_eq!(state.reload_failure_since, Some(outage_start));
+                assert_eq!(state.stale_since, Some(stall_start));
+            }
 
-        backdate_outage_for_test(&store, grace);
-        let outage_start = outage_start - grace;
-        let (answer, _, third) = verify_with_hung_probe(&store);
-        assert!(matches!(answer, Err(TokenError::StoreUnavailable)));
-        {
-            let state = store.inner.lock().unwrap();
-            assert!(state.store_unavailable, "past the grace it fails closed");
-            assert_eq!(state.reload_failure_since, Some(outage_start));
-        }
+            backdate_outage_for_test(&store, grace);
+            let outage_start = outage_start - grace;
+            let (answer, _, third) = verify_with_hung_probe(&store);
+            assert!(matches!(answer, Err(TokenError::StoreUnavailable)));
+            {
+                let state = store.inner.lock().unwrap();
+                assert!(state.store_unavailable, "past the grace it fails closed");
+                assert_eq!(state.reload_failure_since, Some(outage_start));
+            }
 
-        second.send(()).expect("release second probe");
-        third.send(()).expect("release third probe");
-        assert!(store.wait_probe_threads_exited_for_test(Duration::from_secs(10)));
-        store.clear_probe_fast_fail_window_for_test();
-        store
-            .verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan)
-            .expect("a good probe ends the outage");
-        {
-            let state = store.inner.lock().unwrap();
-            assert!(!state.store_unavailable);
-            assert!(state.reload_failure_since.is_none());
-        }
-        assert_eq!(store.leaked_disk_probe_threads_for_test(), 0);
+            second.send(()).expect("release second probe");
+            third.send(()).expect("release third probe");
+            assert!(store.wait_probe_threads_exited_for_test(Duration::from_secs(10)));
+            store.clear_probe_fast_fail_window_for_test();
+            store
+                .verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan)
+                .expect("a good probe ends the outage");
+            {
+                let state = store.inner.lock().unwrap();
+                assert!(!state.store_unavailable);
+                assert!(state.reload_failure_since.is_none());
+            }
+            assert_eq!(store.leaked_disk_probe_threads_for_test(), 0);
+        });
     }
 
     #[test]
@@ -2483,50 +2520,52 @@ mod tests {
 
     #[test]
     fn request_admitted_before_max_stale_serve_whose_probe_stalls_past_it_fails_closed() {
-        let grace = Duration::from_millis(2000);
-        let _grace = GraceOverride::set(grace);
-        let bound = TokenStore::max_stale_serve();
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let path = tmp.path().join("tokens.json");
-        write_tokens_revoking_writer(&path, false);
-        let store = TokenStore::load_insecure(path.clone()).expect("load");
-        let (stall_start, outage_start) = seed_first_stall_half_a_grace_ago(&store);
-        assert!(
-            outage_start + grace / 2 < stall_start + bound,
-            "a request half a grace after the timeout is admitted before the bound"
-        );
+        run_bounded(|| {
+            let grace = Duration::from_millis(2000);
+            let _grace = GraceOverride::set(grace);
+            let bound = TokenStore::max_stale_serve();
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let path = tmp.path().join("tokens.json");
+            write_tokens_revoking_writer(&path, false);
+            let store = TokenStore::load_insecure(path.clone()).expect("load");
+            let (stall_start, outage_start) = seed_first_stall_half_a_grace_ago(&store);
+            assert!(
+                outage_start + grace / 2 < stall_start + bound,
+                "a request half a grace after the timeout is admitted before the bound"
+            );
 
-        let (answer, waits, second) = verify_with_hung_probe(&store);
-        assert_eq!(
-            waits, 1,
-            "the request must be admitted to its own probe and block once on its delivery wait"
-        );
-        assert!(
+            let (answer, waits, second) = verify_with_hung_probe(&store);
+            assert_eq!(
+                waits, 1,
+                "the request must be admitted to its own probe and block once on its delivery wait"
+            );
+            assert!(
             matches!(answer, Err(TokenError::StoreUnavailable)),
             "its answer arrived past the bound, so cached entries must not be returned: {answer:?}"
         );
-        assert!(Instant::now() > stall_start + bound);
-        assert!(store.inner.lock().unwrap().store_unavailable);
+            assert!(Instant::now() > stall_start + bound);
+            assert!(store.inner.lock().unwrap().store_unavailable);
 
-        second.send(()).expect("release second probe");
-        assert!(store.wait_probe_threads_exited_for_test(Duration::from_secs(10)));
-        store.clear_probe_fast_fail_window_for_test();
-        store
-            .verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan)
-            .expect("a good probe ends the outage");
-        {
-            let state = store.inner.lock().unwrap();
-            assert!(!state.store_unavailable);
-            assert!(state.reload_failure_since.is_none());
-            assert!(state.stale_since.is_none());
-        }
-        assert_eq!(store.leaked_disk_probe_threads_for_test(), 0);
+            second.send(()).expect("release second probe");
+            assert!(store.wait_probe_threads_exited_for_test(Duration::from_secs(10)));
+            store.clear_probe_fast_fail_window_for_test();
+            store
+                .verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan)
+                .expect("a good probe ends the outage");
+            {
+                let state = store.inner.lock().unwrap();
+                assert!(!state.store_unavailable);
+                assert!(state.reload_failure_since.is_none());
+                assert!(state.stale_since.is_none());
+            }
+            assert_eq!(store.leaked_disk_probe_threads_for_test(), 0);
 
-        write_tokens_revoking_writer(&path, true);
-        assert!(matches!(
-            store.verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan),
-            Err(TokenError::Revoked)
-        ));
+            write_tokens_revoking_writer(&path, true);
+            assert!(matches!(
+                store.verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan),
+                Err(TokenError::Revoked)
+            ));
+        });
     }
 
     #[test]
@@ -2621,160 +2660,168 @@ mod tests {
 
     #[test]
     fn hung_disk_probe_never_spawns_more_than_one_live_thread() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let path = tmp.path().join("tokens.json");
-        write_tokens_revoking_writer(&path, false);
-        let store = TokenStore::load_insecure(path.clone()).expect("load");
-        store
-            .verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan)
-            .expect("warm");
-        std::fs::write(&path, b"{bad").unwrap();
-        let mut waits_after_first = 0;
-        {
-            let _hang = ReloadProbeHangGuard::enable(&store);
-            for i in 0..6 {
-                let waits_before = TokenStore::reload_waits_on_this_thread_for_test();
-                let result = store.verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan);
-                if i == 0 {
+        run_bounded(|| {
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let path = tmp.path().join("tokens.json");
+            write_tokens_revoking_writer(&path, false);
+            let store = TokenStore::load_insecure(path.clone()).expect("load");
+            store
+                .verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan)
+                .expect("warm");
+            std::fs::write(&path, b"{bad").unwrap();
+            let mut waits_after_first = 0;
+            {
+                let _hang = ReloadProbeHangGuard::enable(&store);
+                for i in 0..6 {
+                    let waits_before = TokenStore::reload_waits_on_this_thread_for_test();
+                    let result =
+                        store.verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan);
+                    if i == 0 {
+                        assert!(
+                            result.is_ok(),
+                            "the first hung probe starts the grace and serves cached entries"
+                        );
+                    } else {
+                        assert!(
+                            matches!(result, Err(TokenError::StoreUnavailable)),
+                            "call {i} must fail closed once the grace has run out"
+                        );
+                    }
                     assert!(
-                        result.is_ok(),
-                        "the first hung probe starts the grace and serves cached entries"
+                        TokenStore::reload_waits_on_this_thread_for_test() - waits_before <= 1,
+                        "call {i} must block at most once, on its bounded delivery wait"
                     );
-                } else {
                     assert!(
-                        matches!(result, Err(TokenError::StoreUnavailable)),
-                        "call {i} must fail closed once the grace has run out"
+                        store.leaked_disk_probe_threads_for_test() <= 1,
+                        "call {i} abandoned more than the one hung probe"
+                    );
+                    if i == 0 {
+                        waits_after_first = TokenStore::reload_waits_on_this_thread_for_test();
+                    }
+                    assert_eq!(
+                        TokenStore::reload_waits_on_this_thread_for_test(),
+                        waits_after_first,
+                        "call {i} waited on the reload window instead of failing fast"
+                    );
+                    assert_eq!(
+                        store.live_disk_probe_threads_for_test(),
+                        1,
+                        "call {i} must reuse the one hung probe instead of spawning another"
                     );
                 }
-                assert!(
-                    TokenStore::reload_waits_on_this_thread_for_test() - waits_before <= 1,
-                    "call {i} must block at most once, on its bounded delivery wait"
-                );
-                assert!(
-                    store.leaked_disk_probe_threads_for_test() <= 1,
-                    "call {i} abandoned more than the one hung probe"
-                );
-                if i == 0 {
-                    waits_after_first = TokenStore::reload_waits_on_this_thread_for_test();
-                }
-                assert_eq!(
-                    TokenStore::reload_waits_on_this_thread_for_test(),
-                    waits_after_first,
-                    "call {i} waited on the reload window instead of failing fast"
-                );
-                assert_eq!(
-                    store.live_disk_probe_threads_for_test(),
-                    1,
-                    "call {i} must reuse the one hung probe instead of spawning another"
-                );
             }
-        }
-        assert!(
-            store.wait_probe_threads_exited_for_test(Duration::from_secs(10)),
-            "probe thread did not finish after hang cleared"
-        );
-        assert_eq!(store.leaked_disk_probe_threads_for_test(), 0);
-        write_tokens_revoking_writer(&path, false);
-        store
-            .verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan)
-            .expect("reload recovers after hung probe");
-        assert_eq!(
-            store.live_disk_probe_threads_for_test(),
-            0,
-            "the recovery probe must release its slot before it hands back its result"
-        );
-        assert_eq!(store.leaked_disk_probe_threads_for_test(), 0);
+            assert!(
+                store.wait_probe_threads_exited_for_test(Duration::from_secs(10)),
+                "probe thread did not finish after hang cleared"
+            );
+            assert_eq!(store.leaked_disk_probe_threads_for_test(), 0);
+            write_tokens_revoking_writer(&path, false);
+            store
+                .verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan)
+                .expect("reload recovers after hung probe");
+            assert_eq!(
+                store.live_disk_probe_threads_for_test(),
+                0,
+                "the recovery probe must release its slot before it hands back its result"
+            );
+            assert_eq!(store.leaked_disk_probe_threads_for_test(), 0);
+        });
     }
 
     #[test]
     fn abandoned_probe_refcount_not_leaked_after_serial_timeouts() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let path = tmp.path().join("tokens.json");
-        write_tokens_revoking_writer(&path, false);
-        let store = TokenStore::load_insecure(path.clone()).expect("load");
-        store
-            .verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan)
-            .expect("warm");
-        std::fs::write(&path, b"{bad").unwrap();
-        for round in 0..2 {
-            {
-                let _hang = ReloadProbeHangGuard::enable(&store);
-                let waits_before = TokenStore::reload_waits_on_this_thread_for_test();
-                let result = store.verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan);
-                if round == 0 {
-                    assert!(
+        run_bounded(|| {
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let path = tmp.path().join("tokens.json");
+            write_tokens_revoking_writer(&path, false);
+            let store = TokenStore::load_insecure(path.clone()).expect("load");
+            store
+                .verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan)
+                .expect("warm");
+            std::fs::write(&path, b"{bad").unwrap();
+            for round in 0..2 {
+                {
+                    let _hang = ReloadProbeHangGuard::enable(&store);
+                    let waits_before = TokenStore::reload_waits_on_this_thread_for_test();
+                    let result =
+                        store.verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan);
+                    if round == 0 {
+                        assert!(
                         result.is_ok(),
                         "round 0: a hung probe that starts inside the grace serves cached entries"
                     );
-                } else {
-                    assert!(
+                    } else {
+                        assert!(
                         matches!(result, Err(TokenError::StoreUnavailable)),
                         "round {round}: a second hung probe answers past max_stale_serve, so it fails closed"
                     );
-                }
-                assert_eq!(
+                    }
+                    assert_eq!(
                     TokenStore::reload_waits_on_this_thread_for_test() - waits_before,
                     1,
                     "round {round}: the call must block only once, on its own probe's bounded delivery wait"
                 );
+                }
+                assert!(
+                    store.wait_probe_threads_exited_for_test(Duration::from_secs(10)),
+                    "round {round}: probe thread did not finish"
+                );
+                assert_eq!(
+                    store.leaked_disk_probe_threads_for_test(),
+                    0,
+                    "round {round}: abandoned probe refcount leaked"
+                );
             }
-            assert!(
-                store.wait_probe_threads_exited_for_test(Duration::from_secs(10)),
-                "round {round}: probe thread did not finish"
-            );
-            assert_eq!(
-                store.leaked_disk_probe_threads_for_test(),
-                0,
-                "round {round}: abandoned probe refcount leaked"
-            );
-        }
+        });
     }
 
     #[test]
     fn reload_hung_probe_fails_closed_and_recovers() {
-        let _grace = GraceOverride::set(Duration::from_millis(200));
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let path = tmp.path().join("tokens.json");
-        write_tokens_revoking_writer(&path, false);
-        let store = TokenStore::load_insecure(path.clone()).expect("load");
-        store
-            .verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan)
-            .expect("warm");
-        std::fs::write(&path, b"{bad").unwrap();
-        let first = block_next_probe_delivery(&store);
-        let waits = TokenStore::reload_waits_on_this_thread_for_test();
-        store
-            .verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan)
-            .expect("the first hung probe starts the grace and serves cached entries");
-        assert_eq!(
-            TokenStore::reload_waits_on_this_thread_for_test() - waits,
-            1,
-            "the first hung probe call must block only once, on its bounded delivery wait"
-        );
+        run_bounded(|| {
+            let _grace = GraceOverride::set(Duration::from_millis(200));
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let path = tmp.path().join("tokens.json");
+            write_tokens_revoking_writer(&path, false);
+            let store = TokenStore::load_insecure(path.clone()).expect("load");
+            store
+                .verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan)
+                .expect("warm");
+            std::fs::write(&path, b"{bad").unwrap();
+            let first = block_next_probe_delivery(&store);
+            let waits = TokenStore::reload_waits_on_this_thread_for_test();
+            store
+                .verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan)
+                .expect("the first hung probe starts the grace and serves cached entries");
+            assert_eq!(
+                TokenStore::reload_waits_on_this_thread_for_test() - waits,
+                1,
+                "the first hung probe call must block only once, on its bounded delivery wait"
+            );
 
-        store.clear_probe_fast_fail_window_for_test();
-        let second = block_next_probe_delivery(&store);
-        let waits = TokenStore::reload_waits_on_this_thread_for_test();
-        assert!(matches!(
-            store.verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan),
-            Err(TokenError::StoreUnavailable)
-        ));
-        assert!(
-            TokenStore::reload_waits_on_this_thread_for_test() - waits <= 1,
-            "the follow-up reload must block at most once, on its bounded delivery wait"
-        );
+            store.clear_probe_fast_fail_window_for_test();
+            let second = block_next_probe_delivery(&store);
+            let waits = TokenStore::reload_waits_on_this_thread_for_test();
+            assert!(matches!(
+                store.verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan),
+                Err(TokenError::StoreUnavailable)
+            ));
+            assert!(
+                TokenStore::reload_waits_on_this_thread_for_test() - waits <= 1,
+                "the follow-up reload must block at most once, on its bounded delivery wait"
+            );
 
-        first.send(()).expect("release first probe");
-        second.send(()).expect("release second probe");
-        assert!(
-            store.wait_probe_threads_exited_for_test(Duration::from_secs(10)),
-            "probe thread did not finish after it was released"
-        );
-        store.clear_probe_fast_fail_window_for_test();
-        write_tokens_revoking_writer(&path, false);
-        store
-            .verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan)
-            .expect("reload recovers after hung probe");
+            first.send(()).expect("release first probe");
+            second.send(()).expect("release second probe");
+            assert!(
+                store.wait_probe_threads_exited_for_test(Duration::from_secs(10)),
+                "probe thread did not finish after it was released"
+            );
+            store.clear_probe_fast_fail_window_for_test();
+            write_tokens_revoking_writer(&path, false);
+            store
+                .verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan)
+                .expect("reload recovers after hung probe");
+        });
     }
 
     #[test]
@@ -2898,68 +2945,72 @@ mod tests {
 
     #[test]
     fn reload_revoke_honored_after_outage_recovers() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let path = tmp.path().join("tokens.json");
-        write_tokens_revoking_writer(&path, false);
-        let store = TokenStore::load_insecure(path.clone()).expect("load");
-        store
-            .verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan)
-            .expect("warm");
-        std::fs::write(&path, b"{bad").unwrap();
-        store
-            .verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan)
-            .expect("grace snapshot");
-        std::thread::sleep(Duration::from_millis(2100));
-        assert!(matches!(
-            store.verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan),
-            Err(TokenError::StoreUnavailable)
-        ));
-        write_tokens_revoking_writer(&path, true);
-        assert!(
-            store.wait_probe_threads_exited_for_test(Duration::from_secs(10)),
-            "outage probes did not exit"
-        );
-        assert_eq!(store.leaked_disk_probe_threads_for_test(), 0);
-        store.clear_probe_fast_fail_window_for_test();
-        assert!(matches!(
-            store.verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan),
-            Err(TokenError::Revoked)
-        ));
+        run_bounded(|| {
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let path = tmp.path().join("tokens.json");
+            write_tokens_revoking_writer(&path, false);
+            let store = TokenStore::load_insecure(path.clone()).expect("load");
+            store
+                .verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan)
+                .expect("warm");
+            std::fs::write(&path, b"{bad").unwrap();
+            store
+                .verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan)
+                .expect("grace snapshot");
+            std::thread::sleep(Duration::from_millis(2100));
+            assert!(matches!(
+                store.verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan),
+                Err(TokenError::StoreUnavailable)
+            ));
+            write_tokens_revoking_writer(&path, true);
+            assert!(
+                store.wait_probe_threads_exited_for_test(Duration::from_secs(10)),
+                "outage probes did not exit"
+            );
+            assert_eq!(store.leaked_disk_probe_threads_for_test(), 0);
+            store.clear_probe_fast_fail_window_for_test();
+            assert!(matches!(
+                store.verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan),
+                Err(TokenError::Revoked)
+            ));
+        });
     }
 
     #[test]
     fn reload_revoke_never_missed_after_load_stress() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let path = tmp.path().join("tokens.json");
-        write_tokens_revoking_writer(&path, false);
-        let store = TokenStore::load_insecure(path.clone()).expect("load");
-        const ROUNDS: usize = 200;
-        for i in 0..ROUNDS {
-            store
-                .verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan)
-                .expect("warm load");
-            assert_eq!(
-                store.live_disk_probe_threads_for_test(),
-                0,
-                "iteration {i}: a finished probe must not hold its slot into the next call"
-            );
-            write_tokens_revoking_writer(&path, true);
-            let mut err = store
-                .verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan)
-                .expect_err("revoke must be visible immediately");
-            if matches!(err, TokenError::StoreUnavailable) {
-                assert!(store.wait_probe_threads_exited_for_test(Duration::from_secs(10)));
-                store.clear_probe_fast_fail_window_for_test();
-                err = store
-                    .verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan)
-                    .expect_err("revoke must be visible once the stalled probe is gone");
-            }
-            assert!(
-                matches!(err, TokenError::Revoked),
-                "missed revoke on iteration {i}: {err:?}"
-            );
+        run_bounded(|| {
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let path = tmp.path().join("tokens.json");
             write_tokens_revoking_writer(&path, false);
-        }
+            let store = TokenStore::load_insecure(path.clone()).expect("load");
+            const ROUNDS: usize = 200;
+            for i in 0..ROUNDS {
+                store
+                    .verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan)
+                    .expect("warm load");
+                assert_eq!(
+                    store.live_disk_probe_threads_for_test(),
+                    0,
+                    "iteration {i}: a finished probe must not hold its slot into the next call"
+                );
+                write_tokens_revoking_writer(&path, true);
+                let mut err = store
+                    .verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan)
+                    .expect_err("revoke must be visible immediately");
+                if matches!(err, TokenError::StoreUnavailable) {
+                    assert!(store.wait_probe_threads_exited_for_test(Duration::from_secs(10)));
+                    store.clear_probe_fast_fail_window_for_test();
+                    err = store
+                        .verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan)
+                        .expect_err("revoke must be visible once the stalled probe is gone");
+                }
+                assert!(
+                    matches!(err, TokenError::Revoked),
+                    "missed revoke on iteration {i}: {err:?}"
+                );
+                write_tokens_revoking_writer(&path, false);
+            }
+        });
     }
 
     #[cfg(unix)]
@@ -2981,66 +3032,68 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn fifo_read_closes_fd_on_every_exit_path() {
-        use nix::sys::stat::Mode;
-        use std::sync::atomic::AtomicBool;
-
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let path = tmp.path().join("tokens.json");
-        nix::unistd::mkfifo(&path, Mode::S_IRUSR | Mode::S_IWUSR).expect("mkfifo");
-        assert_eq!(fds_open_on(&path), 0);
-        let cancel = AtomicBool::new(true);
-        for _ in 0..40 {
-            assert!(matches!(
-                TokenStore::try_read_fifo_tokens_bytes(&path, Some(&cancel)),
-                Err(DiskFingerprint::Unreadable)
-            ));
-        }
-        assert_eq!(fds_open_on(&path), 0, "cancel exits must not leak FIFO fds");
-
-        let cancel_live = AtomicBool::new(false);
-        let path_feed = path.clone();
-        let file = crate::test_util::default_tokens_file();
-        let bytes = serde_json::to_vec_pretty(&file).expect("json");
-        let bytes_feed = bytes.clone();
-        let (done_tx, done_rx) = std::sync::mpsc::sync_channel(0);
-        let reader_path = path.clone();
-        let reader = std::thread::spawn(move || {
-            let ok = TokenStore::try_read_fifo_tokens_bytes(&reader_path, Some(&cancel_live));
-            let _ = done_tx.send(ok);
-        });
-        // Let the reader thread open its O_NONBLOCK read fd before pairing ends (avoid FIFO open deadlock).
-        std::thread::sleep(Duration::from_millis(50));
-        std::thread::scope(|scope| {
-            use nix::fcntl::{open, OFlag};
+        run_bounded(|| {
             use nix::sys::stat::Mode;
-            use nix::unistd::close;
-            use std::io::Write;
+            use std::sync::atomic::AtomicBool;
 
-            let path_read = path_feed.clone();
-            let path_write = path_feed;
-            scope.spawn(move || {
-                let fd = open(
-                    path_read.as_path(),
-                    OFlag::O_RDONLY | OFlag::O_NONBLOCK,
-                    Mode::empty(),
-                )
-                .expect("fifo read end for paired open");
-                std::thread::sleep(Duration::from_secs(2));
-                let _ = close(fd);
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let path = tmp.path().join("tokens.json");
+            nix::unistd::mkfifo(&path, Mode::S_IRUSR | Mode::S_IWUSR).expect("mkfifo");
+            assert_eq!(fds_open_on(&path), 0);
+            let cancel = AtomicBool::new(true);
+            for _ in 0..40 {
+                assert!(matches!(
+                    TokenStore::try_read_fifo_tokens_bytes(&path, Some(&cancel)),
+                    Err(DiskFingerprint::Unreadable)
+                ));
+            }
+            assert_eq!(fds_open_on(&path), 0, "cancel exits must not leak FIFO fds");
+
+            let cancel_live = AtomicBool::new(false);
+            let path_feed = path.clone();
+            let file = crate::test_util::default_tokens_file();
+            let bytes = serde_json::to_vec_pretty(&file).expect("json");
+            let bytes_feed = bytes.clone();
+            let (done_tx, done_rx) = std::sync::mpsc::sync_channel(0);
+            let reader_path = path.clone();
+            let reader = std::thread::spawn(move || {
+                let ok = TokenStore::try_read_fifo_tokens_bytes(&reader_path, Some(&cancel_live));
+                let _ = done_tx.send(ok);
             });
-            scope.spawn(move || {
-                let mut w = std::fs::OpenOptions::new()
-                    .write(true)
-                    .open(path_write)
-                    .expect("fifo write end");
-                w.write_all(&bytes_feed).expect("write tokens");
+            // Let the reader thread open its O_NONBLOCK read fd before pairing ends (avoid FIFO open deadlock).
+            std::thread::sleep(Duration::from_millis(50));
+            std::thread::scope(|scope| {
+                use nix::fcntl::{open, OFlag};
+                use nix::sys::stat::Mode;
+                use nix::unistd::close;
+                use std::io::Write;
+
+                let path_read = path_feed.clone();
+                let path_write = path_feed;
+                scope.spawn(move || {
+                    let fd = open(
+                        path_read.as_path(),
+                        OFlag::O_RDONLY | OFlag::O_NONBLOCK,
+                        Mode::empty(),
+                    )
+                    .expect("fifo read end for paired open");
+                    std::thread::sleep(Duration::from_secs(2));
+                    let _ = close(fd);
+                });
+                scope.spawn(move || {
+                    let mut w = std::fs::OpenOptions::new()
+                        .write(true)
+                        .open(path_write)
+                        .expect("fifo write end");
+                    w.write_all(&bytes_feed).expect("write tokens");
+                });
             });
+            let ok = done_rx
+                .recv_timeout(Duration::from_secs(10))
+                .expect("fifo read result");
+            reader.join().expect("join fifo reader");
+            assert!(ok.is_ok(), "expected valid fifo read, got {ok:?}");
+            assert_eq!(fds_open_on(&path), 0, "successful fifo read must close fd");
         });
-        let ok = done_rx
-            .recv_timeout(Duration::from_secs(10))
-            .expect("fifo read result");
-        reader.join().expect("join fifo reader");
-        assert!(ok.is_ok(), "expected valid fifo read, got {ok:?}");
-        assert_eq!(fds_open_on(&path), 0, "successful fifo read must close fd");
     }
 }
