@@ -868,6 +868,11 @@ impl TokenStore {
     }
 
     /// Up to [`Self::RELOAD_MAX_ATTEMPTS`] within `deadline` (about 2s from outage start).
+    ///
+    /// A retry is only started before `deadline`, and the returned bad-read time
+    /// is the instant that attempt started, so a slow scheduler that wakes the
+    /// retry loop late cannot make the leader's own transient window look like
+    /// it outlived the grace.
     fn read_tokens_until_deadline(
         path: &Path,
         deadline: Instant,
@@ -876,7 +881,11 @@ impl TokenStore {
         let mut last_fp = DiskFingerprint::Missing;
         let mut last_bad_read = Instant::now();
         for attempt in 0..Self::RELOAD_MAX_ATTEMPTS {
-            last_bad_read = Instant::now();
+            let attempt_at = Instant::now();
+            if attempt > 0 && attempt_at >= deadline {
+                break;
+            }
+            last_bad_read = attempt_at;
             match Self::try_read_valid_tokens_bytes(path, cancel) {
                 Ok(raw) => return Ok(raw),
                 Err(fp) => last_fp = fp,
@@ -2061,6 +2070,19 @@ mod tests {
             assert!(state.reload_failure_since.is_none());
         }
         assert_eq!(store.leaked_disk_probe_threads_for_test(), 0);
+    }
+
+    #[test]
+    fn a_retry_woken_after_the_transient_deadline_is_not_a_bad_read_past_it() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("missing.json");
+        let deadline = Instant::now() + Duration::from_millis(300);
+        let (_, last_bad_read) = TokenStore::read_tokens_until_deadline(&path, deadline, None)
+            .expect_err("a missing file never reads");
+        assert!(
+            last_bad_read < deadline,
+            "the last bad read must be an attempt started before the deadline"
+        );
     }
 
     #[test]
