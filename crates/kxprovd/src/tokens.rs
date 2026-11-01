@@ -2803,10 +2803,7 @@ mod tests {
             "outage probes did not exit"
         );
         assert_eq!(store.leaked_disk_probe_threads_for_test(), 0);
-        let fast_fail_until = *store.probe_fast_fail_until.lock().unwrap();
-        if let Some(until) = fast_fail_until {
-            std::thread::sleep(until.saturating_duration_since(Instant::now()));
-        }
+        store.clear_probe_fast_fail_window_for_test();
         assert!(matches!(
             store.verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan),
             Err(TokenError::Revoked)
