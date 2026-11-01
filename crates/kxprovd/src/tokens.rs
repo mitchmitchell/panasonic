@@ -113,7 +113,7 @@ pub struct TokenStore {
     /// Inodes abandoned probes still hold open; block respawn until thread exits.
     abandoned_probe_refcounts: Arc<Mutex<HashMap<PathIdentity, usize>>>,
     /// When set, the live probe's guard must not decrement `disk_probe_live`.
-    active_probe_abandon: Arc<Mutex<Option<Arc<AtomicBool>>>>,
+    active_probe_abandon: Arc<Mutex<Option<ActiveProbe>>>,
     /// After a bounded probe times out, deny reload briefly without spawning.
     probe_fast_fail_until: Arc<Mutex<Option<Instant>>>,
     #[cfg(feature = "test-util")]
@@ -197,10 +197,35 @@ impl Drop for ProbeThreadSlotGuard {
     }
 }
 
-struct ProbeThreadAliveGuard {
+/// One probe thread's share of `abandoned_probe_refcounts`.
+///
+/// `exited` and `counted` change only while the refcount lock is held, so the
+/// thread's exit and the caller's abandon step agree on whether the thread
+/// still owes a decrement, whichever runs first.
+struct ProbeTicket {
     identity: Option<PathIdentity>,
+    exited: AtomicBool,
+    counted: AtomicBool,
+}
+
+impl ProbeTicket {
+    fn new(identity: Option<PathIdentity>) -> Arc<Self> {
+        Arc::new(Self {
+            identity,
+            exited: AtomicBool::new(false),
+            counted: AtomicBool::new(false),
+        })
+    }
+}
+
+struct ActiveProbe {
+    abandoned: Arc<AtomicBool>,
+    ticket: Arc<ProbeTicket>,
+}
+
+struct ProbeThreadAliveGuard {
+    ticket: Arc<ProbeTicket>,
     abandoned_refcounts: Arc<Mutex<HashMap<PathIdentity, usize>>>,
-    was_abandoned: Arc<AtomicBool>,
 }
 
 impl Drop for ProbeThreadAliveGuard {
@@ -209,10 +234,11 @@ impl Drop for ProbeThreadAliveGuard {
             .abandoned_refcounts
             .lock()
             .expect("abandoned probe lock");
-        if !self.was_abandoned.load(Ordering::Acquire) {
+        self.ticket.exited.store(true, Ordering::Release);
+        if !self.ticket.counted.load(Ordering::Acquire) {
             return;
         }
-        if let Some(id) = self.identity {
+        if let Some(id) = self.ticket.identity {
             if let Some(n) = map.get_mut(&id) {
                 *n = n.saturating_sub(1);
                 if *n == 0 {
@@ -369,25 +395,23 @@ impl TokenStore {
             .abandoned_probe_refcounts
             .lock()
             .expect("abandoned probe lock");
-        let mut owned_abandon = false;
-        if let Some(flag) = self
+        if let Some(active) = self
             .active_probe_abandon
             .lock()
             .expect("active probe abandon lock")
             .take()
         {
-            owned_abandon = !flag.swap(true, Ordering::AcqRel);
-        }
-        if owned_abandon {
-            let _ = self
-                .disk_probe_live
-                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_sub(1));
-            let stuck_id = *self
-                .probe_path_identity
-                .lock()
-                .expect("probe path identity lock");
-            if let Some(id) = stuck_id {
-                refcounts.entry(id).and_modify(|n| *n += 1).or_insert(1);
+            if !active.abandoned.swap(true, Ordering::AcqRel) {
+                let _ = self
+                    .disk_probe_live
+                    .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_sub(1));
+                let ticket = &active.ticket;
+                if !ticket.exited.load(Ordering::Acquire) {
+                    if let Some(id) = ticket.identity {
+                        refcounts.entry(id).and_modify(|n| *n += 1).or_insert(1);
+                        ticket.counted.store(true, Ordering::Release);
+                    }
+                }
             }
         }
         drop(refcounts);
@@ -444,6 +468,7 @@ impl TokenStore {
         &self,
         path: &Path,
         abandoned: Arc<AtomicBool>,
+        ticket: &Arc<ProbeTicket>,
     ) -> Option<DiskProbeLiveGuard> {
         if self.probe_threads_alive.load(Ordering::Acquire) >= Self::MAX_PROBE_THREADS_ALIVE {
             return None;
@@ -459,7 +484,10 @@ impl TokenStore {
             *self
                 .active_probe_abandon
                 .lock()
-                .expect("active probe abandon lock") = Some(Arc::clone(&abandoned));
+                .expect("active probe abandon lock") = Some(ActiveProbe {
+                abandoned: Arc::clone(&abandoned),
+                ticket: Arc::clone(ticket),
+            });
             *self
                 .probe_path_identity
                 .lock()
@@ -676,13 +704,14 @@ impl TokenStore {
             Instant::now() + Duration::from_millis(50)
         };
         let abandoned = Arc::new(AtomicBool::new(false));
+        let ticket = ProbeTicket::new(path_identity(&plan.path));
         let live_guard = loop {
             self.reconcile_stuck_probe_for_path(&plan.path);
             if self.disk_probe_spawn_denied(&plan.path) {
                 self.latch_probe_fast_fail();
                 return Err(TokenError::StoreUnavailable);
             }
-            if let Some(guard) = self.try_begin_disk_probe(&plan.path, Arc::clone(&abandoned)) {
+            if let Some(guard) = self.try_begin_disk_probe(&plan.path, Arc::clone(&abandoned), &ticket) {
                 break guard;
             }
             if instant_deny || Instant::now() >= wait_until {
@@ -695,7 +724,6 @@ impl TokenStore {
         let probe_alive = Arc::clone(&self.probe_threads_alive);
         let probe_alive_err = Arc::clone(&probe_alive);
         let abandoned_refcounts = Arc::clone(&self.abandoned_probe_refcounts);
-        let thread_identity = path_identity(&plan.path);
         let prev = probe_alive.fetch_add(1, Ordering::AcqRel);
         if prev >= Self::MAX_PROBE_THREADS_ALIVE {
             probe_alive.fetch_sub(1, Ordering::AcqRel);
@@ -709,9 +737,8 @@ impl TokenStore {
             .spawn(move || {
                 let _slot = ProbeThreadSlotGuard { alive: probe_alive };
                 let _thread_guard = ProbeThreadAliveGuard {
-                    identity: thread_identity,
+                    ticket,
                     abandoned_refcounts,
-                    was_abandoned: Arc::clone(&abandoned),
                 };
                 let _live = live_guard;
                 let _ = tx.send(Self::execute_disk_probe(&probe_plan));
@@ -992,7 +1019,14 @@ impl TokenStore {
         }
     }
 
-    fn fail_closed(&self) -> TokenError {
+    /// Fails closed. Inside an outage the failure is latched so a later
+    /// `UnchangedBad` probe cannot serve cached entries; before an outage starts
+    /// (the first-blip grace window) it is not, so one concurrent caller does not
+    /// end the grace for everyone.
+    fn fail_closed(&self, during_outage: bool) -> TokenError {
+        if !during_outage {
+            return TokenError::StoreUnavailable;
+        }
         let mut state = self.inner.lock().expect("token store lock");
         Self::latch_store_unavailable(&mut state)
     }
@@ -1019,7 +1053,7 @@ impl TokenStore {
 
         let during_outage = Self::reload_plan_in_outage(&plan);
         if self.disk_reload_blocked_now(during_outage, &plan.path) {
-            return Err(self.fail_closed());
+            return Err(self.fail_closed(during_outage));
         }
         if during_outage {
             self.reconcile_stuck_probe_for_path(&plan.path);
@@ -1032,7 +1066,7 @@ impl TokenStore {
         };
         let probe = match probe {
             Ok(p) => p,
-            Err(TokenError::StoreUnavailable) => return Err(self.fail_closed()),
+            Err(TokenError::StoreUnavailable) => return Err(self.fail_closed(during_outage)),
             Err(e) => return Err(e),
         };
 
@@ -1373,6 +1407,77 @@ mod tests {
         fn drop(&mut self) {
             self.flag.store(false, Ordering::Relaxed);
         }
+    }
+
+    fn arm_active_probe(store: &TokenStore, path: &Path) -> Arc<ProbeTicket> {
+        let ticket = ProbeTicket::new(path_identity(path));
+        store.disk_probe_live.store(1, Ordering::Release);
+        *store.probe_path_identity.lock().unwrap() = path_identity(path);
+        *store.active_probe_abandon.lock().unwrap() = Some(ActiveProbe {
+            abandoned: Arc::new(AtomicBool::new(false)),
+            ticket: Arc::clone(&ticket),
+        });
+        ticket
+    }
+
+    fn probe_thread_exit(store: &TokenStore, ticket: Arc<ProbeTicket>) {
+        drop(ProbeThreadAliveGuard {
+            ticket,
+            abandoned_refcounts: Arc::clone(&store.abandoned_probe_refcounts),
+        });
+    }
+
+    #[test]
+    fn probe_that_exits_before_it_is_abandoned_leaves_no_refcount() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("tokens.json");
+        write_tokens_revoking_writer(&path, false);
+        let store = TokenStore::load_insecure(path.clone()).expect("load");
+        let ticket = arm_active_probe(&store, &path);
+        probe_thread_exit(&store, ticket);
+        store.abandon_stuck_probe();
+        assert_eq!(store.leaked_disk_probe_threads_for_test(), 0);
+        assert!(!store.disk_probe_spawn_denied(&path));
+    }
+
+    #[test]
+    fn probe_abandoned_while_running_is_counted_until_it_exits() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("tokens.json");
+        write_tokens_revoking_writer(&path, false);
+        let store = TokenStore::load_insecure(path.clone()).expect("load");
+        let ticket = arm_active_probe(&store, &path);
+        store.abandon_stuck_probe();
+        assert_eq!(store.leaked_disk_probe_threads_for_test(), 1);
+        assert!(store.disk_probe_spawn_denied(&path));
+        probe_thread_exit(&store, ticket);
+        assert_eq!(store.leaked_disk_probe_threads_for_test(), 0);
+    }
+
+    #[test]
+    fn follower_refusal_before_an_outage_does_not_end_the_first_blip_grace() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("tokens.json");
+        write_tokens_revoking_writer(&path, false);
+        let store = TokenStore::load_insecure(path.clone()).expect("load");
+        store
+            .verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan)
+            .expect("warm");
+        std::fs::write(&path, b"{bad").unwrap();
+        let _ticket = arm_active_probe(&store, &path);
+        *store.transient_flight.inner.lock().unwrap() = TransientFlightState::Running;
+        assert!(matches!(
+            store.verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan),
+            Err(TokenError::StoreUnavailable)
+        ));
+        *store.transient_flight.inner.lock().unwrap() = TransientFlightState::Idle;
+        *store.active_probe_abandon.lock().unwrap() = None;
+        *store.probe_path_identity.lock().unwrap() = None;
+        store.disk_probe_live.store(0, Ordering::Release);
+        *store.probe_fast_fail_until.lock().unwrap() = None;
+        store
+            .verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan)
+            .expect("still inside the first-blip grace");
     }
 
     #[test]
