@@ -192,6 +192,12 @@ async fn dispatch(
         }
         RequestBody::Unlock { params } => unlock(state, cred, params.clone()).await,
         RequestBody::Whoami => whoami(state, role, &env.auth).await,
+        RequestBody::SmdrQuery { params } => {
+            if let Err(e) = require_access(state, cred, role, &env.auth, Scope::CallLog) {
+                return err_response(id, e);
+            }
+            smdr_query(state, params.clone()).await
+        }
         #[cfg(feature = "sim-fault-triggers")]
         RequestBody::SimTriggerBusy { params } => {
             sim_trigger_busy(state, cred, role, &env.auth, params).await
@@ -379,6 +385,22 @@ fn require_access(
                 return Err(api_err("forbidden", "read-only peer"));
             }
             Ok(JobPrincipal::SyntheticLocal { uid: cred.uid })
+        }
+    }
+}
+
+async fn smdr_query(
+    state: &ApiState,
+    params: kxprov_api::SmdrQueryParams,
+) -> Result<ResponseResult, ApiErrorBody> {
+    let db = crate::smdr_api::db_path(&state.config.data_dir);
+    match tokio::task::spawn_blocking(move || crate::smdr_api::query(&db, &params)).await {
+        Ok(Ok(page)) => Ok(ResponseResult::SmdrPage(page)),
+        Ok(Err(e)) => Err(api_err(e.code(), &e.to_string())),
+        Err(join) => {
+            tracing::warn!(%join, "smdr query task failed");
+            let e = kxprov_api::SmdrApiError::StoreUnavailable;
+            Err(api_err(e.code(), &e.to_string()))
         }
     }
 }
@@ -1084,5 +1106,174 @@ mod unbuilt_sim_trigger_tests {
             "sim_trigger_goliath_copy_fail",
         )
         .await;
+    }
+}
+
+#[cfg(test)]
+mod smdr_dispatch_tests {
+    #![allow(
+        clippy::unwrap_used,
+        reason = "test setup failures should abort the test"
+    )]
+
+    use super::*;
+    use crate::approval::ApprovalBook;
+    use crate::backup::BackupStore;
+    use crate::config::Config;
+    use crate::gates::GateState;
+    use crate::goliath::GoliathQueue;
+    use crate::mode::ModeStore;
+    use crate::peer::PeerCred;
+    use crate::plan_store::PlanStore;
+    use kxprov_api::{
+        hash_bearer_secret, Profile, Scope, SmdrQueryParams, TokenEntry, TokenId, TokensFile,
+    };
+    use std::sync::Arc;
+    use tokio::sync::{mpsc, RwLock};
+
+    const GATEWAY: PeerCred = PeerCred {
+        uid: 1001,
+        gid: 1001,
+        pid: 1,
+    };
+    const ADMIN: PeerCred = PeerCred {
+        uid: 1000,
+        gid: 1000,
+        pid: 1,
+    };
+    const OTHER: PeerCred = PeerCred {
+        uid: 4242,
+        gid: 4242,
+        pid: 1,
+    };
+
+    fn entry(id: &str, scopes: Vec<Scope>) -> TokenEntry {
+        TokenEntry {
+            id: TokenId(id.into()),
+            secret_hash: hash_bearer_secret(&format!("{id}-secret")),
+            scopes,
+            expires_at_ms: u64::MAX / 2,
+            revoked: false,
+        }
+    }
+
+    fn state(tmp: &tempfile::TempDir) -> ApiState {
+        let data = tmp.path().to_path_buf();
+        std::fs::create_dir_all(data.join("plans")).unwrap();
+        std::fs::create_dir_all(data.join("backups")).unwrap();
+        let cfg = Config::sim_test(data.clone(), data.join("kxprovd.sock"), 1000);
+        let tokens = TokensFile {
+            approver_token_id: TokenId("approver".into()),
+            tokens: vec![
+                entry("approver", vec![Scope::Read, Scope::Approve]),
+                entry("bots", vec![Scope::Read, Scope::CallLog]),
+                entry("planner", vec![Scope::Read, Scope::Plan]),
+            ],
+        };
+        std::fs::write(&cfg.tokens_path, serde_json::to_vec(&tokens).unwrap()).unwrap();
+        let (tx, _rx) = mpsc::channel(4);
+        drop(
+            crate::smdr_store::SmdrStore::open(&cfg.data_dir, &[], kxtd1232::smdr::DateOrder::Mdy)
+                .unwrap(),
+        );
+        ApiState {
+            port: crate::transport::device_arbiter(&cfg),
+            config: cfg.clone(),
+            profile: Arc::new(RwLock::new(Profile::Sim)),
+            transport_label: "sim".into(),
+            gates: Arc::new(RwLock::new(GateState { config: cfg.gates })),
+            peer_policy: cfg.peer_policy.clone(),
+            tokens: TokenStore::load_insecure(cfg.tokens_path.clone()).unwrap(),
+            queue: Arc::new(JobQueue::new(tx)),
+            backups: BackupStore::new(data.join("backups")).unwrap(),
+            plans: PlanStore::new(data.join("plans")).unwrap(),
+            approvals: ApprovalBook::new(&data),
+            locked: LockedStore::new(&data),
+            goliath: GoliathQueue::new(data.join("goliath")).unwrap(),
+            mode: ModeStore::new(&data, Profile::Sim),
+            transition: crate::transition::TransitionBlockStore::new(&data),
+        }
+    }
+
+    async fn call(state: &ApiState, cred: PeerCred, bearer: Option<&str>) -> Response {
+        let env = RequestEnvelope {
+            id: "1".into(),
+            auth: bearer.map(|b| RequestAuth {
+                bearer: format!("{b}-secret"),
+            }),
+            audit: None,
+            body: RequestBody::SmdrQuery {
+                params: SmdrQueryParams::with_defaults(None, None, 1_800_000_000_000),
+            },
+        };
+        dispatch(state, cred, &env).await
+    }
+
+    #[tokio::test]
+    async fn smdr_query_requires_the_call_log_scope() {
+        let tmp = tempfile::tempdir().unwrap();
+        let st = state(&tmp);
+        let ok = call(&st, GATEWAY, Some("bots")).await;
+        assert!(ok.ok, "{:?}", ok.error);
+        assert!(matches!(ok.result, Some(ResponseResult::SmdrPage(_))));
+        for (cred, bearer) in [
+            (GATEWAY, Some("planner")),
+            (GATEWAY, Some("approver")),
+            (GATEWAY, None),
+            (ADMIN, None),
+            (OTHER, None),
+        ] {
+            let resp = call(&st, cred, bearer).await;
+            assert!(!resp.ok, "{cred:?} {bearer:?}");
+            assert!(resp.result.is_none());
+            let code = resp.error.unwrap().code;
+            assert!(
+                code == "forbidden" || code == "token_required",
+                "{cred:?} {bearer:?} {code}"
+            );
+        }
+    }
+
+    fn listing(dir: &std::path::Path) -> Vec<(String, u64)> {
+        let mut out: Vec<(String, u64)> = walk(dir)
+            .into_iter()
+            .filter(|p| {
+                !p.ends_with(crate::smdr_store::SMDR_DIR_NAME)
+                    && !p
+                        .components()
+                        .any(|c| c.as_os_str() == crate::smdr_store::SMDR_DIR_NAME)
+            })
+            .map(|p| {
+                let len = std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
+                (p.display().to_string(), len)
+            })
+            .collect();
+        out.sort();
+        out
+    }
+
+    fn walk(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+        let mut out = Vec::new();
+        for e in std::fs::read_dir(dir).unwrap().flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                out.extend(walk(&p));
+            }
+            out.push(p);
+        }
+        out
+    }
+
+    #[tokio::test]
+    async fn a_thousand_queries_leave_the_port_and_lease_journal_untouched() {
+        let tmp = tempfile::tempdir().unwrap();
+        let st = state(&tmp);
+        let mode_before = format!("{:?}", st.port.mode());
+        let before = listing(tmp.path());
+        for _ in 0..1000 {
+            assert!(call(&st, GATEWAY, Some("bots")).await.ok);
+        }
+        assert_eq!(format!("{:?}", st.port.mode()), mode_before);
+        assert_eq!(listing(tmp.path()), before);
     }
 }

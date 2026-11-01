@@ -8,6 +8,7 @@ mod ids;
 mod paths;
 mod plan_hash;
 mod protocol;
+mod smdr;
 mod surface;
 mod tokens;
 mod types;
@@ -22,6 +23,10 @@ pub use paths::{
 };
 pub use plan_hash::{diff_hash, CanonicalPlan, CanonicalWrite};
 pub use protocol::*;
+pub use smdr::{
+    CallDirection, QueryLimit, SmdrApiError, SmdrCallView, SmdrCursor, SmdrPage, SmdrQueryParams,
+    DEFAULT_RANGE_MS, MAX_RANGE_DAYS, MCP_QUERY_LIMIT_MAX, QUERY_LIMIT_DEFAULT, QUERY_LIMIT_MAX,
+};
 pub use surface::*;
 pub use tokens::{
     hash_bearer_secret, token_id_is_reserved, validate_tokens_file, TokenEntry,

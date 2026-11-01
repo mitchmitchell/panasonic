@@ -105,6 +105,9 @@ fn map_api_error(err: ApiError) -> BackendError {
 }
 
 fn map_remote_error(code: &str, message: &str) -> BackendError {
+    if let Some(e) = kxprov_api::SmdrApiError::from_code(code) {
+        return BackendError::CallLog(e);
+    }
     let lower = message.to_ascii_lowercase();
     match code {
         "forbidden" | "scope" => BackendError::ForbiddenScope,
@@ -355,6 +358,17 @@ impl DaemonBackend for DaemonClient {
         // kxprovd has no job-scoped rollback RPC yet; Unlock only clears the global lock
         // and ignores job_id — do not map MCP rollback to it.
         Err(BackendError::BadRequest("rollback not supported by daemon"))
+    }
+
+    async fn smdr_query(
+        &self,
+        caller: &CallerIdentity,
+        params: kxprov_api::SmdrQueryParams,
+    ) -> Result<kxprov_api::SmdrPage, BackendError> {
+        match self.call(caller, RequestBody::SmdrQuery { params }).await? {
+            ResponseResult::SmdrPage(p) => Ok(p),
+            _ => Err(unexpected_daemon_reply()),
+        }
     }
 }
 

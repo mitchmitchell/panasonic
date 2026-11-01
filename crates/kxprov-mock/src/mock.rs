@@ -5,7 +5,7 @@ use std::time::{Duration as StdDuration, Instant};
 use async_trait::async_trait;
 use kxprov_api::{
     ApplyApprovalRequiredResult, ApplyPlanAwaitingStatus, Approval, DiffHash, OperationalMode,
-    PlanId, Profile, Scope,
+    PlanId, Profile, Scope, SmdrCallView, SmdrCursor, SmdrPage, SmdrQueryParams,
 };
 use kxtd1232::FieldKind;
 use time::OffsetDateTime;
@@ -45,6 +45,7 @@ struct Inner {
     next_job: u64,
     live_writes_approved: bool,
     requested_indexes: Vec<u16>,
+    calls: Vec<(i64, SmdrCallView)>,
 }
 
 pub struct MockDaemon {
@@ -73,6 +74,11 @@ impl MockDaemon {
         Self::with_mode_profile(OperationalMode::Production, profile)
     }
 
+    /// Seeds one stored call received at `rx_ms` (Unix ms).
+    pub async fn test_add_call(&self, rx_ms: i64, call: SmdrCallView) {
+        self.inner.write().await.calls.push((rx_ms, call));
+    }
+
     pub async fn test_set_live_writes_approved(&self, approved: bool) {
         self.inner.write().await.live_writes_approved = approved;
     }
@@ -92,6 +98,7 @@ impl MockDaemon {
                 next_job: 0,
                 live_writes_approved: false,
                 requested_indexes: Vec::new(),
+                calls: Vec::new(),
             })),
         }
     }
@@ -440,6 +447,41 @@ impl DaemonBackend for MockDaemon {
             state: JobState::Succeeded,
             message: "simulated rollback".into(),
         })
+    }
+
+    async fn smdr_query(
+        &self,
+        caller: &CallerIdentity,
+        params: SmdrQueryParams,
+    ) -> Result<SmdrPage, BackendError> {
+        Self::require_scope(caller, Scope::CallLog)?;
+        params.validate().map_err(BackendError::CallLog)?;
+        let inner = self.inner.read().await;
+        let after_cursor = |c: &SmdrCallView| match &params.cursor {
+            Some(cur) => (c.rx_ts_utc.as_str(), c.id) < (cur.rx_ts_utc(), cur.id()),
+            None => true,
+        };
+        let mut rows: Vec<SmdrCallView> = inner
+            .calls
+            .iter()
+            .filter(|(ms, c)| {
+                (params.since_ms..params.until_ms).contains(ms)
+                    && params.ext.as_deref().is_none_or(|e| e.trim() == c.ext)
+                    && params.direction.is_none_or(|d| d == c.direction)
+                    && after_cursor(c)
+            })
+            .map(|(_, c)| c.clone())
+            .collect();
+        rows.sort_by(|a, b| (b.rx_ts_utc.as_str(), b.id).cmp(&(a.rx_ts_utc.as_str(), a.id)));
+        let limit = usize::from(params.limit.get());
+        let next = if rows.len() > limit {
+            rows.truncate(limit);
+            rows.last()
+                .map(|c| SmdrCursor::new(c.rx_ts_utc.clone(), c.id))
+        } else {
+            None
+        };
+        Ok(SmdrPage { calls: rows, next })
     }
 }
 

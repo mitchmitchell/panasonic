@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use kxprov_api::{Approval, DiffHash, PlanId, Profile};
+use kxprov_api::{Approval, DiffHash, PlanId, Profile, SmdrPage, SmdrQueryParams};
 
 use crate::error::BackendError;
 use crate::identity::CallerIdentity;
@@ -48,4 +48,11 @@ pub trait DaemonBackend: Send + Sync {
         caller: &CallerIdentity,
         job_id: JobId,
     ) -> Result<ApplyJob, BackendError>;
+
+    /// Stored call records; requires [`kxprov_api::Scope::CallLog`]. Never reaches the PBX.
+    async fn smdr_query(
+        &self,
+        caller: &CallerIdentity,
+        params: SmdrQueryParams,
+    ) -> Result<SmdrPage, BackendError>;
 }

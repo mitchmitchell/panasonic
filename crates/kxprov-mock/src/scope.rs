@@ -45,6 +45,10 @@ impl ScopeSet {
     pub fn allows_approve(&self) -> bool {
         self.contains(Scope::Approve)
     }
+
+    pub fn allows_call_log(&self) -> bool {
+        self.contains(Scope::CallLog)
+    }
 }
 
 const fn scope_bit(scope: Scope) -> u8 {
@@ -53,6 +57,7 @@ const fn scope_bit(scope: Scope) -> u8 {
         Scope::Plan => 2,
         Scope::Write => 4,
         Scope::Approve => 8,
+        Scope::CallLog => 16,
     }
 }
 
@@ -64,6 +69,7 @@ pub fn scopes_for_role(role: &str) -> ScopeSet {
             .with(Scope::Plan)
             .with(Scope::Write),
         "approver" => ScopeSet::empty().with(Scope::Read).with(Scope::Approve),
+        "bots" => ScopeSet::empty().with(Scope::Read).with(Scope::CallLog),
         _ => ScopeSet::empty(),
     };
     set.validate().expect("role scope sets are valid");
