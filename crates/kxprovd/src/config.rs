@@ -333,7 +333,7 @@ impl Config {
         Ok(cfg)
     }
 
-    #[cfg(feature = "test-util")]
+    #[cfg(any(test, feature = "test-util"))]
     pub fn sim_test(data_dir: PathBuf, socket_path: PathBuf, peer_uid: u32) -> Self {
         let provision_root = data_dir.clone();
         let profile_dir = profile_data_dir(&provision_root, Profile::Sim);
