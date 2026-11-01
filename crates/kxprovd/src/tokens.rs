@@ -2308,15 +2308,19 @@ mod tests {
         });
     }
 
-    /// Merges a first stall that began half a grace plus one delivery
-    /// deadline before now and timed out one deadline later, and checks that
-    /// its answer at the observed timeout was served from cache. Returns the
-    /// stall start and the outage start.
-    fn seed_first_stall_half_a_grace_ago(store: &TokenStore) -> (Instant, Instant) {
-        let grace = TokenStore::reload_grace_duration();
+    /// Merges a first stall that began one delivery deadline before now and
+    /// timed out now, and checks that its answer at the observed timeout was
+    /// served from cache. Returns the stall start and the outage start.
+    ///
+    /// A request admitted right after it blocks for at least one more
+    /// deadline, so its answer lands at least one slack past
+    /// `stall_start + max_stale_serve` and only scheduling delay adds to that.
+    /// The overshoot stays small enough that loosening the bound by more than
+    /// the slack lets that answer be served.
+    fn seed_first_stall_that_just_timed_out(store: &TokenStore) -> (Instant, Instant) {
         let deadline = TokenStore::probe_delivery_deadline();
         let stall_start = Instant::now()
-            .checked_sub(deadline + grace / 2)
+            .checked_sub(deadline)
             .expect("backdate within Instant range");
         let observed_timeout = stall_start + deadline;
         let mut state = store.inner.lock().unwrap();
@@ -2364,7 +2368,7 @@ mod tests {
             let path = tmp.path().join("tokens.json");
             write_tokens_revoking_writer(&path, false);
             let store = TokenStore::load_insecure(path.clone()).expect("load");
-            let (stall_start, outage_start) = seed_first_stall_half_a_grace_ago(&store);
+            let (stall_start, outage_start) = seed_first_stall_that_just_timed_out(&store);
 
             let (answer, waits, second) = verify_with_hung_probe(&store);
             assert_eq!(
@@ -2528,10 +2532,10 @@ mod tests {
             let path = tmp.path().join("tokens.json");
             write_tokens_revoking_writer(&path, false);
             let store = TokenStore::load_insecure(path.clone()).expect("load");
-            let (stall_start, outage_start) = seed_first_stall_half_a_grace_ago(&store);
+            let (stall_start, outage_start) = seed_first_stall_that_just_timed_out(&store);
             assert!(
-                outage_start + grace / 2 < stall_start + bound,
-                "a request half a grace after the timeout is admitted before the bound"
+                outage_start < stall_start + bound,
+                "a request right after the timeout is admitted before the bound"
             );
 
             let (answer, waits, second) = verify_with_hung_probe(&store);
