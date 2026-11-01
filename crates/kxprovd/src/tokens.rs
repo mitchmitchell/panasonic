@@ -144,6 +144,10 @@ pub struct TokenStore {
     /// Runs on the probe thread right before it sends its result.
     #[cfg(test)]
     before_send_hook: Arc<Mutex<Option<AbandonHook>>>,
+    /// Runs on the caller right after it merges a probe result, before it
+    /// releases the probe slot.
+    #[cfg(test)]
+    after_merge_hook: Arc<Mutex<Option<AbandonHook>>>,
 }
 
 struct TokenRefreshDelta {
@@ -173,6 +177,8 @@ impl Clone for TokenStore {
             after_send_hook: Arc::clone(&self.after_send_hook),
             #[cfg(test)]
             before_send_hook: Arc::clone(&self.before_send_hook),
+            #[cfg(test)]
+            after_merge_hook: Arc::clone(&self.after_merge_hook),
         }
     }
 }
@@ -510,6 +516,8 @@ impl TokenStore {
             after_send_hook: Arc::new(Mutex::new(None)),
             #[cfg(test)]
             before_send_hook: Arc::new(Mutex::new(None)),
+            #[cfg(test)]
+            after_merge_hook: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -1314,6 +1322,12 @@ impl TokenStore {
 
         let mut state = self.inner.lock().expect("token store lock");
         let merged = Self::merge_disk_probe(&mut state, &self.transient_flight, probe);
+        #[cfg(test)]
+        if slot.is_some() {
+            if let Some(hook) = lock_ignoring_poison(&self.after_merge_hook).take() {
+                hook();
+            }
+        }
         drop(slot);
         merged
     }
@@ -1760,6 +1774,17 @@ mod tests {
                 started.store(second.is_some(), Ordering::Release);
             }));
         }
+        let live_at_merge = Arc::new(AtomicUsize::new(usize::MAX));
+        {
+            let live = Arc::clone(&live_at_merge);
+            let merging = store.clone();
+            *store.after_merge_hook.lock().unwrap() = Some(Box::new(move || {
+                live.store(
+                    merging.disk_probe_live.load(Ordering::Acquire),
+                    Ordering::Release,
+                );
+            }));
+        }
         let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
         *store.after_send_hook.lock().unwrap() = Some(Box::new(move || {
             assert!(
@@ -1780,6 +1805,11 @@ mod tests {
             live_before_send.load(Ordering::Acquire),
             1,
             "the probe slot was free before the result was delivered"
+        );
+        assert_eq!(
+            live_at_merge.load(Ordering::Acquire),
+            1,
+            "the probe slot was free before the result was merged"
         );
         assert!(
             !second_probe_started.load(Ordering::Acquire),
