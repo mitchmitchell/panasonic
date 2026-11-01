@@ -1025,6 +1025,7 @@ mod unbuilt_sim_trigger_tests {
         std::fs::write(&cfg.tokens_path, serde_json::to_vec(&tokens).unwrap()).unwrap();
         let (tx, _rx) = mpsc::channel(4);
         ApiState {
+            port: crate::transport::device_arbiter(&cfg),
             config: cfg.clone(),
             profile: Arc::new(RwLock::new(Profile::Sim)),
             transport_label: "sim".into(),
