@@ -164,7 +164,24 @@ fn is_under_credentials_directory(path: &Path) -> bool {
     path.starts_with(&cred)
 }
 
-#[cfg(any(test, feature = "test-secret-skip"))]
+#[cfg(test)]
+thread_local! {
+    static SKIP_SECRET_FILE_CHECKS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Sets the unit-test skip flag for the calling thread only, so parallel
+/// tests cannot flip each other's secret-file checks (issue #83).
+#[cfg(test)]
+pub(crate) fn set_skip_secret_file_checks(skip: bool) {
+    SKIP_SECRET_FILE_CHECKS.with(|flag| flag.set(skip));
+}
+
+#[cfg(test)]
+pub(crate) fn skip_secret_file_checks() -> bool {
+    SKIP_SECRET_FILE_CHECKS.with(std::cell::Cell::get)
+}
+
+#[cfg(all(not(test), feature = "test-secret-skip"))]
 pub(crate) fn skip_secret_file_checks() -> bool {
     std::env::var("KXPROV_SKIP_SECRET_FILE_CHECKS")
         .ok()
@@ -192,7 +209,7 @@ mod tests {
 
     #[test]
     fn rejects_symlink_secret() {
-        std::env::remove_var("KXPROV_SKIP_SECRET_FILE_CHECKS");
+        set_skip_secret_file_checks(false);
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("real");
         write_secret(&target, "x", 0o600);
@@ -207,7 +224,7 @@ mod tests {
 
     #[test]
     fn rejects_group_writable() {
-        std::env::remove_var("KXPROV_SKIP_SECRET_FILE_CHECKS");
+        set_skip_secret_file_checks(false);
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("secret");
         write_secret(&path, "x", 0o660);
@@ -217,7 +234,7 @@ mod tests {
 
     #[test]
     fn accepts_owner_euid_mode_0600() {
-        std::env::remove_var("KXPROV_SKIP_SECRET_FILE_CHECKS");
+        set_skip_secret_file_checks(false);
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("secret");
         write_secret(&path, "x", 0o600);
@@ -227,7 +244,7 @@ mod tests {
     #[test]
     #[serial]
     fn accepts_credential_mode_0440_root_owned() {
-        std::env::remove_var("KXPROV_SKIP_SECRET_FILE_CHECKS");
+        set_skip_secret_file_checks(false);
         let dir = tempfile::tempdir().unwrap();
         let cred = dir.path().join("creds");
         std::fs::create_dir_all(&cred).unwrap();
