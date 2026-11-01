@@ -2065,6 +2065,68 @@ mod tests {
     }
 
     #[test]
+    fn reload_keeps_the_merge_generation_so_a_bad_probe_from_before_two_good_merges_is_dropped() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("tokens.json");
+        write_tokens_revoking_writer(&path, false);
+        let store = TokenStore::load_insecure(path.clone()).expect("load");
+        let mut state = store.inner.lock().unwrap();
+        let start_generation = state.merge_generation;
+
+        write_tokens_revoking_writer(&path, true);
+        let revoked = std::fs::read(&path).expect("read revoked tokens");
+        TokenStore::merge_at_current_generation(
+            &mut state,
+            &store.transient_flight,
+            DiskProbe::Ok(revoked),
+        )
+        .expect("first good merge");
+        let plan_generation = state.merge_generation;
+        assert_eq!(plan_generation, start_generation.wrapping_add(1));
+
+        write_tokens_revoking_writer(&path, false);
+        let restored = std::fs::read(&path).expect("read restored tokens");
+        TokenStore::merge_at_current_generation(
+            &mut state,
+            &store.transient_flight,
+            DiskProbe::Ok(restored),
+        )
+        .expect("second good merge");
+        assert_eq!(
+            state.merge_generation,
+            plan_generation.wrapping_add(1),
+            "a reload that replaces the state must keep counting merge generations"
+        );
+
+        let now = Instant::now();
+        let outage_start = now
+            .checked_sub(Duration::from_secs(30))
+            .expect("backdate within Instant range");
+        let stale = TokenStore::merge_disk_probe(
+            &mut state,
+            &store.transient_flight,
+            plan_generation,
+            DiskProbe::StillBad {
+                fp: DiskFingerprint::Unreadable,
+                outage_start,
+                last_bad_read: now,
+            },
+        );
+        assert!(
+            stale.is_ok(),
+            "a bad probe planned before the second good merge must be dropped"
+        );
+        assert!(
+            !state.store_unavailable,
+            "the stale bad probe latched the store"
+        );
+        assert!(
+            state.reload_failure_since.is_none() && state.stale_since.is_none(),
+            "the stale bad probe re-opened the outage"
+        );
+    }
+
+    #[test]
     fn ok_probe_failing_validation_keeps_the_latch_for_an_older_still_bad() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let path = tmp.path().join("tokens.json");
