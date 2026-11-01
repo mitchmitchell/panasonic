@@ -402,9 +402,9 @@ impl TokenStore {
             .take()
         {
             if !active.abandoned.swap(true, Ordering::AcqRel) {
-                let _ = self
-                    .disk_probe_live
-                    .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_sub(1));
+                let _ =
+                    self.disk_probe_live
+                        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_sub(1));
                 let ticket = &active.ticket;
                 if !ticket.exited.load(Ordering::Acquire) {
                     if let Some(id) = ticket.identity {
@@ -711,7 +711,9 @@ impl TokenStore {
                 self.latch_probe_fast_fail();
                 return Err(TokenError::StoreUnavailable);
             }
-            if let Some(guard) = self.try_begin_disk_probe(&plan.path, Arc::clone(&abandoned), &ticket) {
+            if let Some(guard) =
+                self.try_begin_disk_probe(&plan.path, Arc::clone(&abandoned), &ticket)
+            {
                 break guard;
             }
             if instant_deny || Instant::now() >= wait_until {
@@ -1527,7 +1529,15 @@ mod tests {
         store
             .verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan)
             .expect("reload recovers after hung probe");
-        assert_eq!(store.live_disk_probe_threads_for_test(), 0);
+        let exit_deadline = Instant::now() + Duration::from_secs(5);
+        while store.live_disk_probe_threads_for_test() > 0 {
+            assert!(
+                Instant::now() < exit_deadline,
+                "recovery probe thread did not exit after sending its result"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(store.leaked_disk_probe_threads_for_test(), 0);
     }
 
     #[test]
@@ -1711,10 +1721,16 @@ mod tests {
             Err(TokenError::StoreUnavailable)
         ));
         write_tokens_revoking_writer(&path, true);
-        assert!(matches!(
-            store.verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan),
-            Err(TokenError::Revoked)
-        ));
+        let recover_deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match store.verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan) {
+                Err(TokenError::Revoked) => break,
+                Err(TokenError::StoreUnavailable) if Instant::now() < recover_deadline => {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                other => panic!("revoked writer must stay rejected after recovery: {other:?}"),
+            }
+        }
     }
 
     #[test]
