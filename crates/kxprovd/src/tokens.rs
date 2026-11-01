@@ -141,6 +141,9 @@ pub struct TokenStore {
     /// Runs on the probe thread right after it sends its result.
     #[cfg(test)]
     after_send_hook: Arc<Mutex<Option<AbandonHook>>>,
+    /// Runs on the probe thread right before it sends its result.
+    #[cfg(test)]
+    before_send_hook: Arc<Mutex<Option<AbandonHook>>>,
 }
 
 struct TokenRefreshDelta {
@@ -168,6 +171,8 @@ impl Clone for TokenStore {
             abandon_hook: Arc::clone(&self.abandon_hook),
             #[cfg(test)]
             after_send_hook: Arc::clone(&self.after_send_hook),
+            #[cfg(test)]
+            before_send_hook: Arc::clone(&self.before_send_hook),
         }
     }
 }
@@ -313,16 +318,41 @@ fn path_identity(_path: &Path) -> Option<PathIdentity> {
     None
 }
 
+/// The store's one live disk-probe slot, held by the caller that started
+/// the probe.
+///
+/// The caller drops it only after it has merged the probe's result, so no
+/// second probe can start while a result is still undelivered, and a finished
+/// probe thread never keeps the slot busy for the next caller.
 struct DiskProbeLiveGuard {
     live: Arc<AtomicUsize>,
     fast_fail_until: Arc<Mutex<Option<Instant>>>,
     abandoned: Arc<AtomicBool>,
+    ticket: Arc<ProbeTicket>,
+    active_probe_abandon: Arc<Mutex<Option<ActiveProbe>>>,
+    probe_path_identity: Arc<Mutex<Option<PathIdentity>>>,
+}
+
+/// A probe result, plus the live slot when this caller started the probe.
+struct ProbeOutcome {
+    probe: DiskProbe,
+    slot: Option<DiskProbeLiveGuard>,
 }
 
 impl Drop for DiskProbeLiveGuard {
     fn drop(&mut self) {
         if self.abandoned.swap(true, Ordering::AcqRel) {
             return;
+        }
+        {
+            let mut active = lock_ignoring_poison(&self.active_probe_abandon);
+            if active
+                .as_ref()
+                .is_some_and(|a| Arc::ptr_eq(&a.ticket, &self.ticket))
+            {
+                *active = None;
+                *lock_ignoring_poison(&self.probe_path_identity) = None;
+            }
         }
         if self
             .live
@@ -332,7 +362,7 @@ impl Drop for DiskProbeLiveGuard {
             tracing::error!("disk_probe_live was already 0 when a probe released its slot");
         }
         if self.live.load(Ordering::Acquire) == 0 {
-            *self.fast_fail_until.lock().expect("probe fast-fail lock") = None;
+            *lock_ignoring_poison(&self.fast_fail_until) = None;
         }
     }
 }
@@ -478,6 +508,8 @@ impl TokenStore {
             abandon_hook: Arc::new(Mutex::new(None)),
             #[cfg(test)]
             after_send_hook: Arc::new(Mutex::new(None)),
+            #[cfg(test)]
+            before_send_hook: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -632,6 +664,9 @@ impl TokenStore {
                 live: Arc::clone(&self.disk_probe_live),
                 fast_fail_until: Arc::clone(&self.probe_fast_fail_until),
                 abandoned,
+                ticket: Arc::clone(ticket),
+                active_probe_abandon: Arc::clone(&self.active_probe_abandon),
+                probe_path_identity: Arc::clone(&self.probe_path_identity),
             })
         } else {
             None
@@ -834,7 +869,7 @@ impl TokenStore {
         }
     }
 
-    fn run_disk_probe_off_thread(&self, plan: ReloadPlan) -> Result<DiskProbe, TokenError> {
+    fn run_disk_probe_off_thread(&self, plan: ReloadPlan) -> Result<ProbeOutcome, TokenError> {
         self.reconcile_stuck_probe_for_path(&plan.path);
         let instant_deny = Self::reload_plan_in_outage(&plan);
         let wait_until = if instant_deny {
@@ -885,6 +920,8 @@ impl TokenStore {
         probe_plan.probe_cancel = Arc::clone(&abandoned);
         #[cfg(test)]
         let after_send_hook = lock_ignoring_poison(&self.after_send_hook).take();
+        #[cfg(test)]
+        let before_send_hook = lock_ignoring_poison(&self.before_send_hook).take();
         let spawn_ok = std::thread::Builder::new()
             .name("token-reload-probe".into())
             .spawn(move || {
@@ -897,9 +934,12 @@ impl TokenStore {
                     abandoned_refcounts,
                 };
                 let probe = Self::execute_disk_probe(&probe_plan);
-                drop(live_guard);
                 drop(thread_guard);
                 drop(slot);
+                #[cfg(test)]
+                if let Some(hook) = before_send_hook {
+                    hook();
+                }
                 if tx.send(probe).is_err() {
                     tracing::debug!(
                         "token-reload-probe result dropped: the caller stopped waiting for it"
@@ -932,26 +972,25 @@ impl TokenStore {
         if timeout.is_zero() {
             self.latch_probe_fast_fail();
             self.abandon_stuck_probe();
-            return Ok(Self::timed_out_disk_probe());
+            return Ok(ProbeOutcome {
+                probe: Self::timed_out_disk_probe(),
+                slot: None,
+            });
         }
         #[cfg(feature = "test-util")]
         RELOAD_WAITS.with(|w| w.set(w.get() + 1));
         match rx.recv_timeout(timeout) {
-            Ok(probe) => {
-                *self
-                    .probe_path_identity
-                    .lock()
-                    .expect("probe path identity lock") = None;
-                *self
-                    .active_probe_abandon
-                    .lock()
-                    .expect("active probe abandon lock") = None;
-                Ok(probe)
-            }
+            Ok(probe) => Ok(ProbeOutcome {
+                probe,
+                slot: Some(live_guard),
+            }),
             Err(_) => {
                 self.latch_probe_fast_fail();
                 self.abandon_stuck_probe();
-                Ok(Self::timed_out_disk_probe())
+                Ok(ProbeOutcome {
+                    probe: Self::timed_out_disk_probe(),
+                    slot: None,
+                })
             }
         }
     }
@@ -960,13 +999,14 @@ impl TokenStore {
         &self,
         flight: &TransientReloadFlight,
         plan: ReloadPlan,
-    ) -> Result<DiskProbe, TokenError> {
+    ) -> Result<ProbeOutcome, TokenError> {
+        let follower = |probe: DiskProbe| ProbeOutcome { probe, slot: None };
         let wait_until =
             plan.outage_start.unwrap_or_else(Instant::now) + Self::reload_grace_duration();
         let mut guard = flight.inner.lock().expect("transient flight lock");
         loop {
             match &*guard {
-                TransientFlightState::Done(probe) => return Ok(probe.clone()),
+                TransientFlightState::Done(probe) => return Ok(follower(probe.clone())),
                 TransientFlightState::Running => {
                     if self.disk_probe_live.load(Ordering::Acquire) > 0
                         && !self.probe_path_differs_from_live(&plan.path)
@@ -985,7 +1025,7 @@ impl TokenStore {
                         let probe = Self::timed_out_disk_probe();
                         *guard = TransientFlightState::Done(probe.clone());
                         flight.cv.notify_all();
-                        return Ok(probe);
+                        return Ok(follower(probe));
                     }
                     #[cfg(feature = "test-util")]
                     RELOAD_WAITS.with(|w| w.set(w.get() + 1));
@@ -998,7 +1038,7 @@ impl TokenStore {
                         let probe = Self::timed_out_disk_probe();
                         *guard = TransientFlightState::Done(probe.clone());
                         flight.cv.notify_all();
-                        return Ok(probe);
+                        return Ok(follower(probe));
                     }
                 }
                 TransientFlightState::Idle => {
@@ -1018,7 +1058,7 @@ impl TokenStore {
                         Err(e) => return Err(e),
                     };
                     let mut guard = flight.inner.lock().expect("transient flight lock");
-                    *guard = TransientFlightState::Done(probe.clone());
+                    *guard = TransientFlightState::Done(probe.probe.clone());
                     flight.cv.notify_all();
                     return Ok(probe);
                 }
@@ -1266,14 +1306,16 @@ impl TokenStore {
         } else {
             self.coordinated_transient_probe(&self.transient_flight, plan)
         };
-        let probe = match probe {
+        let ProbeOutcome { probe, slot } = match probe {
             Ok(p) => p,
             Err(TokenError::StoreUnavailable) => return Err(self.fail_closed(during_outage)),
             Err(e) => return Err(e),
         };
 
         let mut state = self.inner.lock().expect("token store lock");
-        Self::merge_disk_probe(&mut state, &self.transient_flight, probe)
+        let merged = Self::merge_disk_probe(&mut state, &self.transient_flight, probe);
+        drop(slot);
+        merged
     }
 
     fn apply_reloaded_bytes(
@@ -1692,11 +1734,32 @@ mod tests {
     }
 
     #[test]
-    fn probe_releases_its_slots_before_sending_its_result() {
+    fn probe_slot_is_held_until_the_result_is_merged_then_freed() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let path = tmp.path().join("tokens.json");
         write_tokens_revoking_writer(&path, false);
         let store = TokenStore::load_insecure(path.clone()).expect("load");
+        let live_before_send = Arc::new(AtomicUsize::new(usize::MAX));
+        let second_probe_started = Arc::new(AtomicBool::new(true));
+        {
+            let live = Arc::clone(&live_before_send);
+            let started = Arc::clone(&second_probe_started);
+            let probing = store.clone();
+            let probe_path = path.clone();
+            *store.before_send_hook.lock().unwrap() = Some(Box::new(move || {
+                live.store(
+                    probing.disk_probe_live.load(Ordering::Acquire),
+                    Ordering::Release,
+                );
+                let ticket = ProbeTicket::new(path_identity(&probe_path));
+                let second = probing.try_begin_disk_probe(
+                    &probe_path,
+                    Arc::new(AtomicBool::new(false)),
+                    &ticket,
+                );
+                started.store(second.is_some(), Ordering::Release);
+            }));
+        }
         let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
         *store.after_send_hook.lock().unwrap() = Some(Box::new(move || {
             assert!(
@@ -1709,18 +1772,29 @@ mod tests {
             store.verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan),
             Err(TokenError::Revoked)
         ));
-        let live = store.live_disk_probe_threads_for_test();
-        let probe_live = store.disk_probe_live.load(Ordering::Acquire);
+        let live_after_merge = store.disk_probe_live.load(Ordering::Acquire);
+        let threads_after_merge = store.live_disk_probe_threads_for_test();
         release_tx.send(()).expect("release probe thread");
-        assert_eq!(
-            live, 0,
-            "probe thread held its slot after sending its result"
-        );
-        assert_eq!(
-            probe_live, 0,
-            "probe held disk_probe_live after sending its result"
-        );
         assert!(store.wait_probe_threads_exited_for_test(Duration::from_secs(10)));
+        assert_eq!(
+            live_before_send.load(Ordering::Acquire),
+            1,
+            "the probe slot was free before the result was delivered"
+        );
+        assert!(
+            !second_probe_started.load(Ordering::Acquire),
+            "a second probe started while the first result was undelivered"
+        );
+        assert_eq!(
+            live_after_merge, 0,
+            "the probe slot stayed busy after the result was merged"
+        );
+        assert_eq!(
+            threads_after_merge, 0,
+            "a finished probe thread still counted as alive after sending its result"
+        );
+        assert!(store.active_probe_abandon.lock().unwrap().is_none());
+        assert!(store.probe_path_identity.lock().unwrap().is_none());
     }
 
     #[test]
