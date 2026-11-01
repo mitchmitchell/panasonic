@@ -2439,6 +2439,7 @@ mod tests {
 
     #[test]
     fn reload_hung_probe_fails_closed_and_recovers() {
+        let _grace = GraceOverride::set(Duration::from_millis(200));
         let tmp = tempfile::tempdir().expect("tempdir");
         let path = tmp.path().join("tokens.json");
         write_tokens_revoking_writer(&path, false);
@@ -2448,30 +2449,36 @@ mod tests {
             .expect("warm");
         std::fs::write(&path, b"{bad").unwrap();
         let hang_limit = Duration::from_secs(10);
-        {
-            let _hang = ReloadProbeHangGuard::enable(&store);
-            let wall = Instant::now();
-            store
-                .verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan)
-                .expect("the first hung probe starts the grace and serves cached entries");
-            assert!(
-                wall.elapsed() <= hang_limit,
-                "first hung probe call hung: the 10 s limit only catches a deadlock, not slowness"
-            );
-            let wall2 = Instant::now();
-            assert!(matches!(
-                store.verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan),
-                Err(TokenError::StoreUnavailable)
-            ));
-            assert!(
-                wall2.elapsed() <= hang_limit,
-                "follow-up reload hung: the 10 s limit only catches a deadlock, not slowness"
-            );
-        }
+
+        let first = block_next_probe_delivery(&store);
+        let wall = Instant::now();
+        store
+            .verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan)
+            .expect("the first hung probe starts the grace and serves cached entries");
+        assert!(
+            wall.elapsed() <= hang_limit,
+            "first hung probe call hung: the 10 s limit only catches a deadlock, not slowness"
+        );
+
+        store.wait_probe_fast_fail_window_closed_for_test();
+        let second = block_next_probe_delivery(&store);
+        let wall2 = Instant::now();
+        assert!(matches!(
+            store.verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan),
+            Err(TokenError::StoreUnavailable)
+        ));
+        assert!(
+            wall2.elapsed() <= hang_limit,
+            "follow-up reload hung: the 10 s limit only catches a deadlock, not slowness"
+        );
+
+        first.send(()).expect("release first probe");
+        second.send(()).expect("release second probe");
         assert!(
             store.wait_probe_threads_exited_for_test(Duration::from_secs(10)),
-            "probe thread did not finish after hang cleared"
+            "probe thread did not finish after it was released"
         );
+        store.wait_probe_fast_fail_window_closed_for_test();
         write_tokens_revoking_writer(&path, false);
         store
             .verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan)
