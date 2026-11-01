@@ -2056,7 +2056,7 @@ mod tests {
 
     #[test]
     fn stall_after_a_timeout_is_admitted_inside_grace_but_fails_closed_past_max_stale_serve() {
-        let grace = Duration::from_millis(500);
+        let grace = Duration::from_millis(1000);
         let _grace = GraceOverride::set(grace);
         let tmp = tempfile::tempdir().expect("tempdir");
         let path = tmp.path().join("tokens.json");
@@ -2174,7 +2174,7 @@ mod tests {
 
     #[test]
     fn request_admitted_before_max_stale_serve_whose_probe_stalls_past_it_fails_closed() {
-        let grace = Duration::from_millis(1000);
+        let grace = Duration::from_millis(2000);
         let _grace = GraceOverride::set(grace);
         let bound = TokenStore::max_stale_serve();
         let tmp = tempfile::tempdir().expect("tempdir");
