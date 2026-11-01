@@ -118,6 +118,11 @@ thread_local! {
 #[cfg(test)]
 type AbandonHook = Box<dyn FnOnce() + Send>;
 
+#[cfg(test)]
+thread_local! {
+    static RELOAD_GRACE_OVERRIDE: std::cell::Cell<Option<Duration>> = const { std::cell::Cell::new(None) };
+}
+
 pub struct TokenStore {
     inner: Arc<Mutex<TokenState>>,
     job_queue: Arc<Mutex<Option<Weak<JobQueue>>>>,
@@ -274,6 +279,9 @@ struct ProbeTicket {
     identity: Option<PathIdentity>,
     exited: AtomicBool,
     counted: AtomicBool,
+    /// Runs on the exiting probe thread right before it takes the refcount lock.
+    #[cfg(test)]
+    exit_lock_hook: Mutex<Option<AbandonHook>>,
 }
 
 impl ProbeTicket {
@@ -282,6 +290,8 @@ impl ProbeTicket {
             identity,
             exited: AtomicBool::new(false),
             counted: AtomicBool::new(false),
+            #[cfg(test)]
+            exit_lock_hook: Mutex::new(None),
         })
     }
 }
@@ -298,6 +308,10 @@ struct ProbeThreadAliveGuard {
 
 impl Drop for ProbeThreadAliveGuard {
     fn drop(&mut self) {
+        #[cfg(test)]
+        if let Some(hook) = lock_ignoring_poison(&self.ticket.exit_lock_hook).take() {
+            hook();
+        }
         let mut map = lock_ignoring_poison(&self.abandoned_refcounts);
         self.ticket.exited.store(true, Ordering::Release);
         if !self.ticket.counted.load(Ordering::Acquire) {
@@ -734,11 +748,25 @@ impl TokenStore {
         serde_json::from_slice::<TokensFile>(raw).is_ok()
     }
 
+    /// How long cached entries are served after the tokens file was last seen
+    /// good, before bearer access fails closed.
     const RELOAD_GRACE: Duration = Duration::from_secs(2);
+    /// How long past the grace a caller waits for a probe thread to deliver.
+    const PROBE_DELIVERY_SLACK: Duration = Duration::from_millis(300);
     const RELOAD_MAX_ATTEMPTS: usize = 3;
 
     fn reload_grace_duration() -> Duration {
+        #[cfg(test)]
+        if let Some(grace) = RELOAD_GRACE_OVERRIDE.with(std::cell::Cell::get) {
+            return grace;
+        }
         Self::RELOAD_GRACE
+    }
+
+    /// How long a caller waits for a probe result: the grace plus
+    /// [`Self::PROBE_DELIVERY_SLACK`].
+    fn probe_delivery_deadline() -> Duration {
+        Self::reload_grace_duration().saturating_add(Self::PROBE_DELIVERY_SLACK)
     }
 
     #[cfg(unix)]
@@ -871,20 +899,31 @@ impl TokenStore {
         flight.reset();
     }
 
-    fn timed_out_disk_probe() -> DiskProbe {
-        let outage_start = Instant::now()
-            .checked_sub(Self::reload_grace_duration())
-            .unwrap_or_else(Instant::now);
+    /// A probe that delivered nothing is an outage that began at
+    /// `outage_start`; `last_bad_read` is the last moment the file is known to
+    /// have been unavailable, which decides whether the grace has run out.
+    fn timed_out_disk_probe(outage_start: Instant, last_bad_read: Instant) -> DiskProbe {
         DiskProbe::StillBad {
             fp: DiskFingerprint::Unreadable,
             outage_start,
-            last_bad_read: Instant::now(),
+            last_bad_read,
         }
+    }
+
+    /// The result handed to followers when the leader could not run a probe
+    /// at all: an outage whose grace has already run out, so they fail closed.
+    fn expired_disk_probe() -> DiskProbe {
+        let now = Instant::now();
+        let outage_start = now
+            .checked_sub(Self::reload_grace_duration())
+            .unwrap_or(now);
+        Self::timed_out_disk_probe(outage_start, now)
     }
 
     fn run_disk_probe_off_thread(&self, plan: ReloadPlan) -> Result<ProbeOutcome, TokenError> {
         self.reconcile_stuck_probe_for_path(&plan.path);
         let instant_deny = Self::reload_plan_in_outage(&plan);
+        let plan_outage_start = plan.outage_start;
         let wait_until = if instant_deny {
             Instant::now()
         } else {
@@ -908,7 +947,11 @@ impl TokenStore {
             }
             std::thread::sleep(Duration::from_millis(1));
         };
-        let deadline = Instant::now() + Self::reload_grace_duration();
+        let probe_started = Instant::now();
+        let timed_out = || {
+            Self::timed_out_disk_probe(plan_outage_start.unwrap_or(probe_started), probe_started)
+        };
+        let deadline = probe_started + Self::probe_delivery_deadline();
         let (tx, rx) = std::sync::mpsc::sync_channel(1);
         let probe_alive = Arc::clone(&self.probe_threads_alive);
         let exit_signal = Arc::clone(&self.probe_exit_signal);
@@ -979,14 +1022,12 @@ impl TokenStore {
             self.latch_probe_fast_fail();
             return Err(TokenError::StoreUnavailable);
         }
-        let timeout = deadline
-            .saturating_duration_since(Instant::now())
-            .saturating_add(Duration::from_millis(300));
+        let timeout = deadline.saturating_duration_since(Instant::now());
         if timeout.is_zero() {
             self.latch_probe_fast_fail();
             self.abandon_stuck_probe();
             return Ok(ProbeOutcome {
-                probe: Self::timed_out_disk_probe(),
+                probe: timed_out(),
                 slot: None,
             });
         }
@@ -1001,7 +1042,7 @@ impl TokenStore {
                 self.latch_probe_fast_fail();
                 self.abandon_stuck_probe();
                 Ok(ProbeOutcome {
-                    probe: Self::timed_out_disk_probe(),
+                    probe: timed_out(),
                     slot: None,
                 })
             }
@@ -1014,8 +1055,8 @@ impl TokenStore {
         plan: ReloadPlan,
     ) -> Result<ProbeOutcome, TokenError> {
         let follower = |probe: DiskProbe| ProbeOutcome { probe, slot: None };
-        let wait_until =
-            plan.outage_start.unwrap_or_else(Instant::now) + Self::reload_grace_duration();
+        let follower_outage_start = plan.outage_start.unwrap_or_else(Instant::now);
+        let wait_until = follower_outage_start + Self::reload_grace_duration();
         let mut guard = flight.inner.lock().expect("transient flight lock");
         loop {
             match &*guard {
@@ -1035,7 +1076,8 @@ impl TokenStore {
                     }
                     let remaining = wait_until.saturating_duration_since(Instant::now());
                     if remaining.is_zero() {
-                        let probe = Self::timed_out_disk_probe();
+                        let probe =
+                            Self::timed_out_disk_probe(follower_outage_start, Instant::now());
                         *guard = TransientFlightState::Done(probe.clone());
                         flight.cv.notify_all();
                         return Ok(follower(probe));
@@ -1048,7 +1090,8 @@ impl TokenStore {
                         .expect("transient flight wait");
                     guard = g;
                     if wait.timed_out() && matches!(*guard, TransientFlightState::Running) {
-                        let probe = Self::timed_out_disk_probe();
+                        let probe =
+                            Self::timed_out_disk_probe(follower_outage_start, Instant::now());
                         *guard = TransientFlightState::Done(probe.clone());
                         flight.cv.notify_all();
                         return Ok(follower(probe));
@@ -1060,12 +1103,12 @@ impl TokenStore {
                     flight.leaders.fetch_add(1, Ordering::AcqRel);
                     drop(guard);
                     let _leader =
-                        TransientProbeLeaderGuard::new(flight, Self::timed_out_disk_probe());
+                        TransientProbeLeaderGuard::new(flight, Self::expired_disk_probe());
                     let probe = match self.run_disk_probe_off_thread(plan.clone()) {
                         Ok(p) => p,
                         Err(TokenError::StoreUnavailable) => {
                             let mut guard = flight.inner.lock().expect("transient flight lock");
-                            let probe = Self::timed_out_disk_probe();
+                            let probe = Self::expired_disk_probe();
                             *guard = TransientFlightState::Done(probe);
                             flight.cv.notify_all();
                             return Err(TokenError::StoreUnavailable);
@@ -1250,6 +1293,9 @@ impl TokenStore {
                 outage_start,
                 last_bad_read,
             } => {
+                let outage_start = state
+                    .reload_failure_since
+                    .map_or(outage_start, |since| since.min(outage_start));
                 state.reload_failure_since = Some(outage_start);
                 state.reload_transient_done = true;
                 state.reload_failed_disk_fingerprint = Some(fp);
@@ -1726,6 +1772,11 @@ mod tests {
         write_tokens_revoking_writer(&path, false);
         let store = TokenStore::load_insecure(path.clone()).expect("load");
         let ticket = arm_active_probe(&store, &path);
+        let (at_lock_tx, at_lock_rx) = std::sync::mpsc::channel();
+        *ticket.exit_lock_hook.lock().unwrap() = Some(Box::new(move || {
+            at_lock_tx.send(()).unwrap();
+        }));
+        let watched = Arc::clone(&ticket);
         let exiter_store = store.clone();
         let (done_tx, done_rx) = std::sync::mpsc::channel();
         let done_rx = Arc::new(Mutex::new(done_rx));
@@ -1737,6 +1788,14 @@ mod tests {
                 probe_thread_exit(&exiter_store, ticket);
                 done_tx.send(()).unwrap();
             }));
+            assert!(
+                at_lock_rx.recv_timeout(Duration::from_secs(10)).is_ok(),
+                "exiting probe never reached the refcount lock: the 10 s limit only catches a deadlock"
+            );
+            assert!(
+                !watched.exited.load(Ordering::Acquire),
+                "probe marked itself exited before taking the refcount lock"
+            );
             assert!(
                 hook_rx
                     .lock()
@@ -1832,6 +1891,114 @@ mod tests {
         );
         assert!(store.active_probe_abandon.lock().unwrap().is_none());
         assert!(store.probe_path_identity.lock().unwrap().is_none());
+    }
+
+    struct GraceOverride;
+
+    impl GraceOverride {
+        fn set(grace: Duration) -> Self {
+            RELOAD_GRACE_OVERRIDE.with(|g| g.set(Some(grace)));
+            Self
+        }
+    }
+
+    impl Drop for GraceOverride {
+        fn drop(&mut self) {
+            RELOAD_GRACE_OVERRIDE.with(|g| g.set(None));
+        }
+    }
+
+    fn block_next_probe_delivery(store: &TokenStore) -> std::sync::mpsc::Sender<()> {
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        *store.before_send_hook.lock().unwrap() = Some(Box::new(move || {
+            assert!(
+                release_rx.recv_timeout(Duration::from_secs(10)).is_ok(),
+                "test never released the probe thread: the 10 s limit only catches a deadlock"
+            );
+        }));
+        release_tx
+    }
+
+    #[test]
+    fn probe_timeout_is_an_outage_from_probe_start_with_normal_grace() {
+        let _grace = GraceOverride::set(Duration::from_millis(50));
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("tokens.json");
+        write_tokens_revoking_writer(&path, false);
+        let store = TokenStore::load_insecure(path.clone()).expect("load");
+
+        let first = block_next_probe_delivery(&store);
+        let before_first = Instant::now();
+        store
+            .verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan)
+            .expect("an undelivered probe starts the grace; cached entries are served");
+        let outage_start = {
+            let state = store.inner.lock().unwrap();
+            assert!(!state.store_unavailable, "a first timeout must not latch");
+            state
+                .reload_failure_since
+                .expect("timeout starts an outage")
+        };
+        assert!(
+            outage_start >= before_first,
+            "the outage must start when the probe started, not be backdated"
+        );
+
+        store.wait_probe_fast_fail_window_closed_for_test();
+        let second = block_next_probe_delivery(&store);
+        assert!(matches!(
+            store.verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan),
+            Err(TokenError::StoreUnavailable)
+        ));
+        {
+            let state = store.inner.lock().unwrap();
+            assert!(state.store_unavailable, "past the grace it fails closed");
+            assert_eq!(
+                state.reload_failure_since,
+                Some(outage_start),
+                "a second timeout must not move the outage start"
+            );
+        }
+
+        first.send(()).expect("release first probe");
+        second.send(()).expect("release second probe");
+        assert!(store.wait_probe_threads_exited_for_test(Duration::from_secs(10)));
+        store.wait_probe_fast_fail_window_closed_for_test();
+        store
+            .verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan)
+            .expect("a good probe ends the outage");
+        {
+            let state = store.inner.lock().unwrap();
+            assert!(!state.store_unavailable);
+            assert!(state.reload_failure_since.is_none());
+        }
+        assert_eq!(store.leaked_disk_probe_threads_for_test(), 0);
+
+        write_tokens_revoking_writer(&path, true);
+        assert!(matches!(
+            store.verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan),
+            Err(TokenError::Revoked)
+        ));
+    }
+
+    #[test]
+    fn later_bad_probe_inside_grace_does_not_extend_the_outage() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("tokens.json");
+        write_tokens_revoking_writer(&path, false);
+        let store = TokenStore::load_insecure(path.clone()).expect("load");
+        let grace = TokenStore::reload_grace_duration();
+        let first_start = Instant::now();
+        let mut state = store.inner.lock().unwrap();
+        let first = TokenStore::timed_out_disk_probe(first_start, first_start);
+        assert!(TokenStore::merge_disk_probe(&mut state, &store.transient_flight, first).is_ok());
+        let later_start = first_start + grace / 2;
+        let later = TokenStore::timed_out_disk_probe(later_start, first_start + grace);
+        assert!(matches!(
+            TokenStore::merge_disk_probe(&mut state, &store.transient_flight, later),
+            Err(TokenError::StoreUnavailable)
+        ));
+        assert_eq!(state.reload_failure_since, Some(first_start));
     }
 
     #[test]
@@ -2190,9 +2357,16 @@ mod tests {
                 "iteration {i}: a finished probe must not hold its slot into the next call"
             );
             write_tokens_revoking_writer(&path, true);
-            let err = store
+            let mut err = store
                 .verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan)
                 .expect_err("revoke must be visible immediately");
+            if matches!(err, TokenError::StoreUnavailable) {
+                assert!(store.wait_probe_threads_exited_for_test(Duration::from_secs(10)));
+                store.wait_probe_fast_fail_window_closed_for_test();
+                err = store
+                    .verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan)
+                    .expect_err("revoke must be visible once the stalled probe is gone");
+            }
             assert!(
                 matches!(err, TokenError::Revoked),
                 "missed revoke on iteration {i}: {err:?}"
