@@ -52,6 +52,11 @@ struct TokenState {
     enforce_secure_reload: bool,
     /// When transient reload began; stale snapshot allowed until this ages out (~2s total).
     reload_failure_since: Option<Instant>,
+    /// Earliest moment in this outage episode the cached entries stopped being
+    /// confirmed by disk: the start of the first stalled probe, or the outage
+    /// start if that is earlier. [`TokenStore::max_stale_serve`] is measured
+    /// from here when an answer is returned.
+    stale_since: Option<Instant>,
     /// After grace expires, reject bearer auth until a good reload succeeds.
     store_unavailable: bool,
     store_unavailable_logged: bool,
@@ -777,13 +782,11 @@ impl TokenStore {
     /// served for a further [`Self::reload_grace_duration`] before bearer access
     /// fails closed. That is `2 * RELOAD_GRACE + PROBE_DELIVERY_SLACK`, 4.3 s in
     /// production. Saturates at [`Duration::MAX`] instead of panicking.
-    #[cfg_attr(
-        not(all(test, feature = "test-util")),
-        expect(
-            dead_code,
-            reason = "documents the stale-serve bound; only tests read it at runtime"
-        )
-    )]
+    ///
+    /// Enforced when an answer is returned, not when a request is admitted:
+    /// a cached answer is given only while `now - stale_since` is at most this
+    /// bound, so a request admitted just before it whose probe then stalls
+    /// fails closed instead of returning cached entries late.
     fn max_stale_serve() -> Duration {
         Self::probe_delivery_deadline()
             .checked_add(Self::reload_grace_duration())
@@ -922,6 +925,7 @@ impl TokenStore {
 
     fn clear_reload_outage(state: &mut TokenState, flight: &TransientReloadFlight) {
         state.reload_failure_since = None;
+        state.stale_since = None;
         state.store_unavailable = false;
         state.store_unavailable_logged = false;
         state.reload_transient_done = false;
@@ -1235,6 +1239,7 @@ impl TokenStore {
             loaded_digest: Some(loaded_digest),
             enforce_secure_reload: true,
             reload_failure_since: None,
+            stale_since: None,
             store_unavailable: false,
             store_unavailable_logged: false,
             reload_transient_done: false,
@@ -1251,6 +1256,7 @@ impl TokenStore {
             loaded_digest: Some(Self::digest_bytes(raw)),
             enforce_secure_reload: true,
             reload_failure_since: None,
+            stale_since: None,
             store_unavailable: false,
             store_unavailable_logged: false,
             reload_transient_done: false,
@@ -1342,6 +1348,12 @@ impl TokenStore {
                     .reload_failure_since
                     .map_or(outage_start, |since| since.min(outage_start));
                 state.reload_failure_since = Some(outage_start);
+                let stale_from = outage_start.min(last_bad_read);
+                state.stale_since = Some(
+                    state
+                        .stale_since
+                        .map_or(stale_from, |since| since.min(stale_from)),
+                );
                 state.reload_transient_done = true;
                 state.reload_failed_disk_fingerprint = Some(fp);
                 if last_bad_read.saturating_duration_since(outage_start)
@@ -1373,6 +1385,17 @@ impl TokenStore {
             return TokenError::StoreUnavailable;
         }
         Self::latch_store_unavailable(&mut state)
+    }
+
+    /// Fails closed, latching the outage, when a cached answer at `now` would
+    /// be older than [`Self::max_stale_serve`] measured from `stale_since`.
+    fn enforce_max_stale_serve(state: &mut TokenState, now: Instant) -> Result<(), TokenError> {
+        match state.stale_since {
+            Some(since) if now.saturating_duration_since(since) > Self::max_stale_serve() => {
+                Err(Self::latch_store_unavailable(state))
+            }
+            _ => Ok(()),
+        }
     }
 
     fn state_in_outage(state: &TokenState) -> bool {
@@ -1419,7 +1442,11 @@ impl TokenStore {
         };
 
         let mut state = self.inner.lock().expect("token store lock");
-        let merged = Self::merge_disk_probe(&mut state, &self.transient_flight, probe);
+        let merged =
+            Self::merge_disk_probe(&mut state, &self.transient_flight, probe).and_then(|delta| {
+                Self::enforce_max_stale_serve(&mut state, Instant::now())?;
+                Ok(delta)
+            });
         #[cfg(test)]
         if slot.is_some() {
             if let Some(hook) = lock_ignoring_poison(&self.after_merge_hook).take() {
@@ -1602,6 +1629,7 @@ impl TokenStore {
             loaded_digest: None,
             enforce_secure_reload: false,
             reload_failure_since: None,
+            stale_since: None,
             store_unavailable: false,
             store_unavailable_logged: false,
             reload_transient_done: false,
@@ -2027,7 +2055,7 @@ mod tests {
     }
 
     #[test]
-    fn stall_after_a_timeout_is_served_inside_grace_from_the_timeout_then_fails_closed() {
+    fn stall_after_a_timeout_is_admitted_inside_grace_but_fails_closed_past_max_stale_serve() {
         let grace = Duration::from_millis(500);
         let _grace = GraceOverride::set(grace);
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -2051,16 +2079,20 @@ mod tests {
         store.wait_probe_fast_fail_window_closed_for_test();
         let second = block_next_probe_delivery(&store);
         let second_called = Instant::now();
-        store
-            .verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan)
-            .expect("a stall inside the grace measured from the timeout is served from cache");
+        assert!(matches!(
+            store.verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan),
+            Err(TokenError::StoreUnavailable)
+        ));
         assert!(
             second_called < timeout_at + grace,
             "the second stall must begin inside the grace for this check to mean anything"
         );
         {
             let state = store.inner.lock().unwrap();
-            assert!(!state.store_unavailable, "inside the grace nothing latches");
+            assert!(
+                state.store_unavailable,
+                "its answer lands past max_stale_serve from the first stall, so it fails closed"
+            );
             assert_eq!(state.reload_failure_since, Some(outage_start));
         }
 
@@ -2099,7 +2131,49 @@ mod tests {
     }
 
     #[test]
-    fn stale_serve_is_bounded_by_max_stale_serve_from_the_first_stall_start() {
+    fn cached_answer_is_given_only_within_max_stale_serve_of_the_first_stall_start() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("tokens.json");
+        write_tokens_revoking_writer(&path, false);
+        let store = TokenStore::load_insecure(path.clone()).expect("load");
+        let grace = TokenStore::reload_grace_duration();
+        let bound = TokenStore::max_stale_serve();
+        let stall_start = Instant::now();
+        let observed_timeout = stall_start + TokenStore::probe_delivery_deadline();
+        let mut state = store.inner.lock().unwrap();
+        let timed_out = TokenStore::timed_out_disk_probe(observed_timeout, stall_start);
+        assert!(
+            TokenStore::merge_disk_probe(&mut state, &store.transient_flight, timed_out).is_ok()
+        );
+        assert_eq!(state.stale_since, Some(stall_start));
+        let later =
+            TokenStore::timed_out_disk_probe(observed_timeout, observed_timeout + grace / 4);
+        assert!(TokenStore::merge_disk_probe(&mut state, &store.transient_flight, later).is_ok());
+        assert_eq!(
+            state.stale_since,
+            Some(stall_start),
+            "a later stall must not move the start the bound is measured from"
+        );
+
+        let shift = Duration::ZERO;
+        let measured_from = stall_start + shift;
+        assert!(
+            TokenStore::enforce_max_stale_serve(&mut state, measured_from + bound).is_ok(),
+            "an answer exactly at the bound is still served"
+        );
+        assert!(!state.store_unavailable);
+        assert!(matches!(
+            TokenStore::enforce_max_stale_serve(
+                &mut state,
+                measured_from + bound + Duration::from_millis(1)
+            ),
+            Err(TokenError::StoreUnavailable)
+        ));
+        assert!(state.store_unavailable, "past the bound it fails closed");
+    }
+
+    #[test]
+    fn request_admitted_before_max_stale_serve_whose_probe_stalls_past_it_fails_closed() {
         let grace = Duration::from_millis(1000);
         let _grace = GraceOverride::set(grace);
         let bound = TokenStore::max_stale_serve();
@@ -2109,40 +2183,48 @@ mod tests {
         let store = TokenStore::load_insecure(path.clone()).expect("load");
 
         let first = block_next_probe_delivery(&store);
-        let stall_start = Instant::now();
+        let before_first = Instant::now();
         store
             .verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan)
-            .expect("the first stall starts the grace; cached entries are served");
+            .expect("the first stall is answered from cache before the bound");
+        let (stall_start, outage_start) = {
+            let state = store.inner.lock().unwrap();
+            (
+                state.stale_since.expect("a stall records when it began"),
+                state
+                    .reload_failure_since
+                    .expect("timeout starts an outage"),
+            )
+        };
+        assert!(stall_start >= before_first);
+        assert!(
+            Instant::now() <= stall_start + bound,
+            "the first answer must land inside the bound for this check to mean anything"
+        );
 
         std::thread::sleep(
-            (stall_start + bound - grace / 2).saturating_duration_since(Instant::now()),
+            (stall_start + bound - Duration::from_millis(300))
+                .saturating_duration_since(Instant::now()),
         );
         store.wait_probe_fast_fail_window_closed_for_test();
         let second = block_next_probe_delivery(&store);
         let second_called = Instant::now();
-        store
-            .verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan)
-            .expect("a stall that begins before the bound is served from cache");
         assert!(
-            second_called < stall_start + bound,
-            "the second stall must begin before the bound for this check to mean anything"
+            second_called < stall_start + bound && second_called < outage_start + grace,
+            "the second request must be admitted before the bound and inside the grace"
         );
-        assert!(!store.inner.lock().unwrap().store_unavailable);
-
-        std::thread::sleep((stall_start + bound).saturating_duration_since(Instant::now()));
-        store.wait_probe_fast_fail_window_closed_for_test();
-        let third = block_next_probe_delivery(&store);
-        let third_called = Instant::now();
         assert!(matches!(
             store.verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan),
             Err(TokenError::StoreUnavailable)
         ));
-        assert!(third_called >= stall_start + bound);
+        assert!(
+            Instant::now() > stall_start + bound,
+            "its answer arrived past the bound, so cached entries must not be returned"
+        );
         assert!(store.inner.lock().unwrap().store_unavailable);
 
         first.send(()).expect("release first probe");
         second.send(()).expect("release second probe");
-        third.send(()).expect("release third probe");
         assert!(store.wait_probe_threads_exited_for_test(Duration::from_secs(10)));
         store.wait_probe_fast_fail_window_closed_for_test();
         store
@@ -2152,6 +2234,7 @@ mod tests {
             let state = store.inner.lock().unwrap();
             assert!(!state.store_unavailable);
             assert!(state.reload_failure_since.is_none());
+            assert!(state.stale_since.is_none());
         }
         assert_eq!(store.leaked_disk_probe_threads_for_test(), 0);
 
@@ -2326,10 +2409,17 @@ mod tests {
                 let _hang = ReloadProbeHangGuard::enable(&store);
                 let wall = Instant::now();
                 let result = store.verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan);
-                assert!(
-                    result.is_ok(),
-                    "round {round}: a hung probe that starts inside the grace serves cached entries"
-                );
+                if round == 0 {
+                    assert!(
+                        result.is_ok(),
+                        "round 0: a hung probe that starts inside the grace serves cached entries"
+                    );
+                } else {
+                    assert!(
+                        matches!(result, Err(TokenError::StoreUnavailable)),
+                        "round {round}: a second hung probe answers past max_stale_serve, so it fails closed"
+                    );
+                }
                 assert!(
                     wall.elapsed() <= hang_limit,
                     "round {round} hung: the 10 s limit only catches a deadlock, not slowness"
