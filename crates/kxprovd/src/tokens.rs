@@ -2671,6 +2671,29 @@ mod tests {
     }
 
     #[test]
+    fn cached_answer_one_full_grace_after_the_first_timeout_is_still_served() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("tokens.json");
+        write_tokens_revoking_writer(&path, false);
+        let store = TokenStore::load_insecure(path.clone()).expect("load");
+        let stall_start = Instant::now();
+        let observed_timeout = stall_start + TokenStore::probe_delivery_deadline();
+        let mut state = store.inner.lock().unwrap();
+        assert!(TokenStore::merge_at_current_generation(
+            &mut state,
+            &store.transient_flight,
+            TokenStore::timed_out_disk_probe(observed_timeout, stall_start),
+        )
+        .is_ok());
+        let last_grace_answer = observed_timeout + TokenStore::reload_grace_duration();
+        assert!(
+            TokenStore::enforce_max_stale_serve(&mut state, last_grace_answer).is_ok(),
+            "a request admitted inside the grace may answer up to one more grace after the timeout"
+        );
+        assert!(!state.store_unavailable);
+    }
+
+    #[test]
     fn cached_answer_is_given_only_within_max_stale_serve_of_the_first_stall_start() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let path = tmp.path().join("tokens.json");
