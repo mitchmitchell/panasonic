@@ -31,6 +31,8 @@ const MAX_OS_THREAD_DELTA: usize = 2;
 /// The kernel truncates `comm` to 15 bytes, so the prefix is compared. Only
 /// probe threads are counted so threads of tests running in parallel in the
 /// same binary do not affect the result.
+/// An entry that fails to list belongs to a thread that exited while the
+/// directory was read, so it is not counted.
 fn probe_os_thread_count() -> usize {
     const PROBE_COMM: &str = "token-reload-pr";
     std::fs::read_dir("/proc/self/task")

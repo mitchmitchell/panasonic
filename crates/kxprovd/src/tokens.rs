@@ -381,6 +381,9 @@ impl TokenStore {
 
     /// Blocks until at least one probe thread is running, or `timeout` passes.
     /// Returns whether a probe thread started.
+    ///
+    /// A poisoned lock is recovered for the reason given on
+    /// `lock_ignoring_poison`.
     #[cfg(feature = "test-util")]
     pub fn wait_probe_thread_started_for_test(&self, timeout: Duration) -> bool {
         let held = lock_ignoring_poison(&self.probe_exit_signal.lock);
@@ -396,6 +399,9 @@ impl TokenStore {
 
     /// Blocks until no probe thread is running, or `timeout` passes.
     /// Returns whether every probe thread exited.
+    ///
+    /// A poisoned lock is recovered for the reason given on
+    /// `lock_ignoring_poison`.
     #[cfg(feature = "test-util")]
     pub fn wait_probe_threads_exited_for_test(&self, timeout: Duration) -> bool {
         let held = lock_ignoring_poison(&self.probe_exit_signal.lock);
@@ -2028,6 +2034,8 @@ mod tests {
     ///
     /// Filtering by target keeps descriptors opened by tests running in
     /// parallel threads of the same binary out of the count.
+    /// An entry that fails to list was closed while the directory was read,
+    /// so it is not open on `path` and is skipped.
     fn fds_open_on(path: &Path) -> usize {
         let target = std::fs::canonicalize(path).expect("canonical fifo path");
         std::fs::read_dir("/proc/self/fd")
