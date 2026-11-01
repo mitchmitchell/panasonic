@@ -78,20 +78,19 @@ fn parse_day(raw: &str) -> Result<Option<NaiveDate>, String> {
 /// Turns the page's form values into a daemon query. Dates are US Central days; `to` is inclusive.
 pub fn query_from_form(q: &CallsQuery, now_ms: i64) -> Result<SmdrQueryParams, String> {
     let bad_date = || "Enter dates as YYYY-MM-DD.".to_string();
-    let since = parse_day(&q.from)?
+    let from_day = parse_day(&q.from)?;
+    let to_day = parse_day(&q.to)?;
+    let since = from_day
+        .or(to_day)
         .map(|d| chicago_midnight_ms(d).ok_or_else(bad_date))
         .transpose()?;
-    let until = parse_day(&q.to)?
+    let until = to_day
         .map(|d| {
             d.checked_add_signed(Duration::days(1))
                 .and_then(chicago_midnight_ms)
                 .ok_or_else(bad_date)
         })
         .transpose()?;
-    let since = match (since, until) {
-        (None, Some(u)) => Some(u - Duration::days(1).num_milliseconds()),
-        (s, _) => s,
-    };
     let direction = match q.direction.trim() {
         "" => None,
         "incoming" => Some(CallDirection::Incoming),
@@ -131,6 +130,9 @@ pub fn call_log_message(e: SmdrApiError) -> &'static str {
         }
         SmdrApiError::StoreUnavailable => "Call log unavailable. Try again in a moment.",
         SmdrApiError::Disabled => "Port disabled. The call log is turned off.",
+        SmdrApiError::CorruptRow { .. } => {
+            "A stored call in this range is unreadable. Try a different range."
+        }
         other => {
             tracing::warn!(reason = UNKNOWN_ERROR_REASON, ?other, "call log error");
             "Call log unavailable. Try again in a moment."
@@ -172,7 +174,10 @@ fn row(c: SmdrCallView) -> CallRow {
                 .format("%Y-%m-%d %H:%M:%S %Z")
                 .to_string()
         })
-        .unwrap_or(c.rx_ts_utc);
+        .unwrap_or_else(|e| {
+            tracing::warn!(id = c.id, %e, "stored call time is not RFC 3339");
+            format!("{} (UTC, unparsed time)", c.rx_ts_utc)
+        });
     CallRow {
         time,
         ext: c.ext,
@@ -280,6 +285,35 @@ mod tests {
         );
         let start = DateTime::<Utc>::from_timestamp_millis(p.since_ms).map(|d| d.to_rfc3339());
         assert_eq!(start.as_deref(), Some("2026-11-01T05:00:00+00:00"));
+    }
+
+    #[test]
+    fn a_lone_to_date_is_that_whole_central_day() {
+        let q = CallsQuery {
+            to: "2026-11-01".into(),
+            ..CallsQuery::default()
+        };
+        let p = query_from_form(&q, 0).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(p.until_ms - p.since_ms, 25 * 3_600_000);
+        let start = DateTime::<Utc>::from_timestamp_millis(p.since_ms).map(|d| d.to_rfc3339());
+        assert_eq!(start.as_deref(), Some("2026-11-01T05:00:00+00:00"));
+    }
+
+    #[test]
+    fn thirty_one_central_days_across_the_fall_change_are_accepted() {
+        let q = CallsQuery {
+            from: "2026-10-15".into(),
+            to: "2026-11-14".into(),
+            ..CallsQuery::default()
+        };
+        let p = query_from_form(&q, 0).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(p.until_ms - p.since_ms, (31 * 24 + 1) * 3_600_000);
+        let q = CallsQuery {
+            from: "2026-10-15".into(),
+            to: "2026-11-15".into(),
+            ..CallsQuery::default()
+        };
+        assert!(query_from_form(&q, 0).is_err(), "32 days is still too long");
     }
 
     #[test]

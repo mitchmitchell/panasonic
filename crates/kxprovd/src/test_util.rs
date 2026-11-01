@@ -54,7 +54,7 @@ pub fn default_tokens_file() -> TokensFile {
             TokenEntry {
                 id: TokenId("gateway".into()),
                 secret_hash: hash_bearer_secret(GATEWAY_SECRET),
-                scopes: vec![Scope::Read, Scope::Plan],
+                scopes: vec![Scope::Read, Scope::Plan, Scope::CallLog],
                 expires_at_ms: u64::MAX / 2,
                 revoked: false,
             },

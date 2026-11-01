@@ -77,7 +77,7 @@ pub fn query(db: &Path, p: &SmdrQueryParams) -> Result<SmdrPage, SmdrApiError> {
     let mut stmt = conn
         .prepare_cached(
             "SELECT id, rx_ts_utc, pbx_local, ext, co, direction, number, cid_text,
-                    ring_s, duration_s, acc, cd
+                    ring_s, duration_s, acc
              FROM smdr_call
              WHERE parse_ok = 1
                AND rx_ts_utc >= ?1 AND rx_ts_utc < ?2
@@ -115,7 +115,6 @@ pub fn query(db: &Path, p: &SmdrQueryParams) -> Result<SmdrPage, SmdrApiError> {
                         ring_s: r.get(8)?,
                         duration_s: r.get(9)?,
                         acc: non_empty(r.get(10)?),
-                        cd: non_empty(r.get(11)?),
                     },
                 ))
             },
@@ -128,8 +127,12 @@ pub fn query(db: &Path, p: &SmdrQueryParams) -> Result<SmdrPage, SmdrApiError> {
             "out" => CallDirection::Outgoing,
             "in" => CallDirection::Incoming,
             other => {
-                tracing::warn!(direction = other, "smdr row has unknown direction");
-                return Err(SmdrApiError::StoreUnavailable);
+                tracing::warn!(
+                    id = view.id,
+                    direction = other,
+                    "smdr row has unknown direction"
+                );
+                return Err(SmdrApiError::CorruptRow { id: view.id });
             }
         };
         calls.push(view);
@@ -199,13 +202,23 @@ mod tests {
     }
 
     #[test]
-    fn store_line_is_queryable() {
+    fn stored_record_is_returned_with_its_fields() {
         let tmp = tempfile::tempdir().unwrap();
-        let mut store = SmdrStore::open(tmp.path(), &[], DateOrder::default()).unwrap();
-        let _ = store.ingest(
-            SmdrLine::new("not a call".into()),
-            rx("2026-11-01T12:00:00Z"),
-        );
+        let mut store = SmdrStore::open(tmp.path(), &[], DateOrder::Mdy).unwrap();
+        let raw = include_str!("../../kxtd1232/tests/fixtures/smdr-v1/outgoing.txt")
+            .lines()
+            .next()
+            .unwrap()
+            .to_string();
+        store
+            .ingest(SmdrLine::new(raw), rx("2026-11-01T12:00:00Z"))
+            .expect("fixture record ingests");
+        store
+            .ingest(
+                SmdrLine::new("not a call".into()),
+                rx("2026-11-01T12:00:01Z"),
+            )
+            .expect("unparsed line is journaled");
         let p = SmdrQueryParams {
             limit: QueryLimit::new(10).unwrap(),
             ..SmdrQueryParams::with_defaults(
@@ -215,7 +228,38 @@ mod tests {
             )
         };
         let page = query(&db_path(tmp.path()), &p).unwrap();
-        assert!(page.calls.is_empty());
+        assert_eq!(page.calls.len(), 1, "only the parsed record is a call");
+        let c = &page.calls[0];
+        assert_eq!(c.rx_ts_utc, "2026-11-01T12:00:00.000Z");
+        assert_eq!(c.ext, "101");
+        assert_eq!(c.co, "01");
+        assert_eq!(c.direction, CallDirection::Outgoing);
+        assert_eq!(c.number, "5551230000");
         assert!(page.next.is_none());
+    }
+
+    #[test]
+    fn unknown_direction_is_a_typed_corrupt_row() {
+        let tmp = tempfile::tempdir().unwrap();
+        drop(SmdrStore::open(tmp.path(), &[], DateOrder::Mdy).unwrap());
+        let db = Connection::open(db_path(tmp.path())).unwrap();
+        db.execute(
+            "INSERT INTO smdr_call (rx_ts_utc, pbx_local, ext, co, direction, number, cid_text,
+              ring_s, duration_s, acc, cd, raw, parse_ok)
+             VALUES ('2026-11-01T12:00:00.000Z', '', '101', '01', 'sideways', '1', '',
+              NULL, NULL, '', '', 'x', 1)",
+            [],
+        )
+        .unwrap();
+        let id = db.last_insert_rowid();
+        let p = SmdrQueryParams::with_defaults(
+            None,
+            None,
+            rx("2026-11-01T13:00:00Z").timestamp_millis(),
+        );
+        assert_eq!(
+            query(&db_path(tmp.path()), &p),
+            Err(SmdrApiError::CorruptRow { id })
+        );
     }
 }

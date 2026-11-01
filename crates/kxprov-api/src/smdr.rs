@@ -13,6 +13,9 @@ pub const MAX_RANGE_DAYS: u16 = 31;
 /// Window used when the caller gives no `since`.
 pub const DEFAULT_RANGE_MS: i64 = 24 * 60 * 60 * 1000;
 const DAY_MS: i64 = 24 * 60 * 60 * 1000;
+/// Extra length allowed on a [`MAX_RANGE_DAYS`] window: one hour, so 31 local calendar days
+/// that span a fall daylight-saving change (25-hour day) still fit.
+pub const DST_SLACK_MS: i64 = 60 * 60 * 1000;
 
 /// Typed failures for call-log reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -32,6 +35,8 @@ pub enum SmdrApiError {
     StoreUnavailable,
     #[error("call log is disabled")]
     Disabled,
+    #[error("stored call {id} is unreadable")]
+    CorruptRow { id: i64 },
 }
 
 impl SmdrApiError {
@@ -45,10 +50,15 @@ impl SmdrApiError {
             Self::BadCursor => "bad_cursor",
             Self::StoreUnavailable => "store_unavailable",
             Self::Disabled => "smdr_disabled",
+            Self::CorruptRow { .. } => "smdr_corrupt_row",
         }
     }
 
     /// Inverse of [`Self::code`] for clients; `None` for codes this type does not own.
+    ///
+    /// The wire body carries only the code, so fields come from the daemon's own bounds:
+    /// a daemon `bad_limit` is always against [`QUERY_LIMIT_MAX`], because the MCP cap is checked
+    /// in kxprov-mcp before any call reaches the daemon, and a corrupt row id is reported as 0.
     pub fn from_code(code: &str) -> Option<Self> {
         Some(match code {
             "range_too_large" => Self::RangeTooLarge {
@@ -61,6 +71,7 @@ impl SmdrApiError {
             "bad_cursor" => Self::BadCursor,
             "store_unavailable" => Self::StoreUnavailable,
             "smdr_disabled" => Self::Disabled,
+            "smdr_corrupt_row" => Self::CorruptRow { id: 0 },
             _ => return None,
         })
     }
@@ -141,10 +152,10 @@ impl SmdrCursor {
     }
 
     pub fn decode(s: &str) -> Result<Self, SmdrApiError> {
-        let bytes = hex::decode(s.trim()).map_err(|_| SmdrApiError::BadCursor)?;
-        let text = String::from_utf8(bytes).map_err(|_| SmdrApiError::BadCursor)?;
+        let bytes = hex::decode(s.trim()).map_err(bad_cursor)?;
+        let text = String::from_utf8(bytes).map_err(bad_cursor)?;
         let (ts, id) = text.rsplit_once('|').ok_or(SmdrApiError::BadCursor)?;
-        let id: i64 = id.parse().map_err(|_| SmdrApiError::BadCursor)?;
+        let id: i64 = id.parse().map_err(bad_cursor)?;
         let ts_ok = ts.len() == 24
             && ts.ends_with('Z')
             && ts
@@ -155,6 +166,12 @@ impl SmdrCursor {
         }
         Ok(Self::new(ts.to_string(), id))
     }
+}
+
+/// Discards the decode error on purpose: the cursor is opaque, so every way it can be malformed
+/// is the same typed [`SmdrApiError::BadCursor`] and the detail would only echo caller input.
+fn bad_cursor<E>(_detail: E) -> SmdrApiError {
+    SmdrApiError::BadCursor
 }
 
 impl Serialize for SmdrCursor {
@@ -207,12 +224,12 @@ impl SmdrQueryParams {
         }
     }
 
-    /// Checks the window: non-empty and at most [`MAX_RANGE_DAYS`].
+    /// Checks the window: non-empty and at most [`MAX_RANGE_DAYS`] plus [`DST_SLACK_MS`].
     pub fn validate(&self) -> Result<(), SmdrApiError> {
         if self.until_ms <= self.since_ms {
             return Err(SmdrApiError::BadRange);
         }
-        let max_ms = i64::from(MAX_RANGE_DAYS) * DAY_MS;
+        let max_ms = i64::from(MAX_RANGE_DAYS) * DAY_MS + DST_SLACK_MS;
         if self.until_ms.saturating_sub(self.since_ms) > max_ms {
             return Err(SmdrApiError::RangeTooLarge {
                 max_days: MAX_RANGE_DAYS,
@@ -236,7 +253,6 @@ pub struct SmdrCallView {
     pub ring_s: Option<u32>,
     pub duration_s: Option<u32>,
     pub acc: Option<String>,
-    pub cd: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -269,7 +285,7 @@ mod tests {
         let mut p = SmdrQueryParams::with_defaults(None, Some(DAY_MS * 40), 0);
         assert_eq!(p.until_ms - p.since_ms, DEFAULT_RANGE_MS);
         assert_eq!(p.validate(), Ok(()));
-        p.since_ms = p.until_ms - 31 * DAY_MS;
+        p.since_ms = p.until_ms - 31 * DAY_MS - DST_SLACK_MS;
         assert_eq!(p.validate(), Ok(()));
         p.since_ms -= 1;
         assert_eq!(
@@ -313,18 +329,32 @@ mod tests {
             ring_s: None,
             duration_s: Some(3),
             acc: None,
-            cd: None,
         };
-        let json = serde_json::to_value(&v).unwrap_or_default();
-        let keys: Vec<&String> = json
+        let json = serde_json::to_value(&v).expect("serialize");
+        let keys: Vec<&str> = json
             .as_object()
-            .map(|o| o.keys().collect())
-            .unwrap_or_default();
-        assert!(
-            !keys
-                .iter()
-                .any(|k| k.contains("raw") || k.contains("answer")),
-            "{keys:?}"
+            .expect("call view serializes as an object")
+            .keys()
+            .map(String::as_str)
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        assert_eq!(
+            keys,
+            [
+                "acc",
+                "cid_text",
+                "co",
+                "direction",
+                "duration_s",
+                "ext",
+                "id",
+                "number",
+                "pbx_local",
+                "ring_s",
+                "rx_ts_utc",
+            ],
+            "exact field set: no raw, cd or answered field"
         );
     }
 }

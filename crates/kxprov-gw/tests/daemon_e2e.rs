@@ -307,3 +307,29 @@ async fn daemon_client_plan_change_fails_closed_when_row_missing() {
     assert_eq!(bodies.len(), 1, "no plan request after a missing row");
     assert!(matches!(bodies[0], RequestBody::ReadFields { .. }));
 }
+
+#[tokio::test]
+async fn gateway_bearer_reaches_the_call_log_for_web_sessions() {
+    let tmp = TempDir::new().unwrap();
+    let uid = nix::unistd::getuid().as_raw();
+    let (_daemon, sock) =
+        kxprovd::Daemon::sim_for_tests_as_gateway_profile(tmp.path(), uid, Profile::Sim);
+    for _ in 0..100 {
+        if sock.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let client = DaemonClient::connect(&sock, GATEWAY_SECRET.to_string())
+        .await
+        .expect("connect");
+    let caller = CallerIdentity::Web(WebSessionIdentity {
+        session_key: "sess-calls".into(),
+    });
+    let params = kxprov_api::SmdrQueryParams::with_defaults(None, None, 1_800_000_000_000);
+    match client.smdr_query(&caller, params).await {
+        Ok(_)
+        | Err(kxprov_mock::BackendError::CallLog(kxprov_api::SmdrApiError::StoreUnavailable)) => {}
+        Err(e) => panic!("gateway bearer must pass the CallLog scope check, got {e:?}"),
+    }
+}

@@ -401,7 +401,6 @@ mod smdr_tool_tests {
                     ring_s: None,
                     duration_s: Some(10),
                     acc: None,
-                    cd: None,
                 },
             )
             .await;
