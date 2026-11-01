@@ -2566,12 +2566,11 @@ mod tests {
             .verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan)
             .expect("warm");
         std::fs::write(&path, b"{bad").unwrap();
-        let hang_limit = Duration::from_secs(10);
         let mut waits_after_first = 0;
         {
             let _hang = ReloadProbeHangGuard::enable(&store);
             for i in 0..6 {
-                let wall = Instant::now();
+                let waits_before = TokenStore::reload_waits_on_this_thread_for_test();
                 let result = store.verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan);
                 if i == 0 {
                     assert!(
@@ -2585,8 +2584,8 @@ mod tests {
                     );
                 }
                 assert!(
-                    wall.elapsed() <= hang_limit,
-                    "call {i} hung: the 10 s limit only catches a deadlock, not slowness"
+                    TokenStore::reload_waits_on_this_thread_for_test() - waits_before <= 1,
+                    "call {i} must block at most once, on its bounded delivery wait"
                 );
                 assert!(
                     store.leaked_disk_probe_threads_for_test() <= 1,
@@ -2634,11 +2633,10 @@ mod tests {
             .verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan)
             .expect("warm");
         std::fs::write(&path, b"{bad").unwrap();
-        let hang_limit = Duration::from_secs(10);
         for round in 0..2 {
             {
                 let _hang = ReloadProbeHangGuard::enable(&store);
-                let wall = Instant::now();
+                let waits_before = TokenStore::reload_waits_on_this_thread_for_test();
                 let result = store.verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan);
                 if round == 0 {
                     assert!(
@@ -2651,9 +2649,10 @@ mod tests {
                         "round {round}: a second hung probe answers past max_stale_serve, so it fails closed"
                     );
                 }
-                assert!(
-                    wall.elapsed() <= hang_limit,
-                    "round {round} hung: the 10 s limit only catches a deadlock, not slowness"
+                assert_eq!(
+                    TokenStore::reload_waits_on_this_thread_for_test() - waits_before,
+                    1,
+                    "round {round}: the call must block only once, on its own probe's bounded delivery wait"
                 );
             }
             assert!(
@@ -2679,28 +2678,27 @@ mod tests {
             .verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan)
             .expect("warm");
         std::fs::write(&path, b"{bad").unwrap();
-        let hang_limit = Duration::from_secs(10);
-
         let first = block_next_probe_delivery(&store);
-        let wall = Instant::now();
+        let waits = TokenStore::reload_waits_on_this_thread_for_test();
         store
             .verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan)
             .expect("the first hung probe starts the grace and serves cached entries");
-        assert!(
-            wall.elapsed() <= hang_limit,
-            "first hung probe call hung: the 10 s limit only catches a deadlock, not slowness"
+        assert_eq!(
+            TokenStore::reload_waits_on_this_thread_for_test() - waits,
+            1,
+            "the first hung probe call must block only once, on its bounded delivery wait"
         );
 
         store.clear_probe_fast_fail_window_for_test();
         let second = block_next_probe_delivery(&store);
-        let wall2 = Instant::now();
+        let waits = TokenStore::reload_waits_on_this_thread_for_test();
         assert!(matches!(
             store.verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan),
             Err(TokenError::StoreUnavailable)
         ));
         assert!(
-            wall2.elapsed() <= hang_limit,
-            "follow-up reload hung: the 10 s limit only catches a deadlock, not slowness"
+            TokenStore::reload_waits_on_this_thread_for_test() - waits <= 1,
+            "the follow-up reload must block at most once, on its bounded delivery wait"
         );
 
         first.send(()).expect("release first probe");
