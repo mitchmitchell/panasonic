@@ -1802,7 +1802,7 @@ mod tests {
                 );
                 assert!(
                     wall.elapsed() <= hang_limit,
-                    "round {round} must finish within reload window"
+                    "round {round} hung: the 10 s limit only catches a deadlock, not slowness"
                 );
             }
             assert!(
@@ -1837,7 +1837,7 @@ mod tests {
             ));
             assert!(
                 wall.elapsed() <= hang_limit,
-                "first hung probe must fail closed within the reload window"
+                "first hung probe call hung: the 10 s limit only catches a deadlock, not slowness"
             );
             let wall2 = Instant::now();
             assert!(matches!(
@@ -1846,7 +1846,7 @@ mod tests {
             ));
             assert!(
                 wall2.elapsed() <= hang_limit,
-                "follow-up reload must stay bounded while probe hangs"
+                "follow-up reload hung: the 10 s limit only catches a deadlock, not slowness"
             );
         }
         assert!(
