@@ -138,6 +138,9 @@ pub struct TokenStore {
     /// the probe, with the refcount lock held.
     #[cfg(test)]
     abandon_hook: Arc<Mutex<Option<AbandonHook>>>,
+    /// Runs on the probe thread right after it sends its result.
+    #[cfg(test)]
+    after_send_hook: Arc<Mutex<Option<AbandonHook>>>,
 }
 
 struct TokenRefreshDelta {
@@ -163,6 +166,8 @@ impl Clone for TokenStore {
             reload_probe_hang: Arc::clone(&self.reload_probe_hang),
             #[cfg(test)]
             abandon_hook: Arc::clone(&self.abandon_hook),
+            #[cfg(test)]
+            after_send_hook: Arc::clone(&self.after_send_hook),
         }
     }
 }
@@ -471,6 +476,8 @@ impl TokenStore {
             reload_probe_hang: Arc::new(AtomicBool::new(false)),
             #[cfg(test)]
             abandon_hook: Arc::new(Mutex::new(None)),
+            #[cfg(test)]
+            after_send_hook: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -876,6 +883,8 @@ impl TokenStore {
         }
         let mut probe_plan = plan;
         probe_plan.probe_cancel = Arc::clone(&abandoned);
+        #[cfg(test)]
+        let after_send_hook = lock_ignoring_poison(&self.after_send_hook).take();
         let spawn_ok = std::thread::Builder::new()
             .name("token-reload-probe".into())
             .spawn(move || {
@@ -895,6 +904,10 @@ impl TokenStore {
                     tracing::debug!(
                         "token-reload-probe result dropped: the caller stopped waiting for it"
                     );
+                }
+                #[cfg(test)]
+                if let Some(hook) = after_send_hook {
+                    hook();
                 }
             });
         let spawn_ok = spawn_ok.map(|handle| {
@@ -1676,6 +1689,38 @@ mod tests {
         done_rx.lock().unwrap().recv().expect("exiter finished");
         assert_eq!(store.leaked_disk_probe_threads_for_test(), 0);
         assert!(!store.disk_probe_spawn_denied(&path));
+    }
+
+    #[test]
+    fn probe_releases_its_slots_before_sending_its_result() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("tokens.json");
+        write_tokens_revoking_writer(&path, false);
+        let store = TokenStore::load_insecure(path.clone()).expect("load");
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        *store.after_send_hook.lock().unwrap() = Some(Box::new(move || {
+            assert!(
+                release_rx.recv_timeout(Duration::from_secs(10)).is_ok(),
+                "test never released the probe thread: the 10 s limit only catches a deadlock"
+            );
+        }));
+        write_tokens_revoking_writer(&path, true);
+        assert!(matches!(
+            store.verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan),
+            Err(TokenError::Revoked)
+        ));
+        let live = store.live_disk_probe_threads_for_test();
+        let probe_live = store.disk_probe_live.load(Ordering::Acquire);
+        release_tx.send(()).expect("release probe thread");
+        assert_eq!(
+            live, 0,
+            "probe thread held its slot after sending its result"
+        );
+        assert_eq!(
+            probe_live, 0,
+            "probe held disk_probe_live after sending its result"
+        );
+        assert!(store.wait_probe_threads_exited_for_test(Duration::from_secs(10)));
     }
 
     #[test]
