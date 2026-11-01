@@ -2305,9 +2305,13 @@ mod tests {
         let path = tmp.path().join("tokens.json");
         write_tokens_revoking_writer(&path, false);
         let store = Arc::new(TokenStore::load_insecure(path.clone()).expect("load"));
-        store
-            .verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan)
-            .expect("warm");
+        {
+            let state = store.inner.lock().unwrap();
+            assert!(
+                state.reload_failure_since.is_none() && !state.reload_transient_done,
+                "a freshly loaded store has no outage, so the four verifies are the first one"
+            );
+        }
         std::fs::write(&path, b"{bad").unwrap();
         let leaders_before = store.transient_flight.leaders.load(Ordering::Acquire);
         let barrier = Arc::new(Barrier::new(4));
