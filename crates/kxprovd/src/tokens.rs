@@ -2201,6 +2201,11 @@ mod tests {
             Instant::now() <= stall_start + bound,
             "the first answer must land inside the bound for this check to mean anything"
         );
+        first.send(()).expect("release first probe");
+        assert!(
+            store.wait_probe_threads_exited_for_test(Duration::from_secs(10)),
+            "the abandoned first probe must exit so the second request can spawn its own"
+        );
 
         std::thread::sleep(
             (stall_start + bound - Duration::from_millis(300))
@@ -2223,7 +2228,6 @@ mod tests {
         );
         assert!(store.inner.lock().unwrap().store_unavailable);
 
-        first.send(()).expect("release first probe");
         second.send(()).expect("release second probe");
         assert!(store.wait_probe_threads_exited_for_test(Duration::from_secs(10)));
         store.wait_probe_fast_fail_window_closed_for_test();
