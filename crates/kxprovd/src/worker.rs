@@ -629,6 +629,7 @@ mod log_redaction_tests {
         let writer = cap.clone();
         let subscriber = tracing_subscriber::fmt()
             .with_ansi(false)
+            .without_time()
             .with_writer(move || writer.clone())
             .finish();
         let guard = tracing::subscriber::set_default(subscriber);
