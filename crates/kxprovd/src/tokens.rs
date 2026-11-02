@@ -1935,12 +1935,13 @@ mod tests {
         let path = tmp.path().join("tokens.json");
         write_tokens_revoking_writer(&path, false);
         let store = TokenStore::load_insecure(path.clone()).expect("load");
+        let timing = use_grace(&store, STALL_TOLERANT_GRACE);
         write_tokens_revoking_writer(&path, true);
         std::fs::write(&path, b"{bad").unwrap();
         store
             .verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan)
             .expect("grace may serve last good snapshot");
-        std::thread::sleep(Duration::from_millis(2100));
+        age_outage(&store, timing.grace);
         assert!(matches!(
             store.verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan),
             Err(TokenError::StoreUnavailable)
@@ -2526,6 +2527,35 @@ mod tests {
         timing
     }
 
+    /// A grace long enough that no scheduler or memory-pressure stall seen on
+    /// a loaded test host outlasts it. A test that needs the grace to have run
+    /// out moves the outage start back with [`age_outage`] instead of sleeping.
+    const STALL_TOLERANT_GRACE: Duration = Duration::from_secs(30);
+
+    /// Timing for tests whose probes hang: a stall-tolerant grace, and a short
+    /// delivery deadline so each hung wait stays cheap.
+    fn use_hung_probe_timing(store: &TokenStore) -> ReloadTiming {
+        let timing = ReloadTiming {
+            grace: STALL_TOLERANT_GRACE,
+            delivery_deadline: Duration::from_millis(300),
+        };
+        store.set_reload_timing_for_test(timing.grace, timing.delivery_deadline);
+        timing
+    }
+
+    /// Moves the current outage's start and its stale-since mark back by
+    /// `by`, so the store judges it exactly as if `by` had passed.
+    fn age_outage(store: &TokenStore, by: Duration) {
+        let mut state = store.inner.lock().unwrap();
+        let back = |t: Instant| t.checked_sub(by).expect("age within Instant range");
+        assert!(
+            state.reload_failure_since.is_some(),
+            "age_outage needs an outage in progress"
+        );
+        state.reload_failure_since = state.reload_failure_since.map(back);
+        state.stale_since = state.stale_since.map(back);
+    }
+
     fn block_next_probe_delivery(store: &TokenStore) -> std::sync::mpsc::Sender<()> {
         let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
         *store.before_send_hook.lock().unwrap() = Some(Box::new(move || {
@@ -2544,7 +2574,7 @@ mod tests {
             let path = tmp.path().join("tokens.json");
             write_tokens_revoking_writer(&path, false);
             let store = TokenStore::load_insecure(path.clone()).expect("load");
-            let timing = use_grace(&store, Duration::from_millis(50));
+            let timing = use_hung_probe_timing(&store);
 
             let first = block_next_probe_delivery(&store);
             let before_first = Instant::now();
@@ -2563,6 +2593,10 @@ mod tests {
                 "the outage must start when the timeout was observed, not be backdated"
             );
 
+            age_outage(&store, timing.grace);
+            let outage_start = outage_start
+                .checked_sub(timing.grace)
+                .expect("aged outage start within Instant range");
             store.clear_probe_fast_fail_window_for_test();
             let second = block_next_probe_delivery(&store);
             assert!(matches!(
@@ -2961,6 +2995,7 @@ mod tests {
         let path = tmp.path().join("tokens.json");
         write_tokens_revoking_writer(&path, false);
         let store = TokenStore::load_insecure(path.clone()).expect("load");
+        use_grace(&store, STALL_TOLERANT_GRACE);
         store
             .verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan)
             .expect("warm");
@@ -2988,6 +3023,7 @@ mod tests {
             let path = tmp.path().join("tokens.json");
             write_tokens_revoking_writer(&path, false);
             let store = TokenStore::load_insecure(path.clone()).expect("load");
+            let timing = use_hung_probe_timing(&store);
             store
                 .verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan)
                 .expect("warm");
@@ -3020,6 +3056,7 @@ mod tests {
                     );
                     if i == 0 {
                         waits_after_first = TokenStore::reload_waits_on_this_thread_for_test();
+                        age_outage(&store, timing.max_stale_serve());
                     }
                     assert_eq!(
                         TokenStore::reload_waits_on_this_thread_for_test(),
@@ -3058,6 +3095,7 @@ mod tests {
             let path = tmp.path().join("tokens.json");
             write_tokens_revoking_writer(&path, false);
             let store = TokenStore::load_insecure(path.clone()).expect("load");
+            let timing = use_hung_probe_timing(&store);
             store
                 .verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan)
                 .expect("warm");
@@ -3073,6 +3111,7 @@ mod tests {
                         result.is_ok(),
                         "round 0: a hung probe that starts inside the grace serves cached entries"
                     );
+                        age_outage(&store, timing.max_stale_serve());
                     } else {
                         assert!(
                         matches!(result, Err(TokenError::StoreUnavailable)),
@@ -3273,6 +3312,7 @@ mod tests {
             let path = tmp.path().join("tokens.json");
             write_tokens_revoking_writer(&path, false);
             let store = TokenStore::load_insecure(path.clone()).expect("load");
+            let timing = use_grace(&store, STALL_TOLERANT_GRACE);
             store
                 .verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan)
                 .expect("warm");
@@ -3280,7 +3320,7 @@ mod tests {
             store
                 .verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan)
                 .expect("grace snapshot");
-            std::thread::sleep(Duration::from_millis(2100));
+            age_outage(&store, timing.grace);
             assert!(matches!(
                 store.verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan),
                 Err(TokenError::StoreUnavailable)
@@ -3306,6 +3346,7 @@ mod tests {
             let path = tmp.path().join("tokens.json");
             write_tokens_revoking_writer(&path, false);
             let store = TokenStore::load_insecure(path.clone()).expect("load");
+            use_grace(&store, STALL_TOLERANT_GRACE);
             const ROUNDS: usize = 200;
             for i in 0..ROUNDS {
                 store

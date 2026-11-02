@@ -238,6 +238,13 @@ fn fifo_tokens_single_probe_thread_fast_fail_and_recovery() {
     auth_recovers_after_replace(&store, &path);
 }
 
+/// A grace no stall seen on a loaded test host outlasts, so recovery is not
+/// judged by how promptly the scheduler ran this test.
+const STALL_TOLERANT_GRACE: Duration = Duration::from_secs(30);
+
+/// Keeps each hung probe's delivery wait short.
+const HUNG_PROBE_DEADLINE: Duration = Duration::from_millis(300);
+
 const FAST_FAIL_HANG_LIMIT: Duration = Duration::from_secs(10);
 
 #[test]
@@ -247,6 +254,7 @@ fn six_fifo_hangs_cap_live_threads_and_fast_fail_closed() {
     let path = tmp.path().join("tokens.json");
     write_tokens(&path);
     let store = Arc::new(TokenStore::load_insecure(path.clone()).expect("load"));
+    store.set_reload_timing_for_test(STALL_TOLERANT_GRACE, HUNG_PROBE_DEADLINE);
     store
         .verify_bearer(kxprovd::test_util::WRITER_SECRET, 0, Scope::Plan)
         .expect("warm");
