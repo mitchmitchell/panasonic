@@ -502,6 +502,127 @@ pub async fn calls_stream(
     Sse::new(stream).into_response()
 }
 
+/// Most rows one CSV export returns; a larger result is refused so the caller narrows the range.
+pub const CSV_EXPORT_MAX_ROWS: usize = 10_000;
+
+/// Header of the CSV export. `raw` is the PBX line as received (#97), not interpreted.
+pub const CSV_HEADER: &str =
+    "id,rx_ts_utc,pbx_local,ext,co,direction,number,cid_text,ring_s,duration_s,acc,raw";
+
+/// One CSV cell: quoted when needed, with a leading `'` on text a spreadsheet would run as a
+/// formula.
+pub fn csv_cell(v: &str) -> String {
+    let guarded = if v.starts_with(['=', '+', '-', '@', '\t', '\r']) {
+        format!("'{v}")
+    } else {
+        v.to_string()
+    };
+    if guarded.contains([',', '"', '\n', '\r']) {
+        format!("\"{}\"", guarded.replace('"', "\"\""))
+    } else {
+        guarded
+    }
+}
+
+fn csv_row(c: &SmdrCallView) -> String {
+    let opt_num = |n: Option<u32>| n.map(|v| v.to_string()).unwrap_or_default();
+    let direction = match c.direction {
+        CallDirection::Incoming => "incoming",
+        CallDirection::Outgoing => "outgoing",
+    };
+    [
+        c.id.to_string(),
+        csv_cell(&c.rx_ts_utc),
+        csv_cell(&c.pbx_local),
+        csv_cell(&c.ext),
+        csv_cell(&c.co),
+        direction.to_string(),
+        csv_cell(&c.number),
+        csv_cell(c.cid_text.as_deref().unwrap_or("")),
+        opt_num(c.ring_s),
+        opt_num(c.duration_s),
+        csv_cell(c.acc.as_deref().unwrap_or("")),
+        csv_cell(c.raw.as_deref().unwrap_or("")),
+    ]
+    .join(",")
+}
+
+fn plain(status: StatusCode, msg: String) -> Response {
+    (
+        status,
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; charset=utf-8",
+        )],
+        msg,
+    )
+        .into_response()
+}
+
+/// `GET /calls/export.csv`: the same filters, range cap and scope check as `/calls`, every page
+/// of the range, at most [`CSV_EXPORT_MAX_ROWS`] rows. Logs only the row count.
+pub async fn calls_export_csv(
+    State(state): State<WebState>,
+    session: Session,
+    Query(q): Query<CallsQuery>,
+) -> Response {
+    let mut params = match query_from_form(&q, now_ms()) {
+        Ok(p) => p,
+        Err(msg) => return plain(StatusCode::BAD_REQUEST, msg),
+    };
+    params.cursor = None;
+    params.limit = match QueryLimit::new(kxprov_api::QUERY_LIMIT_MAX) {
+        Ok(l) => l,
+        Err(e) => return plain(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    };
+    let caller = crate::caller_from_session(&session);
+    let client = kxprov_mock::ReadOnlyPbxClient::new(state.backend.clone());
+    let mut out = String::from(CSV_HEADER);
+    out.push_str("\r\n");
+    let mut rows = 0usize;
+    loop {
+        let page = match client.smdr_query(&caller, params.clone()).await {
+            Ok(p) => p,
+            Err(e) => {
+                let (status, msg) = status_for(&e);
+                return plain(status, msg);
+            }
+        };
+        rows += page.calls.len();
+        if rows > CSV_EXPORT_MAX_ROWS {
+            tracing::info!(
+                limit = CSV_EXPORT_MAX_ROWS,
+                "calls csv export refused: too many rows"
+            );
+            return plain(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                format!("More than {CSV_EXPORT_MAX_ROWS} calls in this range. Narrow the dates or filters."),
+            );
+        }
+        for c in &page.calls {
+            out.push_str(&csv_row(c));
+            out.push_str("\r\n");
+        }
+        match page.next {
+            Some(next) => params.cursor = Some(next),
+            None => break,
+        }
+    }
+    tracing::info!(rows, "calls csv export");
+    (
+        [
+            (axum::http::header::CONTENT_TYPE, "text/csv; charset=utf-8"),
+            (
+                axum::http::header::CONTENT_DISPOSITION,
+                "attachment; filename=\"calls.csv\"",
+            ),
+            (axum::http::header::CACHE_CONTROL, "no-store"),
+        ],
+        out,
+    )
+        .into_response()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

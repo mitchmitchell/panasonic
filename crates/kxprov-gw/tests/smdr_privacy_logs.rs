@@ -119,6 +119,11 @@ async fn gateway_call_log_paths_never_log_caller_data_at_info_or_secrets_at_any_
     let app = kxprov_web::router(state).layer(SessionManagerLayer::new(MemoryStore::default()));
     assert!(get(&app, "/calls").await.contains(CALLER_DATA[1]));
     assert!(get(&app, "/calls/status").await.contains("port_mode"));
+    let csv = get(&app, "/calls/export.csv").await;
+    assert!(
+        csv.starts_with(kxprov_web::CSV_HEADER) && csv.contains(CALLER_DATA[1]),
+        "{csv}"
+    );
 
     if let Ok(wrong) = DaemonClient::connect(&sock, WRONG_SECRET.to_string()).await {
         assert!(wrong.smdr_status(&caller).await.is_err());

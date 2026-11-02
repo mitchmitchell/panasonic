@@ -1,4 +1,5 @@
 mod calls;
+pub use calls::{csv_cell, CSV_EXPORT_MAX_ROWS, CSV_HEADER};
 mod csrf;
 mod expiry;
 mod fields;
@@ -72,6 +73,7 @@ pub fn router(state: WebState) -> Router {
         .route("/api/plan", post(plan_change))
         .route("/calls", get(calls::calls_page))
         .route("/calls/status", get(calls::calls_status))
+        .route("/calls/export.csv", get(calls::calls_export_csv))
         .route("/calls/stream", get(calls::calls_stream))
         .with_state(state)
 }
