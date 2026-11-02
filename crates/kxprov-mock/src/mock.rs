@@ -5,13 +5,14 @@ use std::time::{Duration as StdDuration, Instant};
 use async_trait::async_trait;
 use kxprov_api::{
     ApplyApprovalRequiredResult, ApplyPlanAwaitingStatus, Approval, DiffHash, OperationalMode,
-    PlanId, Profile, Scope,
+    PlanId, PortModeView, Profile, Scope, SmdrCallView, SmdrCounters, SmdrCursor, SmdrPage,
+    SmdrQueryParams, SmdrStatus,
 };
 use kxtd1232::FieldKind;
 use time::OffsetDateTime;
 use tokio::sync::RwLock;
 
-use crate::backend::DaemonBackend;
+use crate::backend::{DaemonBackend, SmdrSubscription};
 use crate::error::BackendError;
 use crate::identity::CallerIdentity;
 use crate::plan::{approval_ttl, plan_id_from_hex, plan_storage_ttl, ImmutablePlan};
@@ -45,10 +46,14 @@ struct Inner {
     next_job: u64,
     live_writes_approved: bool,
     requested_indexes: Vec<u16>,
+    calls: Vec<(i64, SmdrCallView)>,
+    port_mode: PortModeView,
+    heartbeat: StdDuration,
 }
 
 pub struct MockDaemon {
     inner: Arc<RwLock<Inner>>,
+    calls_tx: tokio::sync::broadcast::Sender<SmdrCallView>,
 }
 
 impl MockDaemon {
@@ -73,6 +78,21 @@ impl MockDaemon {
         Self::with_mode_profile(OperationalMode::Production, profile)
     }
 
+    /// Seeds one stored call received at `rx_ms` (Unix ms).
+    /// Also publishes it to live subscribers, as the daemon does after a DB insert.
+    pub async fn test_add_call(&self, rx_ms: i64, call: SmdrCallView) {
+        self.inner.write().await.calls.push((rx_ms, call.clone()));
+        let _stored_even_with_no_subscribers = self.calls_tx.send(call);
+    }
+
+    pub async fn test_set_port_mode(&self, mode: PortModeView) {
+        self.inner.write().await.port_mode = mode;
+    }
+
+    pub async fn test_set_heartbeat(&self, every: StdDuration) {
+        self.inner.write().await.heartbeat = every;
+    }
+
     pub async fn test_set_live_writes_approved(&self, approved: bool) {
         self.inner.write().await.live_writes_approved = approved;
     }
@@ -92,7 +112,11 @@ impl MockDaemon {
                 next_job: 0,
                 live_writes_approved: false,
                 requested_indexes: Vec::new(),
+                port_mode: PortModeView::Listening,
+                heartbeat: StdDuration::from_secs(kxprov_api::SMDR_HEARTBEAT_SECS),
+                calls: Vec::new(),
             })),
+            calls_tx: tokio::sync::broadcast::channel(kxprov_api::SMDR_BUS_CAPACITY).0,
         }
     }
 
@@ -439,6 +463,96 @@ impl DaemonBackend for MockDaemon {
             job_id,
             state: JobState::Succeeded,
             message: "simulated rollback".into(),
+        })
+    }
+
+    async fn smdr_status(&self, caller: &CallerIdentity) -> Result<SmdrStatus, BackendError> {
+        Self::require_scope(caller, Scope::Read)?;
+        let inner = self.inner.read().await;
+        let counters = caller
+            .scopes()
+            .contains(Scope::CallLog)
+            .then(|| SmdrCounters {
+                last_byte_at: None,
+                last_line_at: inner.calls.iter().map(|(_, c)| c.rx_ts_utc.clone()).max(),
+                lines_today: inner.calls.len() as u64,
+                unparsed_count: 0,
+                header_mismatch_count: 0,
+            });
+        Ok(SmdrStatus {
+            port_mode: inner.port_mode.clone(),
+            counters,
+        })
+    }
+
+    async fn smdr_subscribe(
+        &self,
+        caller: &CallerIdentity,
+        since_id: Option<i64>,
+    ) -> Result<SmdrSubscription, BackendError> {
+        Self::require_scope(caller, Scope::CallLog)?;
+        let live = self.calls_tx.subscribe();
+        let inner = self.inner.read().await;
+        if inner.port_mode == PortModeView::Disabled {
+            return Err(BackendError::CallLog(kxprov_api::SmdrApiError::Disabled));
+        }
+        let mut replay: Vec<SmdrCallView> = match since_id {
+            Some(after) => inner
+                .calls
+                .iter()
+                .filter(|(_, c)| c.id > after)
+                .map(|(_, c)| c.clone())
+                .collect(),
+            None => Vec::new(),
+        };
+        replay.sort_by_key(|c| c.id);
+        Ok(kxprov_api::spawn_smdr_relay(
+            replay,
+            0,
+            live,
+            inner.heartbeat,
+        ))
+    }
+
+    async fn smdr_query(
+        &self,
+        caller: &CallerIdentity,
+        params: SmdrQueryParams,
+    ) -> Result<SmdrPage, BackendError> {
+        Self::require_scope(caller, Scope::CallLog)?;
+        params.validate().map_err(BackendError::CallLog)?;
+        let inner = self.inner.read().await;
+        if inner.port_mode == PortModeView::Disabled {
+            return Err(BackendError::CallLog(kxprov_api::SmdrApiError::Disabled));
+        }
+        let after_cursor = |c: &SmdrCallView| match &params.cursor {
+            Some(cur) => (c.rx_ts_utc.as_str(), c.id) < (cur.rx_ts_utc(), cur.id()),
+            None => true,
+        };
+        let mut rows: Vec<SmdrCallView> = inner
+            .calls
+            .iter()
+            .filter(|(ms, c)| {
+                (params.since_ms..params.until_ms).contains(ms)
+                    && params.ext.as_deref().is_none_or(|e| e.trim() == c.ext)
+                    && params.direction.is_none_or(|d| d == c.direction)
+                    && after_cursor(c)
+            })
+            .map(|(_, c)| c.clone())
+            .collect();
+        rows.sort_by(|a, b| (b.rx_ts_utc.as_str(), b.id).cmp(&(a.rx_ts_utc.as_str(), a.id)));
+        let limit = usize::from(params.limit.get());
+        let next = if rows.len() > limit {
+            rows.truncate(limit);
+            rows.last()
+                .map(|c| SmdrCursor::new(c.rx_ts_utc.clone(), c.id))
+        } else {
+            None
+        };
+        Ok(SmdrPage {
+            calls: rows,
+            next,
+            gaps: Vec::new(),
         })
     }
 }

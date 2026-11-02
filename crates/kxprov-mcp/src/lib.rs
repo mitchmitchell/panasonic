@@ -1,7 +1,10 @@
 use std::borrow::Cow;
 use std::sync::Arc;
 
-use kxprov_api::{ApplyApprovalRequiredResult, JobRef, Profile, TokenId};
+use kxprov_api::{
+    ApplyApprovalRequiredResult, CallDirection, JobRef, Profile, QueryLimit, SmdrCursor,
+    SmdrQueryParams, TokenId,
+};
 use kxprov_mock::{diff_hash_from_hex, plan_id_from_hex};
 use kxprov_mock::{
     BackendError, CallerIdentity, DaemonBackend, JobId, McpTokenIdentity, PlanChangeRequest,
@@ -64,6 +67,7 @@ impl KxMcpServer {
             "submit_approval" => scopes.allows_approve(),
             "backup_now" | "plan_change" => scopes.allows_plan(),
             "read_fields" | "list_backups" | "status" => scopes.allows_read(),
+            "smdr_query" | "smdr_status" => scopes.allows_call_log(),
             _ => false,
         }
     }
@@ -101,6 +105,54 @@ struct SubmitApprovalParams {
     plan_id: String,
     diff_hash: String,
     profile: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+enum SmdrDirectionParam {
+    Incoming,
+    Outgoing,
+}
+
+/// Call-log query. Times are Unix milliseconds; the window is `[since_ms, until_ms)`.
+#[derive(Debug, Deserialize, JsonSchema)]
+struct SmdrQueryToolParams {
+    /// Window start; defaults to 24 hours before `until_ms`.
+    since_ms: Option<i64>,
+    /// Window end (exclusive); defaults to now.
+    until_ms: Option<i64>,
+    /// Extension label to match exactly.
+    ext: Option<String>,
+    direction: Option<SmdrDirectionParam>,
+    /// Page size, 1 to 100; defaults to 50.
+    limit: Option<u16>,
+    /// `next` value from the previous page.
+    cursor: Option<String>,
+}
+
+impl SmdrQueryToolParams {
+    fn into_query(self, now_ms: i64) -> Result<SmdrQueryParams, BackendError> {
+        let limit = match self.limit {
+            Some(n) => QueryLimit::mcp(n).map_err(BackendError::CallLog)?,
+            None => QueryLimit::default(),
+        };
+        let cursor = self
+            .cursor
+            .as_deref()
+            .map(SmdrCursor::decode)
+            .transpose()
+            .map_err(BackendError::CallLog)?;
+        Ok(SmdrQueryParams {
+            ext: self.ext,
+            direction: self.direction.map(|d| match d {
+                SmdrDirectionParam::Incoming => CallDirection::Incoming,
+                SmdrDirectionParam::Outgoing => CallDirection::Outgoing,
+            }),
+            limit,
+            cursor,
+            ..SmdrQueryParams::with_defaults(self.since_ms, self.until_ms, now_ms)
+        })
+    }
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -229,6 +281,43 @@ impl KxMcpServer {
             .map_err(api_err)?;
         Ok(text_json(job))
     }
+
+    #[tool(
+        description = "Read stored phone call records (call-log scope; read-only, newest first, at most 31 days and 100 rows per call)"
+    )]
+    async fn smdr_query(
+        &self,
+        Parameters(params): Parameters<SmdrQueryToolParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let caller = Self::caller()?;
+        if !caller.scopes().allows_call_log() {
+            return Err(api_err(BackendError::ForbiddenScope));
+        }
+        let now_ms =
+            i64::try_from(time::OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000)
+                .map_err(|_| api_err(BackendError::BadRequest("clock")))?;
+        let query = params.into_query(now_ms).map_err(api_err)?;
+        let page = kxprov_mock::ReadOnlyPbxClient::new(self.backend.clone())
+            .smdr_query(&caller, query)
+            .await
+            .map_err(api_err)?;
+        Ok(text_json(page))
+    }
+
+    #[tool(
+        description = "Call-log reader status: whether the port is listening, paused for a programming session, disabled or down, plus counters (call-log scope; read-only)"
+    )]
+    async fn smdr_status(&self) -> Result<CallToolResult, ErrorData> {
+        let caller = Self::caller()?;
+        if !caller.scopes().allows_call_log() {
+            return Err(api_err(BackendError::ForbiddenScope));
+        }
+        let status = kxprov_mock::ReadOnlyPbxClient::new(self.backend.clone())
+            .smdr_status(&caller)
+            .await
+            .map_err(api_err)?;
+        Ok(text_json(status))
+    }
 }
 
 fn text_json<T: serde::Serialize>(value: T) -> CallToolResult {
@@ -276,5 +365,175 @@ impl ServerHandler for KxMcpServer {
             next_cursor: None,
             meta: None,
         })
+    }
+}
+
+#[cfg(test)]
+mod smdr_tool_tests {
+    #![allow(
+        clippy::unwrap_used,
+        reason = "test setup failures should abort the test"
+    )]
+    use super::*;
+    use kxprov_api::{Scope, SmdrCallView, SmdrPage};
+    use kxprov_mock::{scopes_for_role, MockDaemon};
+
+    fn caller(scopes: ScopeSet) -> CallerIdentity {
+        CallerIdentity::Mcp(McpTokenIdentity {
+            token_id: TokenId("bots".into()),
+            agent_name: "bots".into(),
+            scopes,
+            bearer: String::new(),
+        })
+    }
+
+    fn params(limit: Option<u16>, cursor: Option<String>) -> SmdrQueryToolParams {
+        SmdrQueryToolParams {
+            since_ms: Some(0),
+            until_ms: Some(1_000_000),
+            ext: None,
+            direction: None,
+            limit,
+            cursor,
+        }
+    }
+
+    async fn server_with_calls(n: i64) -> KxMcpServer {
+        let mock = MockDaemon::new();
+        for i in 1..=n {
+            mock.test_add_call(
+                i * 1000,
+                SmdrCallView {
+                    id: i,
+                    rx_ts_utc: format!("1970-01-01T00:00:{:02}.000Z", i % 60),
+                    pbx_local: String::new(),
+                    ext: "101".into(),
+                    co: "01".into(),
+                    direction: CallDirection::Incoming,
+                    number: format!("555{i:04}"),
+                    cid_text: None,
+                    ring_s: None,
+                    duration_s: Some(10),
+                    acc: None,
+                    raw: Some(format!("RAW LINE {i}")),
+                },
+            )
+            .await;
+        }
+        KxMcpServer::new(Arc::new(mock))
+    }
+
+    fn page(r: CallToolResult) -> SmdrPage {
+        let text = serde_json::to_value(&r.content).unwrap()[0]["text"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        serde_json::from_str(&text).unwrap()
+    }
+
+    #[test]
+    fn tool_is_listed_only_with_call_log() {
+        let bots = scopes_for_role("bots");
+        assert!(KxMcpServer::tool_visible_for_scopes("smdr_query", &bots));
+        for role in ["tester", "communications", "approver"] {
+            assert!(
+                !KxMcpServer::tool_visible_for_scopes("smdr_query", &scopes_for_role(role)),
+                "{role}"
+            );
+        }
+        let read_only = ScopeSet::empty().with(Scope::Read);
+        assert!(!KxMcpServer::tool_visible_for_scopes(
+            "smdr_query",
+            &read_only
+        ));
+        for write_tool in [
+            "apply_plan",
+            "plan_change",
+            "backup_now",
+            "submit_approval",
+            "rollback",
+        ] {
+            assert!(
+                !KxMcpServer::tool_visible_for_scopes(write_tool, &bots),
+                "{write_tool}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn call_without_call_log_is_refused() {
+        let server = server_with_calls(3).await;
+        let r = MCP_CALLER
+            .scope(
+                caller(ScopeSet::empty().with(Scope::Read).with(Scope::Plan)),
+                server.smdr_query(Parameters(params(None, None))),
+            )
+            .await;
+        assert!(r.is_err());
+    }
+
+    #[tokio::test]
+    async fn mcp_caps_the_page_at_100_and_pages_by_cursor() {
+        let server = server_with_calls(5).await;
+        let who = caller(scopes_for_role("bots"));
+        let over = MCP_CALLER
+            .scope(
+                who.clone(),
+                server.smdr_query(Parameters(params(Some(101), None))),
+            )
+            .await;
+        assert!(over.is_err());
+        let first = page(
+            MCP_CALLER
+                .scope(
+                    who.clone(),
+                    server.smdr_query(Parameters(params(Some(2), None))),
+                )
+                .await
+                .unwrap(),
+        );
+        let ids: Vec<i64> = first.calls.iter().map(|c| c.id).collect();
+        assert_eq!(ids, [5, 4]);
+        let cursor = first.next.unwrap().encode();
+        let second = page(
+            MCP_CALLER
+                .scope(
+                    who.clone(),
+                    server.smdr_query(Parameters(params(Some(2), Some(cursor)))),
+                )
+                .await
+                .unwrap(),
+        );
+        assert_eq!(
+            second.calls.iter().map(|c| c.id).collect::<Vec<_>>(),
+            [3, 2]
+        );
+        let bad = MCP_CALLER
+            .scope(
+                who,
+                server.smdr_query(Parameters(params(None, Some("zz".into())))),
+            )
+            .await;
+        assert!(bad.is_err());
+    }
+
+    #[tokio::test]
+    async fn call_log_tokens_including_bots_see_the_raw_line() {
+        let server = server_with_calls(1).await;
+        let who = caller(scopes_for_role("bots"));
+        let r = MCP_CALLER
+            .scope(who, server.smdr_query(Parameters(params(None, None))))
+            .await
+            .unwrap();
+        let text = serde_json::to_value(&r.content).unwrap()[0]["text"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let json: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let call = &json["calls"][0];
+        assert_eq!(call["raw"], "RAW LINE 1");
+        for absent in ["answered", "cd", "disposition"] {
+            assert!(call.get(absent).is_none(), "{absent}");
+        }
     }
 }

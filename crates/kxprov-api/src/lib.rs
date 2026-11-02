@@ -8,11 +8,13 @@ mod ids;
 mod paths;
 mod plan_hash;
 mod protocol;
+mod smdr;
+mod smdr_relay;
 mod surface;
 mod tokens;
 mod types;
 
-pub use client::{ApiClient, ApiError};
+pub use client::{ApiClient, ApiError, SmdrEventStream};
 pub use ids::{Approval, DiffHash, PlanId, Profile, TokenId};
 pub use paths::{
     goliath_dir, mode_counter_path, production_layout, profile_data_dir, profile_dir_name,
@@ -22,6 +24,14 @@ pub use paths::{
 };
 pub use plan_hash::{diff_hash, CanonicalPlan, CanonicalWrite};
 pub use protocol::*;
+pub use smdr::{
+    CallDirection, DownReason, GapWindow, PortModeView, QueryLimit, SmdrApiError, SmdrCallView,
+    SmdrCounters, SmdrCursor, SmdrPage, SmdrQueryParams, SmdrStatus, SmdrStreamEvent,
+    SmdrSubscribed, DEFAULT_RANGE_MS, GAP_TRACKING, MAX_RANGE_DAYS, MCP_QUERY_LIMIT_MAX,
+    QUERY_LIMIT_DEFAULT, QUERY_LIMIT_MAX, SMDR_BUS_CAPACITY, SMDR_HEARTBEAT_SECS,
+    SMDR_STREAMS_PER_SESSION,
+};
+pub use smdr_relay::{spawn_smdr_relay, SMDR_RELAY_BUFFER};
 pub use surface::*;
 pub use tokens::{
     hash_bearer_secret, token_id_is_reserved, validate_tokens_file, TokenEntry,

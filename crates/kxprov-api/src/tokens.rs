@@ -105,4 +105,43 @@ mod tests {
             Err(TokenValidationError::ApproverMustNotHoldPlanOrWrite)
         );
     }
+
+    fn entry(id: &str, scopes: Vec<Scope>) -> TokenEntry {
+        TokenEntry {
+            id: TokenId(id.into()),
+            secret_hash: "00".repeat(32),
+            scopes,
+            expires_at_ms: 1,
+            revoked: false,
+        }
+    }
+
+    #[test]
+    fn call_log_alone_and_approver_with_call_log_are_valid() {
+        let file = TokensFile {
+            approver_token_id: TokenId("approver".into()),
+            tokens: vec![
+                entry("calls", vec![Scope::CallLog]),
+                entry("approver", vec![Scope::Approve, Scope::CallLog]),
+                entry("bots", vec![Scope::Read, Scope::CallLog]),
+                entry("gateway", vec![Scope::Read, Scope::Plan, Scope::CallLog]),
+            ],
+        };
+        assert_eq!(validate_tokens_file(&file), Ok(()));
+    }
+
+    #[test]
+    fn call_log_does_not_let_the_approver_plan() {
+        let file = TokensFile {
+            approver_token_id: TokenId("approver".into()),
+            tokens: vec![entry(
+                "approver",
+                vec![Scope::Approve, Scope::CallLog, Scope::Plan],
+            )],
+        };
+        assert_eq!(
+            validate_tokens_file(&file),
+            Err(TokenValidationError::ApproverMustNotHoldPlanOrWrite)
+        );
+    }
 }

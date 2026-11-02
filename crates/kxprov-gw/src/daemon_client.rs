@@ -105,6 +105,9 @@ fn map_api_error(err: ApiError) -> BackendError {
 }
 
 fn map_remote_error(code: &str, message: &str) -> BackendError {
+    if let Some(e) = kxprov_api::SmdrApiError::from_code(code) {
+        return BackendError::CallLog(e);
+    }
     let lower = message.to_ascii_lowercase();
     match code {
         "forbidden" | "scope" => BackendError::ForbiddenScope,
@@ -355,6 +358,62 @@ impl DaemonBackend for DaemonClient {
         // kxprovd has no job-scoped rollback RPC yet; Unlock only clears the global lock
         // and ignores job_id — do not map MCP rollback to it.
         Err(BackendError::BadRequest("rollback not supported by daemon"))
+    }
+
+    async fn smdr_query(
+        &self,
+        caller: &CallerIdentity,
+        params: kxprov_api::SmdrQueryParams,
+    ) -> Result<kxprov_api::SmdrPage, BackendError> {
+        match self.call(caller, RequestBody::SmdrQuery { params }).await? {
+            ResponseResult::SmdrPage(p) => Ok(p),
+            _ => Err(unexpected_daemon_reply()),
+        }
+    }
+
+    async fn smdr_status(
+        &self,
+        caller: &CallerIdentity,
+    ) -> Result<kxprov_api::SmdrStatus, BackendError> {
+        match self.call(caller, RequestBody::SmdrStatus).await? {
+            ResponseResult::SmdrStatus(s) => Ok(s),
+            _ => Err(unexpected_daemon_reply()),
+        }
+    }
+
+    /// Opens a dedicated daemon connection per subscriber and forwards its events through a
+    /// small bounded channel. A slow browser stalls only this pump; the daemon side then lags.
+    async fn smdr_subscribe(
+        &self,
+        caller: &CallerIdentity,
+        since_id: Option<i64>,
+    ) -> Result<kxprov_mock::SmdrSubscription, BackendError> {
+        let (auth, audit) = daemon_auth(caller, &self.gateway_bearer);
+        let client = ApiClient::connect(&self.socket_path)
+            .await
+            .map_err(map_api_error)?;
+        let (_ack, mut stream) = client
+            .subscribe_smdr(since_id, Some(auth), audit)
+            .await
+            .map_err(map_api_error)?;
+        let (tx, rx) = tokio::sync::mpsc::channel(kxprov_api::SMDR_RELAY_BUFFER);
+        tokio::spawn(async move {
+            loop {
+                match stream.next_event().await {
+                    Ok(Some(event)) => {
+                        if tx.send(event).await.is_err() {
+                            return;
+                        }
+                    }
+                    Ok(None) => return,
+                    Err(e) => {
+                        tracing::debug!(%e, "call-log stream from daemon ended");
+                        return;
+                    }
+                }
+            }
+        });
+        Ok(rx)
     }
 }
 

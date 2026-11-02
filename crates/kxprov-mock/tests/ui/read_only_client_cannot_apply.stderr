@@ -1,0 +1,8 @@
+error[E0599]: no method named `apply_plan` found for struct `ReadOnlyPbxClient` in the current scope
+ --> tests/ui/read_only_client_cannot_apply.rs:6:10
+  |
+5 | /     client
+6 | |         .apply_plan(&caller, PlanId("p".into()), DiffHash("d".into()))
+  | |         -^^^^^^^^^^ method not found in `ReadOnlyPbxClient`
+  | |_________|
+  |

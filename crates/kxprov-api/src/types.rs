@@ -28,6 +28,8 @@ pub enum Scope {
     Plan,
     Write,
     Approve,
+    /// Read stored SMDR call records; separate from [`Scope::Read`] (S6).
+    CallLog,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -205,6 +207,17 @@ pub enum RequestBody {
     },
     /// Returns token id + scopes for the presented bearer (gateway startup).
     Whoami,
+    /// Read stored call records from SQLite; never touches the serial port.
+    SmdrQuery {
+        params: crate::SmdrQueryParams,
+    },
+    /// Port mode for any `Read` caller, plus reader counters with `CallLog`. No serial I/O.
+    SmdrStatus,
+    /// Turns this connection into a one-way stream of [`crate::SmdrStreamEvent`] lines.
+    /// Calls after `since_id` are replayed first. Requires `CallLog`; no serial I/O.
+    SmdrSubscribe {
+        since_id: Option<i64>,
+    },
     /// Simulator / test profile only (feature `sim-fault-triggers`).
     #[cfg(feature = "sim-fault-triggers")]
     SimTriggerBusy {
@@ -223,7 +236,10 @@ impl RequestBody {
             RequestBody::Status
             | RequestBody::ReadFields { .. }
             | RequestBody::ListBackups
-            | RequestBody::Whoami => false,
+            | RequestBody::Whoami
+            | RequestBody::SmdrQuery { .. }
+            | RequestBody::SmdrStatus
+            | RequestBody::SmdrSubscribe { .. } => false,
             RequestBody::PlanChange { .. }
             | RequestBody::SubmitApproval { .. }
             | RequestBody::SetMode { .. }
@@ -280,6 +296,9 @@ pub enum ResponseResult {
     ApplyApprovalRequired(ApplyApprovalRequiredResult),
     Unlock(UnlockResult),
     Whoami(WhoamiResult),
+    SmdrPage(crate::SmdrPage),
+    SmdrStatus(crate::SmdrStatus),
+    SmdrSubscribed(crate::SmdrSubscribed),
     #[cfg(feature = "sim-fault-triggers")]
     SimTrigger(SimTriggerResult),
 }

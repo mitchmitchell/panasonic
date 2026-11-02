@@ -28,6 +28,8 @@ use tokio::sync::RwLock;
 pub struct ApiState {
     pub config: Config,
     pub port: Arc<crate::port::DeviceArbiter>,
+    /// Live call-log broadcast and reader counters (S6).
+    pub smdr: Arc<crate::smdr_bus::SmdrLive>,
     pub profile: Arc<tokio::sync::RwLock<Profile>>,
     pub transport_label: String,
     pub gates: Arc<RwLock<GateState>>,
@@ -82,14 +84,90 @@ async fn handle_conn(
                 continue;
             }
         };
+        if let RequestBody::SmdrSubscribe { since_id } = env.body {
+            return smdr_subscribe(&state, cred, &env, since_id, write_half).await;
+        }
         let resp = dispatch(&state, cred, &env).await;
         write_response(&mut write_half, &resp).await?;
     }
     Ok(())
 }
 
-async fn write_response(
-    w: &mut tokio::net::unix::OwnedWriteHalf,
+/// Serves one call-log subscription until the client goes away. Reads SQLite and the
+/// in-memory broadcast only; the port is never touched.
+async fn smdr_subscribe<W: tokio::io::AsyncWrite + Unpin>(
+    state: &ApiState,
+    cred: crate::peer::PeerCred,
+    env: &RequestEnvelope,
+    since_id: Option<i64>,
+    mut w: W,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let role = state.peer_policy.role(cred);
+    if let Err(e) = require_access(state, cred, role, &env.auth, Scope::CallLog) {
+        write_response(&mut w, &err_response(env.id.clone(), e)).await?;
+        return Ok(());
+    }
+    if !state.config.smdr.enabled {
+        write_response(&mut w, &err_response(env.id.clone(), smdr_disabled())).await?;
+        return Ok(());
+    }
+    let live = state.smdr.subscribe();
+    let db = crate::smdr_api::db_path(&state.config.data_dir);
+    let replay = tokio::task::spawn_blocking(move || {
+        let after = match since_id {
+            Some(id) => id,
+            None => crate::smdr_api::max_call_id(&db)?,
+        };
+        let pending = crate::smdr_api::count_after(&db, after)?;
+        let cap = kxprov_api::QUERY_LIMIT_MAX;
+        if pending > u64::from(cap) {
+            Ok::<_, kxprov_api::SmdrApiError>((after, Vec::new(), pending))
+        } else {
+            Ok((after, crate::smdr_api::calls_after(&db, after, cap)?, 0))
+        }
+    })
+    .await;
+    let (after, calls, truncated) = match replay {
+        Ok(Ok(r)) => r,
+        Ok(Err(e)) => {
+            let resp = err_response(env.id.clone(), api_err(e.code(), &e.to_string()));
+            write_response(&mut w, &resp).await?;
+            return Ok(());
+        }
+        Err(join) => {
+            tracing::warn!(%join, "smdr replay task failed");
+            let e = kxprov_api::SmdrApiError::StoreUnavailable;
+            let resp = err_response(env.id.clone(), api_err(e.code(), &e.to_string()));
+            write_response(&mut w, &resp).await?;
+            return Ok(());
+        }
+    };
+    let ack = Response {
+        id: env.id.clone(),
+        ok: true,
+        result: Some(ResponseResult::SmdrSubscribed(kxprov_api::SmdrSubscribed {
+            replay_after_id: after,
+        })),
+        error: None,
+    };
+    write_response(&mut w, &ack).await?;
+    let mut events = kxprov_api::spawn_smdr_relay(
+        calls,
+        truncated,
+        live,
+        std::time::Duration::from_secs(kxprov_api::SMDR_HEARTBEAT_SECS),
+    );
+    while let Some(event) = events.recv().await {
+        let line = serde_json::to_string(&event)?;
+        w.write_all(line.as_bytes()).await?;
+        w.write_all(b"\n").await?;
+        w.flush().await?;
+    }
+    Ok(())
+}
+
+async fn write_response<W: tokio::io::AsyncWrite + Unpin>(
+    w: &mut W,
     resp: &Response,
 ) -> std::io::Result<()> {
     let line = serde_json::to_string(resp)?;
@@ -192,6 +270,26 @@ async fn dispatch(
         }
         RequestBody::Unlock { params } => unlock(state, cred, params.clone()).await,
         RequestBody::Whoami => whoami(state, role, &env.auth).await,
+        RequestBody::SmdrQuery { params } => {
+            if let Err(e) = require_access(state, cred, role, &env.auth, Scope::CallLog) {
+                return err_response(id, e);
+            }
+            smdr_query(state, params.clone()).await
+        }
+        RequestBody::SmdrStatus => {
+            let with_counters =
+                require_access(state, cred, role, &env.auth, Scope::CallLog).is_ok();
+            if !with_counters {
+                if let Err(e) = require_access(state, cred, role, &env.auth, Scope::Read) {
+                    return err_response(id, e);
+                }
+            }
+            smdr_status(state, with_counters).await
+        }
+        RequestBody::SmdrSubscribe { .. } => Err(api_err(
+            "bad_request",
+            "smdr_subscribe is served only as the first request on a connection",
+        )),
         #[cfg(feature = "sim-fault-triggers")]
         RequestBody::SimTriggerBusy { params } => {
             sim_trigger_busy(state, cred, role, &env.auth, params).await
@@ -379,6 +477,108 @@ fn require_access(
                 return Err(api_err("forbidden", "read-only peer"));
             }
             Ok(JobPrincipal::SyntheticLocal { uid: cred.uid })
+        }
+    }
+}
+
+fn smdr_disabled() -> ApiErrorBody {
+    let e = kxprov_api::SmdrApiError::Disabled;
+    api_err(e.code(), &e.to_string())
+}
+
+async fn smdr_query(
+    state: &ApiState,
+    params: kxprov_api::SmdrQueryParams,
+) -> Result<ResponseResult, ApiErrorBody> {
+    if !state.config.smdr.enabled {
+        return Err(smdr_disabled());
+    }
+    let db = crate::smdr_api::db_path(&state.config.data_dir);
+    let journal = crate::smdr_api::lease_journal_path(&state.config.data_dir);
+    match tokio::task::spawn_blocking(move || crate::smdr_api::query(&db, &journal, &params)).await
+    {
+        Ok(Ok(page)) => Ok(ResponseResult::SmdrPage(page)),
+        Ok(Err(e)) => Err(api_err(e.code(), &e.to_string())),
+        Err(join) => {
+            tracing::warn!(%join, "smdr query task failed");
+            let e = kxprov_api::SmdrApiError::StoreUnavailable;
+            Err(api_err(e.code(), &e.to_string()))
+        }
+    }
+}
+
+/// Banner state from the port's `mode()`/`holder()` and the reader's own report; no serial I/O.
+///
+/// `mode()` and `holder()` are two reads, so a lease released between them yields
+/// `Programming` with no holder; the banner then shows an empty job id rather than failing,
+/// and the next status poll shows the port listening again.
+pub fn port_mode_view(state: &ApiState) -> kxprov_api::PortModeView {
+    use kxprov_api::{DownReason, PortModeView};
+    if !state.config.smdr.enabled {
+        return PortModeView::Disabled;
+    }
+    if state.port.mode() == crate::port::PortMode::Programming {
+        return PortModeView::PausedForProgramming {
+            job_id: state.port.holder().unwrap_or_default(),
+        };
+    }
+    let live = state.smdr.snapshot();
+    if !live.running {
+        PortModeView::Down {
+            reason: DownReason::ReaderNotRunning,
+        }
+    } else if live.link_down {
+        PortModeView::Down {
+            reason: DownReason::LinkDown,
+        }
+    } else {
+        PortModeView::Listening
+    }
+}
+
+fn local_midnight_utc() -> String {
+    use chrono::{Local, TimeZone};
+    let midnight = Local::now().date_naive().and_time(chrono::NaiveTime::MIN);
+    Local
+        .from_local_datetime(&midnight)
+        .earliest()
+        .map(|t| t.with_timezone(&chrono::Utc))
+        .unwrap_or_else(chrono::Utc::now)
+        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+}
+
+async fn smdr_status(
+    state: &ApiState,
+    with_counters: bool,
+) -> Result<ResponseResult, ApiErrorBody> {
+    let port_mode = port_mode_view(state);
+    if !with_counters || !state.config.smdr.enabled {
+        return Ok(ResponseResult::SmdrStatus(kxprov_api::SmdrStatus {
+            port_mode,
+            counters: None,
+        }));
+    }
+    let db = crate::smdr_api::db_path(&state.config.data_dir);
+    let since = local_midnight_utc();
+    let live = state.smdr.snapshot();
+    match tokio::task::spawn_blocking(move || crate::smdr_api::store_counters(&db, &since)).await {
+        Ok(Ok((lines_today, unparsed_count, last_line_at))) => {
+            Ok(ResponseResult::SmdrStatus(kxprov_api::SmdrStatus {
+                port_mode,
+                counters: Some(kxprov_api::SmdrCounters {
+                    last_byte_at: live.last_byte_at,
+                    last_line_at,
+                    lines_today,
+                    unparsed_count,
+                    header_mismatch_count: live.header_mismatch_count,
+                }),
+            }))
+        }
+        Ok(Err(e)) => Err(api_err(e.code(), &e.to_string())),
+        Err(join) => {
+            tracing::warn!(%join, "smdr status task failed");
+            let e = kxprov_api::SmdrApiError::StoreUnavailable;
+            Err(api_err(e.code(), &e.to_string()))
         }
     }
 }
@@ -581,6 +781,7 @@ async fn apply_plan(
     let live_writes = state.gates.read().await.config.live_writes_approved;
     if let Some(gate) = prod_write_gate(
         profile,
+        state.config.transport == crate::config::TransportKind::Serial,
         locked,
         live_writes,
         state.transition.writes_blocked(),
@@ -770,6 +971,7 @@ mod apply_plan_tests {
         cfg.gates.live_writes_approved = true;
         ApiState {
             port: crate::transport::device_arbiter(&cfg),
+            smdr: Arc::new(crate::smdr_bus::SmdrLive::new()),
             config: cfg.clone(),
             profile: Arc::new(RwLock::new(Profile::Prod)),
             transport_label: "sim".into(),
@@ -1026,6 +1228,7 @@ mod unbuilt_sim_trigger_tests {
         let (tx, _rx) = mpsc::channel(4);
         ApiState {
             port: crate::transport::device_arbiter(&cfg),
+            smdr: Arc::new(crate::smdr_bus::SmdrLive::new()),
             config: cfg.clone(),
             profile: Arc::new(RwLock::new(Profile::Sim)),
             transport_label: "sim".into(),
@@ -1084,5 +1287,484 @@ mod unbuilt_sim_trigger_tests {
             "sim_trigger_goliath_copy_fail",
         )
         .await;
+    }
+}
+
+#[cfg(test)]
+mod smdr_dispatch_tests {
+    #![allow(
+        clippy::unwrap_used,
+        reason = "test setup failures should abort the test"
+    )]
+
+    use super::*;
+    use crate::approval::ApprovalBook;
+    use crate::backup::BackupStore;
+    use crate::config::Config;
+    use crate::gates::GateState;
+    use crate::goliath::GoliathQueue;
+    use crate::mode::ModeStore;
+    use crate::peer::PeerCred;
+    use crate::plan_store::PlanStore;
+    use kxprov_api::{
+        hash_bearer_secret, Profile, Scope, SmdrQueryParams, TokenEntry, TokenId, TokensFile,
+    };
+    use std::sync::Arc;
+    use tokio::sync::{mpsc, RwLock};
+
+    const GATEWAY: PeerCred = PeerCred {
+        uid: 1001,
+        gid: 1001,
+        pid: 1,
+    };
+    const ADMIN: PeerCred = PeerCred {
+        uid: 1000,
+        gid: 1000,
+        pid: 1,
+    };
+    const OTHER: PeerCred = PeerCred {
+        uid: 4242,
+        gid: 4242,
+        pid: 1,
+    };
+
+    fn entry(id: &str, scopes: Vec<Scope>) -> TokenEntry {
+        TokenEntry {
+            id: TokenId(id.into()),
+            secret_hash: hash_bearer_secret(&format!("{id}-secret")),
+            scopes,
+            expires_at_ms: u64::MAX / 2,
+            revoked: false,
+        }
+    }
+
+    fn state(tmp: &tempfile::TempDir) -> ApiState {
+        let data = tmp.path().to_path_buf();
+        std::fs::create_dir_all(data.join("plans")).unwrap();
+        std::fs::create_dir_all(data.join("backups")).unwrap();
+        let cfg = Config::sim_test(data.clone(), data.join("kxprovd.sock"), 1000);
+        let tokens = TokensFile {
+            approver_token_id: TokenId("approver".into()),
+            tokens: vec![
+                entry("approver", vec![Scope::Read, Scope::Approve]),
+                entry("bots", vec![Scope::Read, Scope::CallLog]),
+                entry("planner", vec![Scope::Read, Scope::Plan]),
+            ],
+        };
+        std::fs::write(&cfg.tokens_path, serde_json::to_vec(&tokens).unwrap()).unwrap();
+        let (tx, _rx) = mpsc::channel(4);
+        drop(
+            crate::smdr_store::SmdrStore::open(&cfg.data_dir, &[], kxtd1232::smdr::DateOrder::Mdy)
+                .unwrap(),
+        );
+        ApiState {
+            port: crate::transport::device_arbiter(&cfg),
+            smdr: Arc::new(crate::smdr_bus::SmdrLive::new()),
+            config: cfg.clone(),
+            profile: Arc::new(RwLock::new(Profile::Sim)),
+            transport_label: "sim".into(),
+            gates: Arc::new(RwLock::new(GateState { config: cfg.gates })),
+            peer_policy: cfg.peer_policy.clone(),
+            tokens: TokenStore::load_insecure(cfg.tokens_path.clone()).unwrap(),
+            queue: Arc::new(JobQueue::new(tx)),
+            backups: BackupStore::new(data.join("backups")).unwrap(),
+            plans: PlanStore::new(data.join("plans")).unwrap(),
+            approvals: ApprovalBook::new(&data),
+            locked: LockedStore::new(&data),
+            goliath: GoliathQueue::new(data.join("goliath")).unwrap(),
+            mode: ModeStore::new(&data, Profile::Sim),
+            transition: crate::transition::TransitionBlockStore::new(&data),
+        }
+    }
+
+    async fn call(state: &ApiState, cred: PeerCred, bearer: Option<&str>) -> Response {
+        let env = RequestEnvelope {
+            id: "1".into(),
+            auth: bearer.map(|b| RequestAuth {
+                bearer: format!("{b}-secret"),
+            }),
+            audit: None,
+            body: RequestBody::SmdrQuery {
+                params: SmdrQueryParams::with_defaults(None, None, 1_800_000_000_000),
+            },
+        };
+        dispatch(state, cred, &env).await
+    }
+
+    #[tokio::test]
+    async fn issue_61_serial_apply_refused_without_live_writes_even_for_admin_call_log() {
+        for profile in [Profile::Test, Profile::Prod] {
+            let tmp = tempfile::tempdir().unwrap();
+            let mut st = state(&tmp);
+            let tokens = TokensFile {
+                approver_token_id: TokenId("approver".into()),
+                tokens: vec![
+                    entry("approver", vec![Scope::Read, Scope::Approve]),
+                    entry(
+                        "admin",
+                        vec![Scope::Read, Scope::Plan, Scope::Write, Scope::CallLog],
+                    ),
+                ],
+            };
+            std::fs::write(&st.config.tokens_path, serde_json::to_vec(&tokens).unwrap()).unwrap();
+            st.tokens = TokenStore::load_insecure(st.config.tokens_path.clone()).unwrap();
+            st.config.transport = crate::config::TransportKind::Serial;
+            st.config.gates.live_writes_approved = false;
+            st.gates = Arc::new(RwLock::new(GateState {
+                config: st.config.gates,
+            }));
+            *st.profile.write().await = profile;
+            let env = RequestEnvelope {
+                id: "1".into(),
+                auth: Some(RequestAuth {
+                    bearer: "admin-secret".into(),
+                }),
+                audit: None,
+                body: RequestBody::ApplyPlan {
+                    params: kxprov_api::ApplyPlanParams {
+                        plan_id: kxprov_api::PlanId("p".into()),
+                        diff_hash: kxprov_api::DiffHash("d".into()),
+                    },
+                },
+            };
+            let resp = dispatch(&st, ADMIN, &env).await;
+            assert!(!resp.ok, "{profile:?}");
+            let code = resp.error.unwrap().code;
+            let want: &[&str] = match profile {
+                Profile::Prod => &["gate", "locked"],
+                _ => &["gate"],
+            };
+            assert!(want.contains(&code.as_str()), "{profile:?} got {code}");
+        }
+    }
+
+    fn env(bearer: &str, body: RequestBody) -> RequestEnvelope {
+        RequestEnvelope {
+            id: "1".into(),
+            auth: Some(RequestAuth {
+                bearer: format!("{bearer}-secret"),
+            }),
+            audit: None,
+            body,
+        }
+    }
+
+    fn sample_call(id: i64) -> kxprov_api::SmdrCallView {
+        kxprov_api::SmdrCallView {
+            id,
+            rx_ts_utc: "2026-11-01T18:00:00.000Z".into(),
+            pbx_local: String::new(),
+            ext: "101".into(),
+            co: "01".into(),
+            direction: kxprov_api::CallDirection::Incoming,
+            number: "5550100".into(),
+            cid_text: None,
+            ring_s: None,
+            duration_s: Some(5),
+            acc: None,
+            raw: None,
+        }
+    }
+
+    async fn status_of(st: &ApiState, bearer: &str) -> kxprov_api::SmdrStatus {
+        let resp = dispatch(st, GATEWAY, &env(bearer, RequestBody::SmdrStatus)).await;
+        match resp.result {
+            Some(ResponseResult::SmdrStatus(s)) => s,
+            other => panic!("{other:?} {:?}", resp.error),
+        }
+    }
+
+    #[tokio::test]
+    async fn smdr_status_shows_counters_only_with_the_call_log_scope() {
+        let tmp = tempfile::tempdir().unwrap();
+        let st = state(&tmp);
+        let full = status_of(&st, "bots").await;
+        assert_eq!(
+            full.port_mode,
+            kxprov_api::PortModeView::Down {
+                reason: kxprov_api::DownReason::ReaderNotRunning
+            }
+        );
+        assert_eq!(full.counters.unwrap().lines_today, 0);
+        assert!(status_of(&st, "planner").await.counters.is_none());
+        st.smdr.set_running(true);
+        assert_eq!(
+            status_of(&st, "planner").await.port_mode,
+            kxprov_api::PortModeView::Listening
+        );
+        let _lease = st
+            .port
+            .request_lease("job-7", std::time::Duration::from_secs(5))
+            .unwrap();
+        assert_eq!(
+            status_of(&st, "planner").await.port_mode,
+            kxprov_api::PortModeView::PausedForProgramming {
+                job_id: "job-7".into()
+            }
+        );
+    }
+
+    async fn open_subscription(
+        st: &Arc<ApiState>,
+        bearer: &str,
+    ) -> (
+        Response,
+        tokio::io::Lines<tokio::io::BufReader<tokio::io::DuplexStream>>,
+    ) {
+        use tokio::io::AsyncBufReadExt;
+        let (client, server) = tokio::io::duplex(64 * 1024);
+        let st2 = Arc::clone(st);
+        let e = env(bearer, RequestBody::SmdrSubscribe { since_id: None });
+        tokio::spawn(async move {
+            let _client_closed_the_stream = smdr_subscribe(&st2, GATEWAY, &e, None, server).await;
+        });
+        let mut lines = tokio::io::BufReader::new(client).lines();
+        let first = lines.next_line().await.unwrap().unwrap();
+        (serde_json::from_str(&first).unwrap(), lines)
+    }
+
+    #[tokio::test]
+    async fn smdr_subscribe_acks_then_streams_new_calls_and_needs_call_log() {
+        let tmp = tempfile::tempdir().unwrap();
+        let st = Arc::new(state(&tmp));
+        let (refused, _) = open_subscription(&st, "planner").await;
+        assert!(!refused.ok);
+        let (ack, mut lines) = open_subscription(&st, "bots").await;
+        assert!(
+            matches!(
+                ack.result,
+                Some(ResponseResult::SmdrSubscribed(kxprov_api::SmdrSubscribed {
+                    replay_after_id: 0
+                }))
+            ),
+            "{ack:?}"
+        );
+        st.smdr.publish(sample_call(9));
+        let line = tokio::time::timeout(std::time::Duration::from_secs(10), lines.next_line())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let ev: kxprov_api::SmdrStreamEvent = serde_json::from_str(&line).unwrap();
+        assert!(
+            matches!(ev, kxprov_api::SmdrStreamEvent::Call { ref call } if call.id == 9),
+            "{ev:?}"
+        );
+    }
+
+    struct DeviceSentinel {
+        path: std::path::PathBuf,
+        watch: nix::sys::inotify::Inotify,
+    }
+
+    impl DeviceSentinel {
+        fn arm(tmp: &tempfile::TempDir, st: &mut ApiState) -> Self {
+            use nix::sys::inotify::{AddWatchFlags, InitFlags, Inotify};
+            let path = tmp.path().join("sentinel-tty");
+            std::fs::write(&path, b"").unwrap();
+            let watch = Inotify::init(InitFlags::IN_NONBLOCK | InitFlags::IN_CLOEXEC).unwrap();
+            watch
+                .add_watch(
+                    &path,
+                    AddWatchFlags::IN_OPEN
+                        | AddWatchFlags::IN_ACCESS
+                        | AddWatchFlags::IN_MODIFY
+                        | AddWatchFlags::IN_ATTRIB
+                        | AddWatchFlags::IN_DELETE_SELF,
+                )
+                .unwrap();
+            st.config.serial_device = path.clone();
+            Self { path, watch }
+        }
+
+        fn assert_untouched(&self) {
+            let events = match self.watch.read_events() {
+                Ok(events) => events,
+                Err(nix::errno::Errno::EAGAIN) => Vec::new(),
+                Err(e) => panic!("inotify read failed: {e}"),
+            };
+            assert!(
+                events.is_empty(),
+                "serial_device sentinel was touched: {:?}",
+                events.iter().map(|e| e.mask).collect::<Vec<_>>()
+            );
+            assert_eq!(std::fs::read(&self.path).unwrap(), b"");
+        }
+    }
+
+    fn handler_source(name: &str) -> &'static str {
+        let src = include_str!("api.rs");
+        let body = src.split("#[cfg(test)]").next().unwrap();
+        let start = body
+            .find(&format!("fn {name}"))
+            .unwrap_or_else(|| panic!("{name} not found"));
+        let len = body[start..].find("\n}\n").unwrap();
+        &body[start..start + len]
+    }
+
+    #[test]
+    fn smdr_handlers_never_open_a_device_or_take_a_lease() {
+        for name in [
+            "smdr_query",
+            "smdr_status",
+            "smdr_subscribe",
+            "port_mode_view",
+        ] {
+            let body = handler_source(name);
+            for word in [
+                "serial_device",
+                "File::open",
+                "OpenOptions",
+                "std::fs",
+                "tokio::fs",
+                "request_lease",
+                "transport",
+                "tty",
+            ] {
+                assert!(!body.contains(word), "{name} must not reference {word}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn smdr_status_and_subscribe_never_touch_the_port_even_while_it_is_leased() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut st = state(&tmp);
+        st.config.transport = crate::config::TransportKind::Serial;
+        st.config.sim_pbx = None;
+        let sentinel = DeviceSentinel::arm(&tmp, &mut st);
+        let st = Arc::new(st);
+        let lease = st
+            .port
+            .request_lease("job-hold", std::time::Duration::from_secs(5))
+            .unwrap();
+        let journal = tmp.path().join(crate::lease_journal::LEASE_JOURNAL_NAME);
+        let before = std::fs::read(&journal).unwrap_or_default();
+        let holder = st.port.holder();
+        for _ in 0..1000 {
+            status_of(&st, "bots").await;
+        }
+        let mut subs = Vec::new();
+        for _ in 0..50 {
+            let (ack, lines) = open_subscription(&st, "bots").await;
+            assert!(ack.ok, "{:?}", ack.error);
+            subs.push(lines);
+        }
+        st.smdr.publish(sample_call(1));
+        drop(subs);
+        assert_eq!(st.port.holder(), holder);
+        assert_eq!(st.port.mode(), crate::port::PortMode::Programming);
+        assert_eq!(std::fs::read(&journal).unwrap_or_default(), before);
+        sentinel.assert_untouched();
+        drop(lease);
+    }
+
+    #[tokio::test]
+    async fn smdr_disabled_in_config_is_a_typed_refusal_everywhere() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut st = state(&tmp);
+        st.config.smdr.enabled = false;
+        let st = Arc::new(st);
+        let q = call(&st, GATEWAY, Some("bots")).await;
+        assert_eq!(q.error.unwrap().code, "smdr_disabled");
+        let s = status_of(&st, "bots").await;
+        assert_eq!(s.port_mode, kxprov_api::PortModeView::Disabled);
+        assert!(s.counters.is_none());
+        let (sub, _) = open_subscription(&st, "bots").await;
+        assert_eq!(sub.error.unwrap().code, "smdr_disabled");
+    }
+
+    #[tokio::test]
+    async fn smdr_queries_never_touch_the_port_even_while_it_is_leased() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut st = state(&tmp);
+        st.config.transport = crate::config::TransportKind::Serial;
+        st.config.sim_pbx = None;
+        let sentinel = DeviceSentinel::arm(&tmp, &mut st);
+        let lease = st
+            .port
+            .request_lease("job-hold", std::time::Duration::from_secs(5))
+            .unwrap();
+        assert_eq!(st.port.mode(), crate::port::PortMode::Programming);
+        let journal = tmp.path().join("port-lease.jsonl");
+        let before = std::fs::read(&journal).unwrap_or_default();
+        let holder = st.port.holder();
+        for _ in 0..1000 {
+            let resp = call(&st, GATEWAY, Some("bots")).await;
+            assert!(resp.ok, "{:?}", resp.error);
+        }
+        assert_eq!(st.port.holder(), holder);
+        assert_eq!(st.port.mode(), crate::port::PortMode::Programming);
+        assert_eq!(std::fs::read(&journal).unwrap_or_default(), before);
+        sentinel.assert_untouched();
+        drop(lease);
+    }
+
+    #[tokio::test]
+    async fn smdr_query_requires_the_call_log_scope() {
+        let tmp = tempfile::tempdir().unwrap();
+        let st = state(&tmp);
+        let ok = call(&st, GATEWAY, Some("bots")).await;
+        assert!(ok.ok, "{:?}", ok.error);
+        assert!(matches!(ok.result, Some(ResponseResult::SmdrPage(_))));
+        for (cred, bearer) in [
+            (GATEWAY, Some("planner")),
+            (GATEWAY, Some("approver")),
+            (GATEWAY, None),
+            (ADMIN, None),
+            (OTHER, None),
+        ] {
+            let resp = call(&st, cred, bearer).await;
+            assert!(!resp.ok, "{cred:?} {bearer:?}");
+            assert!(resp.result.is_none());
+            let code = resp.error.unwrap().code;
+            assert!(
+                code == "forbidden" || code == "token_required",
+                "{cred:?} {bearer:?} {code}"
+            );
+        }
+    }
+
+    fn listing(dir: &std::path::Path) -> Vec<(String, u64)> {
+        let mut out: Vec<(String, u64)> = walk(dir)
+            .into_iter()
+            .filter(|p| {
+                !p.ends_with(crate::smdr_store::SMDR_DIR_NAME)
+                    && !p
+                        .components()
+                        .any(|c| c.as_os_str() == crate::smdr_store::SMDR_DIR_NAME)
+            })
+            .map(|p| {
+                let len = std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
+                (p.display().to_string(), len)
+            })
+            .collect();
+        out.sort();
+        out
+    }
+
+    fn walk(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+        let mut out = Vec::new();
+        for e in std::fs::read_dir(dir).unwrap().flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                out.extend(walk(&p));
+            }
+            out.push(p);
+        }
+        out
+    }
+
+    #[tokio::test]
+    async fn a_thousand_queries_leave_the_port_and_lease_journal_untouched() {
+        let tmp = tempfile::tempdir().unwrap();
+        let st = state(&tmp);
+        let mode_before = format!("{:?}", st.port.mode());
+        let before = listing(tmp.path());
+        for _ in 0..1000 {
+            assert!(call(&st, GATEWAY, Some("bots")).await.ok);
+        }
+        assert_eq!(format!("{:?}", st.port.mode()), mode_before);
+        assert_eq!(listing(tmp.path()), before);
     }
 }

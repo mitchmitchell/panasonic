@@ -37,4 +37,6 @@ pub enum BackendError {
     PbxTransport,
     #[error("phone system did not complete the exchange")]
     PbxProtocol,
+    #[error("call log: {0}")]
+    CallLog(kxprov_api::SmdrApiError),
 }
