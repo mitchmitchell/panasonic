@@ -11,7 +11,7 @@ mod scope;
 mod types;
 mod write_gates;
 
-pub use backend::DaemonBackend;
+pub use backend::{DaemonBackend, SmdrSubscription};
 pub use error::BackendError;
 pub use identity::{CallerIdentity, McpTokenIdentity, WebSessionIdentity};
 pub use mock::{MockDaemon, APPROVAL_SUBMIT_LIMIT_PER_DAY, APPROVAL_SUBMIT_LIMIT_PER_HOUR};

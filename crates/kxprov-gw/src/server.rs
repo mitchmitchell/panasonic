@@ -63,6 +63,7 @@ pub async fn serve(
     let token_store = Arc::new(McpTokenStore::from_file(&config.mcp_tokens_path)?);
 
     let web_state = WebState {
+        call_streams: Default::default(),
         backend: backend.clone(),
         admin: Arc::new(AdminVerifier(admin)),
         login_limiter: Arc::new(LoginRateLimiter::new(

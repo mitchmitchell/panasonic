@@ -1,5 +1,7 @@
 use async_trait::async_trait;
-use kxprov_api::{Approval, DiffHash, PlanId, Profile, SmdrPage, SmdrQueryParams};
+use kxprov_api::{
+    Approval, DiffHash, PlanId, Profile, SmdrPage, SmdrQueryParams, SmdrStatus, SmdrStreamEvent,
+};
 
 use crate::error::BackendError;
 use crate::identity::CallerIdentity;
@@ -55,4 +57,18 @@ pub trait DaemonBackend: Send + Sync {
         caller: &CallerIdentity,
         params: SmdrQueryParams,
     ) -> Result<SmdrPage, BackendError>;
+
+    /// Port mode for `Read` callers, plus reader counters with `CallLog`. Never reaches the PBX.
+    async fn smdr_status(&self, caller: &CallerIdentity) -> Result<SmdrStatus, BackendError>;
+
+    /// Live calls after `since_id` (or from now), lag notices and heartbeats; requires `CallLog`.
+    /// The stream ends when the receiver is dropped. Never reaches the PBX.
+    async fn smdr_subscribe(
+        &self,
+        caller: &CallerIdentity,
+        since_id: Option<i64>,
+    ) -> Result<SmdrSubscription, BackendError>;
 }
+
+/// Bounded receiver of call-log events; see [`kxprov_api::spawn_smdr_relay`].
+pub type SmdrSubscription = tokio::sync::mpsc::Receiver<SmdrStreamEvent>;

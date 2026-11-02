@@ -76,3 +76,46 @@ impl ApiClient {
         })
     }
 }
+
+/// A connection turned into a call-log event stream by [`ApiClient::subscribe_smdr`].
+pub struct SmdrEventStream {
+    reader: BufReader<tokio::net::unix::OwnedReadHalf>,
+    _write: tokio::net::unix::OwnedWriteHalf,
+    line: String,
+}
+
+impl SmdrEventStream {
+    /// Next event, or `Ok(None)` when the daemon closed the stream.
+    pub async fn next_event(&mut self) -> Result<Option<crate::SmdrStreamEvent>, ApiError> {
+        self.line.clear();
+        if self.reader.read_line(&mut self.line).await? == 0 {
+            return Ok(None);
+        }
+        Ok(Some(serde_json::from_str(self.line.trim())?))
+    }
+}
+
+impl ApiClient {
+    /// Sends `SmdrSubscribe` and hands the connection over to the event stream it becomes.
+    pub async fn subscribe_smdr(
+        mut self,
+        since_id: Option<i64>,
+        auth: Option<crate::RequestAuth>,
+        audit: Option<String>,
+    ) -> Result<(crate::SmdrSubscribed, SmdrEventStream), ApiError> {
+        match self
+            .call_auth_audit(RequestBody::SmdrSubscribe { since_id }, auth, audit)
+            .await?
+        {
+            ResponseResult::SmdrSubscribed(ack) => Ok((
+                ack,
+                SmdrEventStream {
+                    reader: self.reader,
+                    _write: self.write,
+                    line: String::new(),
+                },
+            )),
+            _not_a_subscription_ack => Err(ApiError::Unexpected),
+        }
+    }
+}

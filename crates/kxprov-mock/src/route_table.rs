@@ -89,4 +89,5 @@ pub const MCP_TOOLS: &[&str] = &[
     "submit_approval",
     "rollback",
     "smdr_query",
+    "smdr_status",
 ];

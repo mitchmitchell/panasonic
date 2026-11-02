@@ -62,5 +62,9 @@
     {% endif %}
     <p><a href="/">Back to kx-provision</a></p>
   </main>
+  {% if live_tail %}
+  <span id="live-tail" hidden></span>
+  <script src="/static/calls.js" defer></script>
+  {% endif %}
 </body>
 </html>

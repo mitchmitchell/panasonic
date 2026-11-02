@@ -47,6 +47,7 @@ async fn app(calls: Vec<SmdrCallView>) -> Router {
         mock.test_add_call(ms(&c.rx_ts_utc), c).await;
     }
     let state = WebState {
+        call_streams: Default::default(),
         backend: Arc::new(mock),
         admin: Arc::new(TestVerifier),
         login_limiter: Arc::new(LoginRateLimiter::new(

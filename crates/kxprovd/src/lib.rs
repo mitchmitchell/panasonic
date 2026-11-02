@@ -28,6 +28,7 @@ pub mod queue;
 pub mod rate_limit;
 pub mod sim_mark;
 pub mod smdr_api;
+pub mod smdr_bus;
 pub mod smdr_reader;
 pub mod smdr_store;
 #[cfg(feature = "test-util")]
@@ -249,6 +250,7 @@ impl Daemon {
         let api_state = Arc::new(ApiState {
             config: config.clone(),
             port,
+            smdr: Arc::new(smdr_bus::SmdrLive::new()),
             profile: Arc::clone(&profile),
             transport_label,
             gates,
@@ -427,6 +429,7 @@ impl Daemon {
         let api_state = Arc::new(ApiState {
             config: config.clone(),
             port,
+            smdr: Arc::new(smdr_bus::SmdrLive::new()),
             profile: Arc::clone(&profile),
             transport_label,
             gates,

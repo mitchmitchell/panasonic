@@ -78,7 +78,13 @@ fn bots_list_is_exactly_the_read_and_call_log_tools() {
     listed.sort();
     assert_eq!(
         listed,
-        ["list_backups", "read_fields", "smdr_query", "status"]
+        [
+            "list_backups",
+            "read_fields",
+            "smdr_query",
+            "smdr_status",
+            "status"
+        ]
     );
 }
 

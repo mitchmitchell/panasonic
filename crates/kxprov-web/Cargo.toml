@@ -24,6 +24,7 @@ subtle.workspace = true
 time.workspace = true
 tokio = { workspace = true, features = ["sync", "time"] }
 uuid.workspace = true
+futures-util = { version = "0.3", default-features = false }
 
 [dev-dependencies]
 axum = { workspace = true }

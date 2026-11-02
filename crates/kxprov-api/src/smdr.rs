@@ -279,9 +279,107 @@ pub struct SmdrPage {
     pub gaps: Vec<GapWindow>,
 }
 
+/// Capacity of the daemon's live-call broadcast; a subscriber further behind gets [`SmdrStreamEvent::Lagged`].
+pub const SMDR_BUS_CAPACITY: usize = 256;
+/// Seconds between keep-alive events on a call-log subscription.
+pub const SMDR_HEARTBEAT_SECS: u64 = 15;
+/// Live call-log streams one web session may hold open at once.
+pub const SMDR_STREAMS_PER_SESSION: usize = 4;
+
+/// Why the SMDR reader is not listening.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum DownReason {
+    /// The daemon has not started an SMDR reader.
+    ReaderNotRunning,
+    /// The reader lost the serial link.
+    LinkDown,
+}
+
+/// What the SMDR port is doing, for the call-log banner.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum PortModeView {
+    Listening,
+    PausedForProgramming { job_id: String },
+    Disabled,
+    Down { reason: DownReason },
+}
+
+/// Reader counters; shown only to callers holding the `CallLog` scope.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SmdrCounters {
+    pub last_byte_at: Option<String>,
+    pub last_line_at: Option<String>,
+    /// Stored calls received since local midnight on the daemon host.
+    pub lines_today: u64,
+    pub unparsed_count: u64,
+    pub header_mismatch_count: u64,
+}
+
+/// Call-log status. `counters` is `None` for a caller with `Read` but not `CallLog`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SmdrStatus {
+    pub port_mode: PortModeView,
+    pub counters: Option<SmdrCounters>,
+}
+
+/// Acknowledges a subscription; events follow on the same connection, one JSON line each.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SmdrSubscribed {
+    /// Calls after this id are replayed before live events.
+    pub replay_after_id: i64,
+}
+
+/// One event on a call-log subscription.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "event", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum SmdrStreamEvent {
+    Call {
+        call: SmdrCallView,
+    },
+    /// The subscriber fell behind and missed `skipped` calls; it must re-query the first page.
+    Lagged {
+        skipped: u64,
+    },
+    Heartbeat,
+}
+
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::unwrap_used,
+        reason = "test setup failures should abort the test"
+    )]
+
     use super::*;
+
+    #[test]
+    fn status_and_stream_events_have_stable_wire_shapes() {
+        let s = SmdrStatus {
+            port_mode: PortModeView::PausedForProgramming {
+                job_id: "j1".into(),
+            },
+            counters: None,
+        };
+        let v = serde_json::to_value(&s).unwrap();
+        assert_eq!(v["port_mode"]["state"], "paused_for_programming");
+        assert_eq!(v["port_mode"]["job_id"], "j1");
+        let down = serde_json::to_value(PortModeView::Down {
+            reason: DownReason::ReaderNotRunning,
+        })
+        .unwrap();
+        assert_eq!(down["reason"], "reader_not_running");
+        let lag = serde_json::to_string(&SmdrStreamEvent::Lagged { skipped: 3 }).unwrap();
+        assert_eq!(lag, r#"{"event":"lagged","skipped":3}"#);
+        assert_eq!(
+            serde_json::from_str::<SmdrStreamEvent>(r#"{"event":"heartbeat"}"#).unwrap(),
+            SmdrStreamEvent::Heartbeat
+        );
+    }
 
     #[test]
     fn limit_bounds_differ_by_boundary() {

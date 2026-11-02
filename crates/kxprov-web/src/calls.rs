@@ -14,6 +14,67 @@ use serde::Deserialize;
 use tower_sessions::Session;
 
 use crate::WebState;
+use axum::http::HeaderMap;
+use axum::response::sse::{Event, Sse};
+use axum::Json;
+use kxprov_api::SmdrStreamEvent;
+use std::collections::HashMap;
+use std::convert::Infallible;
+use std::sync::{Arc, Mutex, PoisonError};
+
+/// Counts open live streams per session so one session holds at most
+/// [`kxprov_api::SMDR_STREAMS_PER_SESSION`].
+#[derive(Debug, Default)]
+pub struct StreamLimiter {
+    open: Mutex<HashMap<String, usize>>,
+}
+
+/// One open stream; dropping it frees the slot.
+#[derive(Debug)]
+pub struct StreamPermit {
+    limiter: Arc<StreamLimiter>,
+    key: String,
+}
+
+impl StreamLimiter {
+    pub fn try_acquire(self: &Arc<Self>, key: &str) -> Option<StreamPermit> {
+        let mut open = self.open.lock().unwrap_or_else(PoisonError::into_inner);
+        let n = open.entry(key.to_string()).or_insert(0);
+        if *n >= kxprov_api::SMDR_STREAMS_PER_SESSION {
+            return None;
+        }
+        *n += 1;
+        Some(StreamPermit {
+            limiter: Arc::clone(self),
+            key: key.to_string(),
+        })
+    }
+
+    pub fn open_for(&self, key: &str) -> usize {
+        self.open
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(key)
+            .copied()
+            .unwrap_or(0)
+    }
+}
+
+impl Drop for StreamPermit {
+    fn drop(&mut self) {
+        let mut open = self
+            .limiter
+            .open
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if let Some(n) = open.get_mut(&self.key) {
+            *n = n.saturating_sub(1);
+            if *n == 0 {
+                open.remove(&self.key);
+            }
+        }
+    }
+}
 
 /// Rows per page on the web view.
 pub const CALLS_PAGE_SIZE: u16 = 100;
@@ -67,6 +128,8 @@ pub struct CallsTemplate {
     pub entries: Vec<Entry>,
     pub show_next: bool,
     pub next_href: String,
+    /// Newest unfiltered page: new calls are added live by `calls.js`.
+    pub live_tail: bool,
 }
 
 fn chicago_midnight_ms(day: NaiveDate) -> Option<i64> {
@@ -280,6 +343,7 @@ fn next_href(q: &CallsQuery, cursor: &SmdrCursor) -> String {
 
 fn blank(q: &CallsQuery) -> CallsTemplate {
     CallsTemplate {
+        live_tail: false,
         from_value: q.from.clone(),
         to_value: q.to.clone(),
         ext_value: q.ext.clone(),
@@ -319,6 +383,10 @@ pub async fn calls_page(
                 tpl.next_href = next_href(&q, c);
             }
             let first_page = q.cursor.trim().is_empty();
+            tpl.live_tail = first_page
+                && [&q.to, &q.ext, &q.direction]
+                    .iter()
+                    .all(|v| v.trim().is_empty());
             tpl.entries = entries(page.calls, &page.gaps, first_page, page.next.is_none());
             crate::render_page(&tpl).into_response()
         }
@@ -329,6 +397,82 @@ pub async fn calls_page(
             (status, crate::render_page(&tpl)).into_response()
         }
     }
+}
+
+/// `GET /calls/status`: banner state and counters as JSON.
+pub async fn calls_status(State(state): State<WebState>, session: Session) -> Response {
+    let caller = crate::caller_from_session(&session);
+    match kxprov_mock::ReadOnlyPbxClient::new(state.backend.clone())
+        .smdr_status(&caller)
+        .await
+    {
+        Ok(s) => Json(s).into_response(),
+        Err(e) => status_for(&e).into_response(),
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct StreamQuery {
+    pub since_id: Option<i64>,
+}
+
+fn sse_event(e: SmdrStreamEvent) -> Event {
+    match e {
+        SmdrStreamEvent::Call { call } => {
+            let id = call.id.to_string();
+            Event::default()
+                .event("call")
+                .id(id)
+                .json_data(&call)
+                .unwrap_or_else(|_unserializable| Event::default().comment("call not sent"))
+        }
+        SmdrStreamEvent::Lagged { skipped } => {
+            Event::default().event("lagged").data(skipped.to_string())
+        }
+        SmdrStreamEvent::Heartbeat => Event::default().comment("heartbeat"),
+        _newer_event_kind_this_page_ignores => Event::default().comment("ignored"),
+    }
+}
+
+/// `GET /calls/stream`: Server-Sent Events of new calls. `since_id` or the browser's
+/// `Last-Event-ID` replays calls missed while disconnected. At most four per session (429).
+pub async fn calls_stream(
+    State(state): State<WebState>,
+    session: Session,
+    headers: HeaderMap,
+    Query(q): Query<StreamQuery>,
+) -> Response {
+    let caller = crate::caller_from_session(&session);
+    let key = match &caller {
+        kxprov_mock::CallerIdentity::Web(w) => w.session_key.clone(),
+        kxprov_mock::CallerIdentity::Mcp(t) => t.token_id.0.clone(),
+    };
+    let Some(permit) = state.call_streams.try_acquire(&key) else {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            "Too many live call-log views are open. Close one and try again.",
+        )
+            .into_response();
+    };
+    let since_id = q.since_id.or_else(|| {
+        headers
+            .get("last-event-id")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.trim().parse().ok())
+    });
+    let rx = match kxprov_mock::ReadOnlyPbxClient::new(state.backend.clone())
+        .smdr_subscribe(&caller, since_id)
+        .await
+    {
+        Ok(rx) => rx,
+        Err(e) => return status_for(&e).into_response(),
+    };
+    let stream = futures_util::stream::unfold((rx, permit), |(mut rx, permit)| async move {
+        rx.recv()
+            .await
+            .map(|e| (Ok::<_, Infallible>(sse_event(e)), (rx, permit)))
+    });
+    Sse::new(stream).into_response()
 }
 
 #[cfg(test)]

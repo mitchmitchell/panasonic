@@ -67,7 +67,7 @@ impl KxMcpServer {
             "submit_approval" => scopes.allows_approve(),
             "backup_now" | "plan_change" => scopes.allows_plan(),
             "read_fields" | "list_backups" | "status" => scopes.allows_read(),
-            "smdr_query" => scopes.allows_call_log(),
+            "smdr_query" | "smdr_status" => scopes.allows_call_log(),
             _ => false,
         }
     }
@@ -302,6 +302,21 @@ impl KxMcpServer {
             .await
             .map_err(api_err)?;
         Ok(text_json(page))
+    }
+
+    #[tool(
+        description = "Call-log reader status: whether the port is listening, paused for a programming session, disabled or down, plus counters (call-log scope; read-only)"
+    )]
+    async fn smdr_status(&self) -> Result<CallToolResult, ErrorData> {
+        let caller = Self::caller()?;
+        if !caller.scopes().allows_call_log() {
+            return Err(api_err(BackendError::ForbiddenScope));
+        }
+        let status = kxprov_mock::ReadOnlyPbxClient::new(self.backend.clone())
+            .smdr_status(&caller)
+            .await
+            .map_err(api_err)?;
+        Ok(text_json(status))
     }
 }
 

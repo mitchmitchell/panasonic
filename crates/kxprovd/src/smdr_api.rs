@@ -136,6 +136,113 @@ fn direction_wire(d: CallDirection) -> &'static str {
     }
 }
 
+const VIEW_COLUMNS: &str = "id, rx_ts_utc, pbx_local, ext, co, direction, number, cid_text,
+                    ring_s, duration_s, acc";
+
+fn read_view(r: &rusqlite::Row<'_>) -> rusqlite::Result<(String, SmdrCallView)> {
+    let dir: String = r.get(5)?;
+    Ok((
+        dir,
+        SmdrCallView {
+            id: r.get(0)?,
+            rx_ts_utc: r.get(1)?,
+            pbx_local: r.get(2)?,
+            ext: r.get(3)?,
+            co: r.get(4)?,
+            direction: CallDirection::Incoming,
+            number: r.get(6)?,
+            cid_text: non_empty(r.get(7)?),
+            ring_s: r.get(8)?,
+            duration_s: r.get(9)?,
+            acc: non_empty(r.get(10)?),
+        },
+    ))
+}
+
+fn finish_view(
+    row: rusqlite::Result<(String, SmdrCallView)>,
+) -> Result<SmdrCallView, SmdrApiError> {
+    let (dir, mut view) = row.map_err(store_err)?;
+    view.direction = match dir.as_str() {
+        "out" => CallDirection::Outgoing,
+        "in" => CallDirection::Incoming,
+        other => {
+            tracing::warn!(
+                id = view.id,
+                direction = other,
+                "smdr row has unknown direction"
+            );
+            return Err(SmdrApiError::CorruptRow { id: view.id });
+        }
+    };
+    Ok(view)
+}
+
+/// Stored calls with id above `after_id`, oldest first, at most `limit`; used for live replay.
+pub fn calls_after(
+    db: &Path,
+    after_id: i64,
+    limit: u16,
+) -> Result<Vec<SmdrCallView>, SmdrApiError> {
+    let conn = open_read_only(db)?;
+    let mut stmt = conn
+        .prepare_cached(&format!(
+            "SELECT {VIEW_COLUMNS} FROM smdr_call WHERE parse_ok = 1 AND id > ?1 ORDER BY id ASC LIMIT ?2"
+        ))
+        .map_err(store_err)?;
+    let rows = stmt
+        .query_map(params![after_id, i64::from(limit)], read_view)
+        .map_err(store_err)?;
+    rows.map(finish_view).collect()
+}
+
+/// Number of stored calls with id above `after_id`.
+pub fn count_after(db: &Path, after_id: i64) -> Result<u64, SmdrApiError> {
+    let conn = open_read_only(db)?;
+    conn.query_row(
+        "SELECT count(*) FROM smdr_call WHERE parse_ok = 1 AND id > ?1",
+        params![after_id],
+        |r| r.get(0),
+    )
+    .map_err(store_err)
+}
+
+/// Highest stored call id, or 0 when there are none.
+pub fn max_call_id(db: &Path) -> Result<i64, SmdrApiError> {
+    let conn = open_read_only(db)?;
+    conn.query_row("SELECT coalesce(max(id), 0) FROM smdr_call", [], |r| {
+        r.get(0)
+    })
+    .map_err(store_err)
+}
+
+/// Store-side counters for `smdr_status`: calls since `since_utc`, unparsed lines, last line time.
+pub fn store_counters(
+    db: &Path,
+    since_utc: &str,
+) -> Result<(u64, u64, Option<String>), SmdrApiError> {
+    let conn = open_read_only(db)?;
+    let today: u64 = conn
+        .query_row(
+            "SELECT count(*) FROM smdr_call WHERE rx_ts_utc >= ?1",
+            params![since_utc],
+            |r| r.get(0),
+        )
+        .map_err(store_err)?;
+    let unparsed: u64 = conn
+        .query_row("SELECT count(*) FROM smdr_unparsed", [], |r| r.get(0))
+        .map_err(store_err)?;
+    let last: Option<String> = conn
+        .query_row(
+            "SELECT max(t) FROM (SELECT max(rx_ts_utc) AS t FROM smdr_call
+             UNION ALL SELECT max(rx_ts_utc) FROM smdr_unparsed)",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(store_err)?;
+    Ok((today, unparsed, last))
+}
+
 /// One page of stored calls in `[since, until)`, newest first, keyset-paged by `(rx_ts_utc, id)`.
 pub fn query(db: &Path, journal: &Path, p: &SmdrQueryParams) -> Result<SmdrPage, SmdrApiError> {
     p.validate()?;
@@ -172,43 +279,12 @@ pub fn query(db: &Path, journal: &Path, p: &SmdrQueryParams) -> Result<SmdrPage,
                 cur_id,
                 i64::from(p.limit.get()) + 1
             ],
-            |r| {
-                let dir: String = r.get(5)?;
-                Ok((
-                    dir,
-                    SmdrCallView {
-                        id: r.get(0)?,
-                        rx_ts_utc: r.get(1)?,
-                        pbx_local: r.get(2)?,
-                        ext: r.get(3)?,
-                        co: r.get(4)?,
-                        direction: CallDirection::Incoming,
-                        number: r.get(6)?,
-                        cid_text: non_empty(r.get(7)?),
-                        ring_s: r.get(8)?,
-                        duration_s: r.get(9)?,
-                        acc: non_empty(r.get(10)?),
-                    },
-                ))
-            },
+            read_view,
         )
         .map_err(store_err)?;
     let mut calls = Vec::with_capacity(limit + 1);
     for row in rows {
-        let (dir, mut view) = row.map_err(store_err)?;
-        view.direction = match dir.as_str() {
-            "out" => CallDirection::Outgoing,
-            "in" => CallDirection::Incoming,
-            other => {
-                tracing::warn!(
-                    id = view.id,
-                    direction = other,
-                    "smdr row has unknown direction"
-                );
-                return Err(SmdrApiError::CorruptRow { id: view.id });
-            }
-        };
-        calls.push(view);
+        calls.push(finish_view(row)?);
     }
     let next = if calls.len() > limit {
         calls.truncate(limit);
