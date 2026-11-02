@@ -5,7 +5,7 @@
 
 use chrono::{DateTime, Duration, SecondsFormat, Utc};
 use kxprov_api::{CallDirection, QueryLimit, SmdrApiError, SmdrCursor, SmdrQueryParams};
-use kxprovd::smdr_api::{db_path, query};
+use kxprovd::smdr_api::{db_path, lease_journal_path, query};
 use kxprovd::smdr_store::SmdrStore;
 use kxtd1232::smdr::DateOrder;
 use rusqlite::{params, Connection};
@@ -47,7 +47,7 @@ fn params(limit: u16) -> SmdrQueryParams {
 fn all_pages(dir: &Path, mut p: SmdrQueryParams, mut between: impl FnMut()) -> Vec<i64> {
     let mut ids = Vec::new();
     loop {
-        let page = query(&db_path(dir), &p).unwrap();
+        let page = query(&db_path(dir), &lease_journal_path(dir), &p).unwrap();
         ids.extend(page.calls.iter().map(|c| c.id));
         between();
         match page.next {
@@ -65,7 +65,12 @@ fn filters_by_window_ext_and_direction() {
     insert(&db, base(), "101", "in", "2");
     insert(&db, base() + Duration::minutes(1), "102", "out", "3");
     insert(&db, base() + Duration::hours(1), "101", "in", "4");
-    let all = query(&db_path(tmp.path()), &params(50)).unwrap();
+    let all = query(
+        &db_path(tmp.path()),
+        &lease_journal_path(tmp.path()),
+        &params(50),
+    )
+    .unwrap();
     let numbers: Vec<&str> = all.calls.iter().map(|c| c.number.as_str()).collect();
     assert_eq!(
         numbers,
@@ -75,13 +80,13 @@ fn filters_by_window_ext_and_direction() {
 
     let mut p = params(50);
     p.ext = Some("101".into());
-    let page = query(&db_path(tmp.path()), &p).unwrap();
+    let page = query(&db_path(tmp.path()), &lease_journal_path(tmp.path()), &p).unwrap();
     assert_eq!(page.calls.len(), 1);
     assert_eq!(page.calls[0].number, "2");
 
     let mut p = params(50);
     p.direction = Some(CallDirection::Outgoing);
-    let page = query(&db_path(tmp.path()), &p).unwrap();
+    let page = query(&db_path(tmp.path()), &lease_journal_path(tmp.path()), &p).unwrap();
     assert_eq!(page.calls.len(), 1);
     assert_eq!(page.calls[0].direction, CallDirection::Outgoing);
 }
@@ -90,7 +95,12 @@ fn filters_by_window_ext_and_direction() {
 fn empty_range_returns_no_calls_and_no_cursor() {
     let tmp = tempfile::tempdir().unwrap();
     let _db = setup(&tmp);
-    let page = query(&db_path(tmp.path()), &params(50)).unwrap();
+    let page = query(
+        &db_path(tmp.path()),
+        &lease_journal_path(tmp.path()),
+        &params(50),
+    )
+    .unwrap();
     assert!(page.calls.is_empty());
     assert!(page.next.is_none());
 }
@@ -161,7 +171,7 @@ fn oversize_and_bad_inputs_are_typed_errors() {
     let mut p = params(50);
     p.since_ms = p.until_ms - Duration::days(32).num_milliseconds();
     assert_eq!(
-        query(&db_path(tmp.path()), &p),
+        query(&db_path(tmp.path()), &lease_journal_path(tmp.path()), &p),
         Err(SmdrApiError::RangeTooLarge { max_days: 31 })
     );
     assert_eq!(SmdrCursor::decode("not-hex"), Err(SmdrApiError::BadCursor));
@@ -178,7 +188,11 @@ fn locked_writer_reports_store_unavailable() {
         .unwrap();
     insert(&db, base(), "101", "in", "1");
     assert_eq!(
-        query(&db_path(tmp.path()), &params(50)),
+        query(
+            &db_path(tmp.path()),
+            &lease_journal_path(tmp.path()),
+            &params(50)
+        ),
         Err(SmdrApiError::StoreUnavailable)
     );
     db.execute_batch("COMMIT;").unwrap();
@@ -189,7 +203,12 @@ fn rows_never_carry_the_raw_line() {
     let tmp = tempfile::tempdir().unwrap();
     let db = setup(&tmp);
     insert(&db, base(), "101", "in", "1");
-    let page = query(&db_path(tmp.path()), &params(50)).unwrap();
+    let page = query(
+        &db_path(tmp.path()),
+        &lease_journal_path(tmp.path()),
+        &params(50),
+    )
+    .unwrap();
     let json = serde_json::to_string(&page).unwrap();
     assert!(!json.contains("RAW-SECRET"), "{json}");
 }

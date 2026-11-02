@@ -24,8 +24,9 @@ pub use paths::{
 pub use plan_hash::{diff_hash, CanonicalPlan, CanonicalWrite};
 pub use protocol::*;
 pub use smdr::{
-    CallDirection, QueryLimit, SmdrApiError, SmdrCallView, SmdrCursor, SmdrPage, SmdrQueryParams,
-    DEFAULT_RANGE_MS, MAX_RANGE_DAYS, MCP_QUERY_LIMIT_MAX, QUERY_LIMIT_DEFAULT, QUERY_LIMIT_MAX,
+    CallDirection, GapWindow, QueryLimit, SmdrApiError, SmdrCallView, SmdrCursor, SmdrPage,
+    SmdrQueryParams, DEFAULT_RANGE_MS, GAP_TRACKING, MAX_RANGE_DAYS, MCP_QUERY_LIMIT_MAX,
+    QUERY_LIMIT_DEFAULT, QUERY_LIMIT_MAX,
 };
 pub use surface::*;
 pub use tokens::{

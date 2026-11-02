@@ -1,9 +1,10 @@
 //! Read-only call-log queries (S6). Reads SQLite only; this module never reaches the port.
 
+use crate::lease_journal::{LeaseEvent, LeaseRecord, LEASE_JOURNAL_NAME};
 use crate::smdr_store::{SMDR_DB_NAME, SMDR_DIR_NAME};
 use chrono::{DateTime, SecondsFormat, Utc};
 use kxprov_api::{
-    CallDirection, SmdrApiError, SmdrCallView, SmdrCursor, SmdrPage, SmdrQueryParams,
+    CallDirection, GapWindow, SmdrApiError, SmdrCallView, SmdrCursor, SmdrPage, SmdrQueryParams,
 };
 use rusqlite::{params, Connection, ErrorCode, OpenFlags};
 use std::path::{Path, PathBuf};
@@ -15,6 +16,78 @@ pub const READ_BUSY_TIMEOUT: Duration = Duration::from_millis(250);
 /// Path of the call-log database under a profile data directory.
 pub fn db_path(data_dir: &Path) -> PathBuf {
     data_dir.join(SMDR_DIR_NAME).join(SMDR_DB_NAME)
+}
+
+/// Path of the port lease journal that gap windows are read from.
+pub fn lease_journal_path(data_dir: &Path) -> PathBuf {
+    data_dir.join(LEASE_JOURNAL_NAME)
+}
+
+/// Reader gap windows from the lease journal that overlap `[since, until)`, oldest first.
+///
+/// One window per lease: a repeated `reader_paused` for the same job extends nothing, and a
+/// pause for a different job closes any window still open, because the port has one holder.
+/// A missing journal means no lease was ever taken. A line that does not parse is skipped,
+/// because a crash can leave a torn final line and the rest of the journal is still valid.
+pub fn gap_windows(
+    journal: &Path,
+    since: &str,
+    until: &str,
+) -> Result<Vec<GapWindow>, SmdrApiError> {
+    let text = match std::fs::read_to_string(journal) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => {
+            tracing::warn!(%e, "lease journal unreadable");
+            return Err(SmdrApiError::StoreUnavailable);
+        }
+    };
+    let mut done: Vec<GapWindow> = Vec::new();
+    let mut open: Option<GapWindow> = None;
+    for line in text.lines() {
+        let rec: LeaseRecord = match serde_json::from_str(line) {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(%e, "lease journal: skipping unparsable line");
+                continue;
+            }
+        };
+        match rec.event {
+            LeaseEvent::ReaderPaused => {
+                if open.as_ref().is_some_and(|g| g.job_id == rec.job_id) {
+                    continue;
+                }
+                if let Some(mut prev) = open.take() {
+                    prev.to_utc = Some(rec.ts_utc.clone());
+                    done.push(prev);
+                }
+                open = Some(GapWindow {
+                    from_utc: rec.ts_utc,
+                    to_utc: None,
+                    job_id: rec.job_id,
+                    tracking: kxprov_api::GAP_TRACKING.to_string(),
+                });
+            }
+            LeaseEvent::ReaderResumed => {
+                if open.as_ref().is_some_and(|g| g.job_id == rec.job_id) {
+                    if let Some(mut g) = open.take() {
+                        g.to_utc = Some(rec.ts_utc);
+                        done.push(g);
+                    }
+                }
+            }
+            LeaseEvent::Requested
+            | LeaseEvent::Granted
+            | LeaseEvent::Refused
+            | LeaseEvent::TimedOut
+            | LeaseEvent::Released => {}
+        }
+    }
+    done.extend(open);
+    done.retain(|g| {
+        g.from_utc.as_str() < until && g.to_utc.as_deref().is_none_or(|to| to >= since)
+    });
+    Ok(done)
 }
 
 /// Opens a connection that SQLite itself refuses to write through; separate from the ingest writer.
@@ -64,7 +137,7 @@ fn direction_wire(d: CallDirection) -> &'static str {
 }
 
 /// One page of stored calls in `[since, until)`, newest first, keyset-paged by `(rx_ts_utc, id)`.
-pub fn query(db: &Path, p: &SmdrQueryParams) -> Result<SmdrPage, SmdrApiError> {
+pub fn query(db: &Path, journal: &Path, p: &SmdrQueryParams) -> Result<SmdrPage, SmdrApiError> {
     p.validate()?;
     let since = ts(p.since_ms)?;
     let until = ts(p.until_ms)?;
@@ -145,7 +218,8 @@ pub fn query(db: &Path, p: &SmdrQueryParams) -> Result<SmdrPage, SmdrApiError> {
     } else {
         None
     };
-    Ok(SmdrPage { calls, next })
+    let gaps = gap_windows(journal, &since, &until)?;
+    Ok(SmdrPage { calls, next, gaps })
 }
 
 #[cfg(test)]
@@ -196,7 +270,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let p = SmdrQueryParams::with_defaults(None, None, 1_800_000_000_000);
         assert_eq!(
-            query(&db_path(tmp.path()), &p),
+            query(&db_path(tmp.path()), &lease_journal_path(tmp.path()), &p),
             Err(SmdrApiError::StoreUnavailable)
         );
     }
@@ -227,7 +301,7 @@ mod tests {
                 rx("2026-11-01T13:00:00Z").timestamp_millis(),
             )
         };
-        let page = query(&db_path(tmp.path()), &p).unwrap();
+        let page = query(&db_path(tmp.path()), &lease_journal_path(tmp.path()), &p).unwrap();
         assert_eq!(page.calls.len(), 1, "only the parsed record is a call");
         let c = &page.calls[0];
         assert_eq!(c.rx_ts_utc, "2026-11-01T12:00:00.000Z");
@@ -258,7 +332,7 @@ mod tests {
             rx("2026-11-01T13:00:00Z").timestamp_millis(),
         );
         assert_eq!(
-            query(&db_path(tmp.path()), &p),
+            query(&db_path(tmp.path()), &lease_journal_path(tmp.path()), &p),
             Err(SmdrApiError::CorruptRow { id })
         );
     }

@@ -394,7 +394,9 @@ async fn smdr_query(
     params: kxprov_api::SmdrQueryParams,
 ) -> Result<ResponseResult, ApiErrorBody> {
     let db = crate::smdr_api::db_path(&state.config.data_dir);
-    match tokio::task::spawn_blocking(move || crate::smdr_api::query(&db, &params)).await {
+    let journal = crate::smdr_api::lease_journal_path(&state.config.data_dir);
+    match tokio::task::spawn_blocking(move || crate::smdr_api::query(&db, &journal, &params)).await
+    {
         Ok(Ok(page)) => Ok(ResponseResult::SmdrPage(page)),
         Ok(Err(e)) => Err(api_err(e.code(), &e.to_string())),
         Err(join) => {

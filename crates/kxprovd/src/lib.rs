@@ -22,6 +22,8 @@ pub mod peer;
 pub mod plan_live;
 pub mod plan_store;
 pub mod port;
+/// The lease journal file format, readable without reaching the port itself.
+pub use port::journal as lease_journal;
 pub mod queue;
 pub mod rate_limit;
 pub mod sim_mark;

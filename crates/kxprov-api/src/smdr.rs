@@ -255,10 +255,28 @@ pub struct SmdrCallView {
     pub acc: Option<String>,
 }
 
+/// Tracking issue for calls the PBX may not report while the reader is paused for programming.
+pub const GAP_TRACKING: &str = "https://github.com/mitchmitchell/panasonic/issues/14";
+
+/// A window when the SMDR reader was paused for one programming lease, so calls may be missing.
+///
+/// Built from the lease journal (`reader_paused` to `reader_resumed`), one per lease.
+/// `to_utc` is `None` while the lease is still held.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GapWindow {
+    pub from_utc: String,
+    pub to_utc: Option<String>,
+    pub job_id: String,
+    pub tracking: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SmdrPage {
     pub calls: Vec<SmdrCallView>,
     pub next: Option<SmdrCursor>,
+    /// Reader gaps that overlap the queried `[since, until)` range, oldest first.
+    #[serde(default)]
+    pub gaps: Vec<GapWindow>,
 }
 
 #[cfg(test)]

@@ -481,7 +481,11 @@ impl DaemonBackend for MockDaemon {
         } else {
             None
         };
-        Ok(SmdrPage { calls: rows, next })
+        Ok(SmdrPage {
+            calls: rows,
+            next,
+            gaps: Vec::new(),
+        })
     }
 }
 

@@ -37,7 +37,7 @@
     {% if show_error %}
     <p class="inline-error" role="alert">{{ error }}</p>
     {% else %}
-    {% if calls.is_empty() %}
+    {% if entries.is_empty() %}
     <p class="empty-state">No calls in this range.</p>
     {% else %}
     <table class="calls">
@@ -45,8 +45,13 @@
         <tr><th>Time</th><th>Extension</th><th>Line</th><th>Direction</th><th>Number</th><th>Caller ID</th><th>Ring (s)</th><th>Duration (s)</th></tr>
       </thead>
       <tbody>
-        {% for c in calls %}
+        {% for e in entries %}
+        {% match e %}
+        {% when Entry::Call with (c) %}
         <tr><td>{{ c.time }}</td><td>{{ c.ext }}</td><td>{{ c.co }}</td><td>{{ c.direction }}</td><td>{{ c.number }}</td><td>{{ c.cid_text }}</td><td>{{ c.ring_s }}</td><td>{{ c.duration_s }}</td></tr>
+        {% when Entry::Gap with (g) %}
+        <tr class="gap"><td colspan="8" role="note">{{ g.text }} <a href="{{ g.href }}">Details</a></td></tr>
+        {% endmatch %}
         {% endfor %}
       </tbody>
     </table>

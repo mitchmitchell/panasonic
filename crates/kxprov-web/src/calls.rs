@@ -7,7 +7,7 @@ use axum::response::{IntoResponse, Response};
 use chrono::{DateTime, Duration, NaiveDate, TimeZone, Utc};
 use chrono_tz::America::Chicago;
 use kxprov_api::{
-    CallDirection, QueryLimit, SmdrApiError, SmdrCallView, SmdrCursor, SmdrQueryParams,
+    CallDirection, GapWindow, QueryLimit, SmdrApiError, SmdrCallView, SmdrCursor, SmdrQueryParams,
 };
 use kxprov_mock::BackendError;
 use serde::Deserialize;
@@ -43,6 +43,18 @@ pub struct CallRow {
     pub duration_s: String,
 }
 
+/// A reader gap shown inline among the calls.
+pub struct GapRow {
+    pub text: String,
+    pub href: String,
+}
+
+/// One line of the call table: a call, or a marker where calls may be missing.
+pub enum Entry {
+    Call(CallRow),
+    Gap(GapRow),
+}
+
 #[derive(Template)]
 #[template(path = "calls.html")]
 pub struct CallsTemplate {
@@ -52,7 +64,7 @@ pub struct CallsTemplate {
     pub direction_value: String,
     pub show_error: bool,
     pub error: String,
-    pub calls: Vec<CallRow>,
+    pub entries: Vec<Entry>,
     pub show_next: bool,
     pub next_href: String,
 }
@@ -167,17 +179,19 @@ fn opt<T: ToString>(v: Option<T>) -> String {
     v.map(|x| x.to_string()).unwrap_or_default()
 }
 
+fn central(utc: &str) -> Result<String, chrono::ParseError> {
+    DateTime::parse_from_rfc3339(utc).map(|t| {
+        t.with_timezone(&Chicago)
+            .format("%Y-%m-%d %H:%M:%S %Z")
+            .to_string()
+    })
+}
+
 fn row(c: SmdrCallView) -> CallRow {
-    let time = DateTime::parse_from_rfc3339(&c.rx_ts_utc)
-        .map(|t| {
-            t.with_timezone(&Chicago)
-                .format("%Y-%m-%d %H:%M:%S %Z")
-                .to_string()
-        })
-        .unwrap_or_else(|e| {
-            tracing::warn!(id = c.id, %e, "stored call time is not RFC 3339");
-            format!("{} (UTC, unparsed time)", c.rx_ts_utc)
-        });
+    let time = central(&c.rx_ts_utc).unwrap_or_else(|e| {
+        tracing::warn!(id = c.id, %e, "stored call time is not RFC 3339");
+        format!("{} (UTC, unparsed time)", c.rx_ts_utc)
+    });
     CallRow {
         time,
         ext: c.ext,
@@ -191,6 +205,55 @@ fn row(c: SmdrCallView) -> CallRow {
         ring_s: opt(c.ring_s),
         duration_s: opt(c.duration_s),
     }
+}
+
+fn gap_row(g: &GapWindow) -> GapRow {
+    let when = |utc: &str| central(utc).unwrap_or_else(|_unparsed| format!("{utc} (UTC)"));
+    let span = match &g.to_utc {
+        Some(to) => format!("{} to {}", when(&g.from_utc), when(to)),
+        None => format!("since {}, still running", when(&g.from_utc)),
+    };
+    GapRow {
+        text: format!(
+            "Calls during programming session {} ({span}) may be missing (#14).",
+            g.job_id
+        ),
+        href: g.tracking.clone(),
+    }
+}
+
+fn gap_key(g: &GapWindow) -> &str {
+    g.to_utc.as_deref().unwrap_or("~")
+}
+
+/// Merges gaps into the newest-first calls: each gap sits above the first call older than its end.
+///
+/// A gap newer than every call on the page shows only on the first page, and one older than
+/// every call shows only on the last page, so paging never repeats a marker.
+pub fn entries(
+    calls: Vec<SmdrCallView>,
+    gaps: &[GapWindow],
+    first_page: bool,
+    last_page: bool,
+) -> Vec<Entry> {
+    let mut gaps: Vec<&GapWindow> = gaps.iter().collect();
+    gaps.sort_by(|a, b| gap_key(b).cmp(gap_key(a)));
+    let mut gaps = gaps.into_iter().peekable();
+    let mut out = Vec::new();
+    let mut seen_call = false;
+    for c in calls {
+        while let Some(g) = gaps.next_if(|g| gap_key(g) > c.rx_ts_utc.as_str()) {
+            if seen_call || first_page {
+                out.push(Entry::Gap(gap_row(g)));
+            }
+        }
+        seen_call = true;
+        out.push(Entry::Call(row(c)));
+    }
+    if last_page {
+        out.extend(gaps.map(|g| Entry::Gap(gap_row(g))));
+    }
+    out
 }
 
 fn enc(s: &str) -> String {
@@ -223,7 +286,7 @@ fn blank(q: &CallsQuery) -> CallsTemplate {
         direction_value: q.direction.clone(),
         show_error: false,
         error: String::new(),
-        calls: Vec::new(),
+        entries: Vec::new(),
         show_next: false,
         next_href: String::new(),
     }
@@ -255,7 +318,8 @@ pub async fn calls_page(
                 tpl.show_next = true;
                 tpl.next_href = next_href(&q, c);
             }
-            tpl.calls = page.calls.into_iter().map(row).collect();
+            let first_page = q.cursor.trim().is_empty();
+            tpl.entries = entries(page.calls, &page.gaps, first_page, page.next.is_none());
             crate::render_page(&tpl).into_response()
         }
         Err(e) => {
@@ -345,5 +409,83 @@ mod tests {
         ] {
             assert!(query_from_form(&q, 1_800_000_000_000).is_err(), "{q:?}");
         }
+    }
+
+    fn view(id: i64, ts: &str) -> SmdrCallView {
+        SmdrCallView {
+            id,
+            rx_ts_utc: ts.into(),
+            pbx_local: String::new(),
+            ext: "101".into(),
+            co: "01".into(),
+            direction: CallDirection::Incoming,
+            number: String::new(),
+            cid_text: None,
+            ring_s: None,
+            duration_s: None,
+            acc: None,
+        }
+    }
+
+    fn gap(job: &str, from: &str, to: Option<&str>) -> GapWindow {
+        GapWindow {
+            from_utc: from.into(),
+            to_utc: to.map(Into::into),
+            job_id: job.into(),
+            tracking: kxprov_api::GAP_TRACKING.into(),
+        }
+    }
+
+    fn shape(e: &[Entry]) -> Vec<String> {
+        e.iter()
+            .map(|e| match e {
+                Entry::Call(c) => c.time.clone(),
+                Entry::Gap(g) => g.text.clone(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn gaps_sit_inline_above_the_first_older_call_and_link_issue_14() {
+        let calls = vec![
+            view(3, "2026-11-01T18:00:00.000Z"),
+            view(2, "2026-11-01T16:00:00.000Z"),
+            view(1, "2026-11-01T14:00:00.000Z"),
+        ];
+        let gaps = [
+            gap(
+                "old",
+                "2026-11-01T12:00:00.000Z",
+                Some("2026-11-01T12:10:00.000Z"),
+            ),
+            gap(
+                "mid",
+                "2026-11-01T16:30:00.000Z",
+                Some("2026-11-01T17:00:00.000Z"),
+            ),
+            gap("live", "2026-11-01T19:00:00.000Z", None),
+        ];
+        let all = entries(calls.clone(), &gaps, true, true);
+        let s = shape(&all);
+        assert_eq!(s.len(), 6);
+        assert!(
+            s[0].contains("session live (since 2026-11-01 13:00:00 CST, still running)"),
+            "{}",
+            s[0]
+        );
+        assert!(s[1].starts_with("2026-11-01 12:00:00 CST"), "{}", s[1]);
+        assert!(s[2].contains("session mid (2026-11-01 10:30:00 CST to 2026-11-01 11:00:00 CST) may be missing (#14)"), "{}", s[2]);
+        assert!(s[5].contains("session old"), "{}", s[5]);
+        assert!(all.iter().all(|e| match e {
+            Entry::Gap(g) => g.href == "https://github.com/mitchmitchell/panasonic/issues/14",
+            Entry::Call(_) => true,
+        }));
+        let middle = shape(&entries(calls, &gaps, false, false));
+        assert_eq!(
+            middle.len(),
+            4,
+            "edge gaps belong to the first and last pages only"
+        );
+        assert!(middle[1].contains("session mid"));
     }
 }
