@@ -20,7 +20,7 @@ pub use route_table::{
     FORBIDDEN_MODE_PROFILE_PATHS, MCP_APPROVAL_TOOLS, MCP_TOOLS, WEB_APPROVAL_APPLY_HTTP_PATHS,
     WEB_ROUTES,
 };
-pub use scope::{scopes_for_role, ScopeSet};
+pub use scope::{scopes_for_role, scopes_for_role_on, validate_scopes_for_profile, ScopeSet};
 pub use types::{
     ApplyJob, BackupInfo, BackupList, DaemonStatus, FieldValue, JobId, JobState, PlanChangeRequest,
     PlanSummary, ReadFieldsRequest, ReadFieldsResponse,

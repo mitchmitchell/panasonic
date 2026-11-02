@@ -65,3 +65,35 @@ fn read_only_custom_scope_sees_status_not_plan() {
         &scopes
     ));
 }
+
+#[test]
+fn bots_list_is_exactly_the_read_and_call_log_tools() {
+    let server = KxMcpServer::new(std::sync::Arc::new(kxprov_mock::MockDaemon::default()));
+    let bots = scopes_for_role("bots");
+    let mut listed: Vec<String> = server
+        .registered_tool_names()
+        .into_iter()
+        .filter(|t| KxMcpServer::tool_visible_for_scopes(t, &bots))
+        .collect();
+    listed.sort();
+    assert_eq!(
+        listed,
+        ["list_backups", "read_fields", "smdr_query", "status"]
+    );
+}
+
+#[test]
+fn tester_sees_smdr_query_on_sim_only() {
+    use kxprov_api::Profile;
+    use kxprov_mock::scopes_for_role_on;
+    assert!(KxMcpServer::tool_visible_for_scopes(
+        "smdr_query",
+        &scopes_for_role_on("tester", Profile::Sim)
+    ));
+    for p in [Profile::Test, Profile::Prod] {
+        assert!(!KxMcpServer::tool_visible_for_scopes(
+            "smdr_query",
+            &scopes_for_role_on("tester", p)
+        ));
+    }
+}
