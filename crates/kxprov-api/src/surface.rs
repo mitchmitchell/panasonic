@@ -36,6 +36,10 @@ pub const HTTP_ROUTES: &[HttpRoute] = &[
         method: HttpMethod::Post,
         path: "/api/plan",
     },
+    HttpRoute {
+        method: HttpMethod::Get,
+        path: "/calls",
+    },
 ];
 
 /// HTTP paths reserved for approval/apply; the web listener must return 404 or 405 only.
@@ -74,6 +78,7 @@ pub const MCP_TOOLS: &[&str] = &[
     "apply_plan",
     "list_backups",
     "backup_now",
+    "smdr_query",
 ];
 
 pub const FORBIDDEN_MCP_TOOLS: &[&str] = &[

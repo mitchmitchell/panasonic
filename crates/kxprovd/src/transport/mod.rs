@@ -74,7 +74,11 @@ impl Transport for AnyTransport {
 pub fn device_arbiter(config: &Config) -> Arc<DeviceArbiter> {
     Arc::new(PortManager::new(
         (),
-        LeaseJournal::new(config.data_dir.join("port-lease.jsonl")),
+        LeaseJournal::new(
+            config
+                .data_dir
+                .join(crate::port::journal::LEASE_JOURNAL_NAME),
+        ),
         DEFAULT_MAX_LEASE_WAITERS,
     ))
 }

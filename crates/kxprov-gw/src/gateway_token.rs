@@ -76,6 +76,11 @@ fn validate_gateway_scopes(whoami: &kxprov_api::WhoamiResult) -> Result<(), Gate
             "gateway service token must include read and plan scopes".into(),
         ));
     }
+    if !whoami.scopes.contains(&Scope::CallLog) {
+        tracing::warn!(
+            "gateway service token has no call_log scope; the /calls page will be refused until tokens.json grants it"
+        );
+    }
     Ok(())
 }
 

@@ -46,6 +46,7 @@ chrono-tz = "0.10"
 rusqlite = { version = "0.37", features = ["bundled"] }
 
 [dev-dependencies]
+nix = { version = "0.29", features = ["inotify"] }
 tempfile = "3"
 kxprov = { path = "../kxprov" }
 serial_test = "3"
@@ -105,4 +106,8 @@ required-features = ["test-util"]
 
 [[test]]
 name = "smdr_store_daemon"
+required-features = ["test-util"]
+
+[[test]]
+name = "smdr_privacy_logs"
 required-features = ["test-util"]

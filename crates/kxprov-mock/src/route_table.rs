@@ -41,6 +41,10 @@ pub const WEB_ROUTES: &[HttpRoute] = &[
         method: "POST",
         path: "/api/plan",
     },
+    HttpRoute {
+        method: "GET",
+        path: "/calls",
+    },
 ];
 
 /// Every HTTP approval/apply path (web listener must not implement these; MCP only).
@@ -84,4 +88,6 @@ pub const MCP_TOOLS: &[&str] = &[
     "apply_plan",
     "submit_approval",
     "rollback",
+    "smdr_query",
+    "smdr_status",
 ];

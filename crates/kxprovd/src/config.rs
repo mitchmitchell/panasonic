@@ -7,7 +7,7 @@ use kxprov_api::{
 };
 use kxtd1232::{SignOn, Timing, TimingConfigError};
 use kxtd1232_sim::SimPbx;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use thiserror::Error;
@@ -57,6 +57,20 @@ pub struct Config {
     pub signon: SignOn,
     pub sim_pbx: Option<Arc<Mutex<SimPbx>>>,
     pub tokens_path: PathBuf,
+    pub smdr: SmdrConfig,
+}
+
+/// Call-log settings, `"smdr": { "enabled": false }` in the daemon config. Absent means on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SmdrConfig {
+    pub enabled: bool,
+}
+
+impl Default for SmdrConfig {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -96,6 +110,8 @@ struct EtcConfigFile {
     reply_guard_ms: Option<u64>,
     #[serde(default)]
     signon_path: Option<PathBuf>,
+    #[serde(default)]
+    smdr: SmdrConfig,
 }
 
 #[derive(Deserialize)]
@@ -328,6 +344,7 @@ impl Config {
             signon,
             sim_pbx,
             tokens_path: file.tokens_path,
+            smdr: file.smdr,
         };
         cfg.validate()?;
         Ok(cfg)
@@ -357,6 +374,7 @@ impl Config {
             signon: SignOn::default(),
             sim_pbx: Some(Arc::new(Mutex::new(SimPbx::default()))),
             tokens_path: data_dir.join("tokens.json"),
+            smdr: SmdrConfig::default(),
         }
     }
 
@@ -389,6 +407,7 @@ impl Config {
             signon: SignOn::default(),
             sim_pbx: Some(Arc::new(Mutex::new(SimPbx::default()))),
             tokens_path: data_dir.join("tokens.json"),
+            smdr: SmdrConfig::default(),
         }
     }
 }

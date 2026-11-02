@@ -4,7 +4,9 @@ use std::io::Write;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
-pub const GAP_TRACKING_ISSUE: &str = "https://github.com/mitchmitchell/panasonic/issues/14";
+pub const GAP_TRACKING_ISSUE: &str = kxprov_api::GAP_TRACKING;
+/// File name of the lease journal under a profile data directory.
+pub const LEASE_JOURNAL_NAME: &str = "port-lease.jsonl";
 const FILE_MODE: u32 = 0o600;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

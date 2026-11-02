@@ -1,3 +1,5 @@
+mod calls;
+pub use calls::{csv_cell, CSV_EXPORT_MAX_ROWS, CSV_HEADER};
 mod csrf;
 mod expiry;
 mod fields;
@@ -32,6 +34,9 @@ pub use login_limit::{LoginGateError, LoginPrecheck, LoginRateLimiter};
 pub struct ClientIpPolicy {
     pub trust_x_forwarded_for: bool,
 }
+pub use calls::{
+    call_log_message, query_from_form, CallsQuery, StreamLimiter, StreamPermit, CALLS_PAGE_SIZE,
+};
 pub use session::{
     absolute_session_valid, enforce_absolute_session_limit, is_n1_unregistered_web_path,
     now_unix_ms, reject_authenticated_login, require_web_session, SESSION_AUTH_KEY,
@@ -48,6 +53,8 @@ pub struct WebState {
     pub backend: Arc<dyn DaemonBackend>,
     pub admin: Arc<dyn PasswordVerifier>,
     pub login_limiter: Arc<crate::login_limit::LoginRateLimiter>,
+    /// Open live call-log streams per web session.
+    pub call_streams: Arc<calls::StreamLimiter>,
 }
 
 pub fn sign_in_page_title() -> &'static str {
@@ -64,6 +71,10 @@ pub fn router(state: WebState) -> Router {
         .route("/read", post(read_record))
         .route("/plan", post(plan_change))
         .route("/api/plan", post(plan_change))
+        .route("/calls", get(calls::calls_page))
+        .route("/calls/status", get(calls::calls_status))
+        .route("/calls/export.csv", get(calls::calls_export_csv))
+        .route("/calls/stream", get(calls::calls_stream))
         .with_state(state)
 }
 
