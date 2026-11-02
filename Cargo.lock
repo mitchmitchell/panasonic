@@ -1452,6 +1452,8 @@ dependencies = [
  "thiserror",
  "time",
  "tokio",
+ "toml 0.8.23",
+ "trybuild",
 ]
 
 [[package]]

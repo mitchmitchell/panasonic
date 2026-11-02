@@ -297,8 +297,7 @@ impl KxMcpServer {
             i64::try_from(time::OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000)
                 .map_err(|_| api_err(BackendError::BadRequest("clock")))?;
         let query = params.into_query(now_ms).map_err(api_err)?;
-        let page = self
-            .backend
+        let page = kxprov_mock::ReadOnlyPbxClient::new(self.backend.clone())
             .smdr_query(&caller, query)
             .await
             .map_err(api_err)?;

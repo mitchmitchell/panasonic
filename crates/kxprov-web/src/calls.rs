@@ -248,7 +248,8 @@ pub async fn calls_page(
         }
     };
     let caller = crate::caller_from_session(&session);
-    match state.backend.smdr_query(&caller, params).await {
+    let client = kxprov_mock::ReadOnlyPbxClient::new(state.backend.clone());
+    match client.smdr_query(&caller, params).await {
         Ok(page) => {
             if let Some(c) = &page.next {
                 tpl.show_next = true;

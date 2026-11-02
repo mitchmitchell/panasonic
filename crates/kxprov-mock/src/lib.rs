@@ -5,6 +5,7 @@ mod error;
 mod identity;
 mod mock;
 mod plan;
+mod read_only;
 mod route_table;
 mod scope;
 mod types;
@@ -15,6 +16,7 @@ pub use error::BackendError;
 pub use identity::{CallerIdentity, McpTokenIdentity, WebSessionIdentity};
 pub use mock::{MockDaemon, APPROVAL_SUBMIT_LIMIT_PER_DAY, APPROVAL_SUBMIT_LIMIT_PER_HOUR};
 pub use plan::{canonical_diff_hash, diff_hash_from_hex, plan_id_from_hex};
+pub use read_only::ReadOnlyPbxClient;
 pub use route_table::{
     http_route_mutates_mode_or_profile, mcp_tool_mutates_mode_or_profile, HttpRoute,
     FORBIDDEN_MODE_PROFILE_PATHS, MCP_APPROVAL_TOOLS, MCP_TOOLS, WEB_APPROVAL_APPLY_HTTP_PATHS,

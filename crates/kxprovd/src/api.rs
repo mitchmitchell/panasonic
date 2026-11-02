@@ -1258,6 +1258,30 @@ mod smdr_dispatch_tests {
     }
 
     #[tokio::test]
+    async fn smdr_queries_never_touch_the_port_even_while_it_is_leased() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut st = state(&tmp);
+        st.config.transport = crate::config::TransportKind::Serial;
+        st.config.sim_pbx = None;
+        let lease = st
+            .port
+            .request_lease("job-hold", std::time::Duration::from_secs(5))
+            .unwrap();
+        assert_eq!(st.port.mode(), crate::port::PortMode::Programming);
+        let journal = tmp.path().join("port-lease.jsonl");
+        let before = std::fs::read(&journal).unwrap_or_default();
+        let holder = st.port.holder();
+        for _ in 0..1000 {
+            let resp = call(&st, GATEWAY, Some("bots")).await;
+            assert!(resp.ok, "{:?}", resp.error);
+        }
+        assert_eq!(st.port.holder(), holder);
+        assert_eq!(st.port.mode(), crate::port::PortMode::Programming);
+        assert_eq!(std::fs::read(&journal).unwrap_or_default(), before);
+        drop(lease);
+    }
+
+    #[tokio::test]
     async fn smdr_query_requires_the_call_log_scope() {
         let tmp = tempfile::tempdir().unwrap();
         let st = state(&tmp);
