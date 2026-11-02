@@ -69,7 +69,10 @@ pub fn spawn_smdr_relay_with_alerts(
                 },
                 got = next_alert(&mut alerts) => match got {
                     Ok(alert) => SmdrStreamEvent::Alert { alert },
-                    Err(broadcast::error::RecvError::Lagged(_missed)) => continue,
+                    Err(broadcast::error::RecvError::Lagged(missed)) => {
+                        tracing::debug!(missed, "alert edges missed; smdr_status has the active set");
+                        continue;
+                    }
                     Err(broadcast::error::RecvError::Closed) => {
                         alerts = None;
                         continue;

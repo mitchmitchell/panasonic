@@ -374,7 +374,11 @@ fn evaluation_writes_nothing_to_sqlite_or_the_port() {
         let _edges_not_under_test = r.run(at);
     }
     assert_eq!(r.store.call_count().unwrap(), calls);
-    assert_eq!(data_version(&watcher), before, "alert evaluation committed to SQLite");
+    assert_eq!(
+        data_version(&watcher),
+        before,
+        "alert evaluation committed to SQLite"
+    );
 
     let line = SmdrLine::new(call(42).to_line().unwrap());
     r.store.ingest(line, wall()).unwrap();
