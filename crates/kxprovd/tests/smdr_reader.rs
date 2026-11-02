@@ -221,8 +221,12 @@ fn a_failed_ingest_keeps_the_rest_of_the_batch_for_the_next_poll() {
     ));
     assert_eq!(reader.pending(), 7);
     let retried = reader.poll_once(&mut sink, 1, rx).expect("retry");
+    let ingested: Vec<_> = retried
+        .into_iter()
+        .filter(|e| matches!(e, ReaderEvent::Ingested(_)))
+        .collect();
     assert_eq!(
-        retried,
+        ingested,
         vec![ReaderEvent::Ingested(IngestOutcome::Stored); 11],
         "events for lines ingested before the failure are kept"
     );
@@ -271,6 +275,7 @@ fn a_header_mismatch_ahead_of_a_failed_ingest_is_not_lost() {
                 raw: changed
             },
             ReaderEvent::Ingested(IngestOutcome::Skipped),
+            ReaderEvent::HeaderMatched { rx: rx() },
         ]
     );
 }
