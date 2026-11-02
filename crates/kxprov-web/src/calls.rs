@@ -598,8 +598,74 @@ fn plain(status: StatusCode, msg: String) -> Response {
         .into_response()
 }
 
-/// `GET /calls/export.csv`: the same filters, range cap and scope check as `/calls`, every page
-/// of the range, at most [`CSV_EXPORT_MAX_ROWS`] rows. Logs only the row count.
+/// Why a CSV export stopped part-way; the body then ends with an error so the client sees a
+/// failed download rather than a silently short file.
+#[derive(Debug, thiserror::Error)]
+pub enum CsvExportAbort {
+    #[error("more than {CSV_EXPORT_MAX_ROWS} calls in this range; narrow the dates or filters")]
+    TooManyRows,
+    #[error("call log became unavailable during export")]
+    Backend,
+}
+
+fn csv_chunk(calls: &[SmdrCallView]) -> String {
+    let mut out = String::new();
+    for c in calls {
+        out.push_str(&csv_row(c));
+        out.push_str("\r\n");
+    }
+    out
+}
+
+struct CsvPager {
+    client: kxprov_mock::ReadOnlyPbxClient,
+    caller: kxprov_mock::CallerIdentity,
+    params: SmdrQueryParams,
+    rows: usize,
+    more: bool,
+}
+
+impl CsvPager {
+    async fn next_chunk(mut self) -> Option<(Result<String, CsvExportAbort>, Self)> {
+        if !self.more {
+            tracing::info!(rows = self.rows, "calls csv export");
+            return None;
+        }
+        let page = match self
+            .client
+            .smdr_query(&self.caller, self.params.clone())
+            .await
+        {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!(error = %e, "calls csv export stopped: backend error");
+                self.more = false;
+                return Some((Err(CsvExportAbort::Backend), self));
+            }
+        };
+        self.rows += page.calls.len();
+        if self.rows > CSV_EXPORT_MAX_ROWS {
+            tracing::info!(
+                limit = CSV_EXPORT_MAX_ROWS,
+                "calls csv export stopped: too many rows"
+            );
+            self.more = false;
+            return Some((Err(CsvExportAbort::TooManyRows), self));
+        }
+        match page.next {
+            Some(next) => self.params.cursor = Some(next),
+            None => self.more = false,
+        }
+        Some((Ok(csv_chunk(&page.calls)), self))
+    }
+}
+
+/// `GET /calls/export.csv`: the same filters, range cap and scope check as `/calls`, streamed
+/// one query page at a time so at most one page is held in memory.
+///
+/// Bad filters, a missing scope or an unavailable store on the first page are plain HTTP errors.
+/// After the first page the status line is sent, so going past [`CSV_EXPORT_MAX_ROWS`] or a
+/// backend failure ends the body with an error instead. Logs only the row count.
 pub async fn calls_export_csv(
     State(state): State<WebState>,
     session: Session,
@@ -614,40 +680,28 @@ pub async fn calls_export_csv(
         Ok(l) => l,
         Err(e) => return plain(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     };
-    let caller = crate::caller_from_session(&session);
     let client = kxprov_mock::ReadOnlyPbxClient::new(state.backend.clone());
-    let mut out = String::from(CSV_HEADER);
-    out.push_str("\r\n");
-    let mut rows = 0usize;
-    loop {
-        let page = match client.smdr_query(&caller, params.clone()).await {
-            Ok(p) => p,
-            Err(e) => {
-                let (status, msg) = status_for(&e);
-                return plain(status, msg);
-            }
-        };
-        rows += page.calls.len();
-        if rows > CSV_EXPORT_MAX_ROWS {
-            tracing::info!(
-                limit = CSV_EXPORT_MAX_ROWS,
-                "calls csv export refused: too many rows"
-            );
-            return plain(
-                StatusCode::PAYLOAD_TOO_LARGE,
-                format!("More than {CSV_EXPORT_MAX_ROWS} calls in this range. Narrow the dates or filters."),
-            );
+    let caller = crate::caller_from_session(&session);
+    let page = match client.smdr_query(&caller, params.clone()).await {
+        Ok(p) => p,
+        Err(e) => {
+            let (status, msg) = status_for(&e);
+            return plain(status, msg);
         }
-        for c in &page.calls {
-            out.push_str(&csv_row(c));
-            out.push_str("\r\n");
-        }
-        match page.next {
-            Some(next) => params.cursor = Some(next),
-            None => break,
-        }
-    }
-    tracing::info!(rows, "calls csv export");
+    };
+    let first = csv_chunk(&page.calls);
+    let more = page.next.is_some();
+    params.cursor = page.next;
+    let pager = CsvPager {
+        client,
+        caller,
+        params,
+        rows: page.calls.len(),
+        more,
+    };
+    let head =
+        futures_util::stream::iter([Ok::<_, CsvExportAbort>(format!("{CSV_HEADER}\r\n{first}"))]);
+    let rest = futures_util::stream::unfold(pager, CsvPager::next_chunk);
     (
         [
             (axum::http::header::CONTENT_TYPE, "text/csv; charset=utf-8"),
@@ -657,7 +711,7 @@ pub async fn calls_export_csv(
             ),
             (axum::http::header::CACHE_CONTROL, "no-store"),
         ],
-        out,
+        axum::body::Body::from_stream(futures_util::StreamExt::chain(head, rest)),
     )
         .into_response()
 }

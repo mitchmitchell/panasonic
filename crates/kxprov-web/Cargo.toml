@@ -25,6 +25,7 @@ time.workspace = true
 tokio = { workspace = true, features = ["sync", "time"] }
 uuid.workspace = true
 futures-util = { version = "0.3", default-features = false }
+thiserror.workspace = true
 
 [dev-dependencies]
 axum = { workspace = true }

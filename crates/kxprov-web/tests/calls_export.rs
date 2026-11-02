@@ -125,14 +125,56 @@ async fn export_walks_every_page_of_the_range() {
 }
 
 #[tokio::test]
-async fn export_over_the_row_cap_is_refused() {
+async fn export_streams_one_page_per_frame() {
+    let calls = (1..=1200)
+        .map(|i| call(i, &ts(i), "101", CallDirection::Incoming, "x"))
+        .collect();
+    let resp = app(calls)
+        .await
+        .oneshot(Request::builder().uri(DAY).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let mut body = resp.into_body();
+    let mut frames = 0;
+    while let Some(frame) = body.frame().await {
+        if frame.unwrap().is_data() {
+            frames += 1;
+        }
+    }
+    assert_eq!(frames, 3, "1200 rows at 500 per query page");
+}
+
+#[tokio::test]
+async fn export_over_the_row_cap_ends_the_body_with_an_error() {
     let n = i64::try_from(CSV_EXPORT_MAX_ROWS).unwrap() + 1;
     let calls = (1..=n)
         .map(|i| call(i, &ts(i), "101", CallDirection::Incoming, "x"))
         .collect();
-    let (status, _, body) = get(app(calls).await, DAY).await;
-    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
-    assert!(!body.contains("5550001"), "{body}");
+    let resp = app(calls)
+        .await
+        .oneshot(Request::builder().uri(DAY).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let mut body = resp.into_body();
+    let mut rows = 0usize;
+    let mut failed = false;
+    while let Some(frame) = body.frame().await {
+        match frame {
+            Ok(f) => {
+                if let Some(d) = f.data_ref() {
+                    rows += d.iter().filter(|b| **b == b'\n').count();
+                }
+            }
+            Err(e) => {
+                assert!(e.to_string().contains("more than"), "{e}");
+                failed = true;
+            }
+        }
+    }
+    assert!(failed, "an over-cap export must not end cleanly");
+    assert!(rows <= CSV_EXPORT_MAX_ROWS + 1, "{rows}");
 }
 
 #[tokio::test]
