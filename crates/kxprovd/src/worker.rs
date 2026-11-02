@@ -256,22 +256,25 @@ async fn run_plan(
     })
 }
 
+/// Runs a full backup as worker job `job_id`.
+///
+/// The same id names the port lease, the journal entries and the temp file, so a backup
+/// record can be matched to its lease record (#75).
 async fn run_backup(
     ctx: &WorkerCtx,
-    worker_job_id: &str,
+    job_id: &str,
     operational_mode: OperationalMode,
 ) -> JobOutcome {
-    let job_id = crate::queue::next_job_id();
     let temp = ctx
         .config
         .profile_data_dir()
         .join(format!("{job_id}.partial.dbh"));
     let _ = ctx.journal.append(&JournalEntry::BackupStart {
-        job_id: job_id.clone(),
+        job_id: job_id.to_string(),
         temp_path: temp.display().to_string(),
     });
     let pwd = ctx.config.password.clone();
-    let transport = match open(&ctx.config, &ctx.port, worker_job_id) {
+    let transport = match open(&ctx.config, &ctx.port, job_id) {
         Ok(t) => t,
         Err(e) => {
             return JobOutcome::Err {
@@ -328,7 +331,7 @@ async fn run_backup(
         }
     };
     let _ = ctx.journal.append(&JournalEntry::BackupCommit {
-        job_id,
+        job_id: job_id.to_string(),
         backup_id: meta.id.clone(),
     });
     let _ = std::fs::remove_file(&temp);
@@ -560,6 +563,29 @@ mod prod_gate_tests {
         assert!(out.contains("login failed"), "{out}");
         assert!(out.contains("dtr_cycled="), "{out}");
         assert!(!out.contains("not-the-sim-password"), "{out}");
+    }
+
+    #[tokio::test]
+    async fn backup_journal_uses_the_worker_job_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut ctx = test_worker_ctx(&tmp, false);
+        ctx.config.password = "not-the-sim-password".into();
+        let outcome = run_backup(&ctx, "job-worker-75", OperationalMode::Testing).await;
+        assert!(
+            matches!(outcome, JobOutcome::Err { ref code, .. } if code == "backup"),
+            "{outcome:?}"
+        );
+        let started: Vec<String> = ctx
+            .journal
+            .load()
+            .unwrap()
+            .into_iter()
+            .filter_map(|e| match e {
+                JournalEntry::BackupStart { job_id, .. } => Some(job_id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(started, vec!["job-worker-75".to_string()]);
     }
 
     #[tokio::test]
