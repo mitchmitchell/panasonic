@@ -171,9 +171,15 @@ fn spawn_daemon_thread(
 pub struct Daemon {
     _process_lock: lock::ProcessLock,
     _thread: std::thread::JoinHandle<()>,
+    smdr: Arc<smdr_bus::SmdrLive>,
 }
 
 impl Daemon {
+    /// Live call-log bus the API serves `smdr_subscribe` and `smdr_status` from.
+    pub fn smdr_live(&self) -> Arc<smdr_bus::SmdrLive> {
+        Arc::clone(&self.smdr)
+    }
+
     fn load_tokens(
         config: &Config,
     ) -> Result<TokenStore, Box<dyn std::error::Error + Send + Sync>> {
@@ -247,10 +253,11 @@ impl Daemon {
         });
 
         let q = Arc::clone(&queue);
+        let smdr = Arc::new(smdr_bus::SmdrLive::new());
         let api_state = Arc::new(ApiState {
             config: config.clone(),
             port,
-            smdr: Arc::new(smdr_bus::SmdrLive::new()),
+            smdr: Arc::clone(&smdr),
             profile: Arc::clone(&profile),
             transport_label,
             gates,
@@ -280,6 +287,7 @@ impl Daemon {
         Ok(Self {
             _process_lock: process_lock,
             _thread: thread,
+            smdr,
         })
     }
 
@@ -426,10 +434,11 @@ impl Daemon {
         });
 
         let q = Arc::clone(&queue);
+        let smdr = Arc::new(smdr_bus::SmdrLive::new());
         let api_state = Arc::new(ApiState {
             config: config.clone(),
             port,
-            smdr: Arc::new(smdr_bus::SmdrLive::new()),
+            smdr: Arc::clone(&smdr),
             profile: Arc::clone(&profile),
             transport_label,
             gates,
@@ -459,6 +468,7 @@ impl Daemon {
         Ok(Self {
             _process_lock: process_lock,
             _thread: thread,
+            smdr,
         })
     }
 }
