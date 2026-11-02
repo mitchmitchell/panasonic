@@ -508,6 +508,10 @@ async fn smdr_query(
 }
 
 /// Banner state from the port's `mode()`/`holder()` and the reader's own report; no serial I/O.
+///
+/// `mode()` and `holder()` are two reads, so a lease released between them yields
+/// `Programming` with no holder; the banner then shows an empty job id rather than failing,
+/// and the next status poll shows the port listening again.
 pub fn port_mode_view(state: &ApiState) -> kxprov_api::PortModeView {
     use kxprov_api::{DownReason, PortModeView};
     if !state.config.smdr.enabled {

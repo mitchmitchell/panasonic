@@ -461,6 +461,19 @@ fn sse_event(e: SmdrStreamEvent) -> Event {
     }
 }
 
+/// The browser's `Last-Event-ID`. A missing, non-ASCII or non-numeric value means "no
+/// replay": the stream then starts live, and the page's own reload covers any gap.
+fn last_event_id(headers: &HeaderMap) -> Option<i64> {
+    let text = match headers.get("last-event-id")?.to_str() {
+        Ok(t) => t,
+        Err(_non_ascii_header_means_start_live_without_replay) => return None,
+    };
+    match text.trim().parse() {
+        Ok(id) => Some(id),
+        Err(_not_an_event_id_this_server_sent_so_start_live) => None,
+    }
+}
+
 /// `GET /calls/stream`: Server-Sent Events of new calls. `since_id` or the browser's
 /// `Last-Event-ID` replays calls missed while disconnected. At most four per session (429).
 pub async fn calls_stream(
@@ -481,12 +494,7 @@ pub async fn calls_stream(
         )
             .into_response();
     };
-    let since_id = q.since_id.or_else(|| {
-        headers
-            .get("last-event-id")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.trim().parse().ok())
-    });
+    let since_id = q.since_id.or_else(|| last_event_id(&headers));
     let rx = match kxprov_mock::ReadOnlyPbxClient::new(state.backend.clone())
         .smdr_subscribe(&caller, since_id)
         .await
