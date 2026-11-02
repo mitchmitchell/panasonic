@@ -143,11 +143,11 @@ pub fn live_caller_id_digest(
 }
 
 /// Prefix of the port-lease holder id for the enter-Production live caller-id check.
-pub const SET_MODE_HOLDER: &str = "set-mode-production-verify";
+pub(crate) const SET_MODE_HOLDER: &str = "set-mode-production-verify";
 
 /// Returns a fresh per-request lease holder id for an enter-Production check, so the lease
 /// journal can tell concurrent or repeated requests apart (#74).
-pub fn set_mode_holder() -> String {
+pub(crate) fn set_mode_holder() -> String {
     format!("{SET_MODE_HOLDER}-{}", crate::queue::next_job_id())
 }
 
