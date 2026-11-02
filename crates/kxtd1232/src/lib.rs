@@ -13,6 +13,7 @@
 //! - An unacked, garbled, mismatched or NAKed write is never resent: the session holds
 //!   `end_binary` until a drain-then-re-read verify (and any rollback) finishes.
 
+pub mod attempts;
 pub mod client;
 pub mod error;
 pub mod fields;

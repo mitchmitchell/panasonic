@@ -310,6 +310,11 @@ impl<T: Transport> Client<T> {
         &self.t
     }
 
+    /// The transport clock, in milliseconds.
+    pub(crate) fn clock_ms(&mut self) -> u64 {
+        self.t.now_ms()
+    }
+
     /// Mutable transport access for integration tests (fault injection).
     #[cfg(feature = "test-transport-access")]
     pub fn transport_mut(&mut self) -> &mut T {
