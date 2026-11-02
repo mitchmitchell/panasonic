@@ -505,8 +505,11 @@ fn last_event_id(headers: &HeaderMap) -> Option<i64> {
     text.trim().parse().ok()
 }
 
-/// `GET /calls/stream`: Server-Sent Events of new calls. `since_id` or the browser's
-/// `Last-Event-ID` replays calls missed while disconnected. At most four per session (429).
+/// `GET /calls/stream`: Server-Sent Events of new calls. At most four per session (429).
+///
+/// The browser's `Last-Event-ID` wins over `since_id`: `since_id` is where the page started,
+/// and on a reconnect the header names the last call the page already shows, so replay
+/// resumes after it and never repeats a row.
 pub async fn calls_stream(
     State(state): State<WebState>,
     session: Session,
@@ -525,7 +528,7 @@ pub async fn calls_stream(
         )
             .into_response();
     };
-    let since_id = q.since_id.or_else(|| last_event_id(&headers));
+    let since_id = last_event_id(&headers).or(q.since_id);
     let rx = match kxprov_mock::ReadOnlyPbxClient::new(state.backend.clone())
         .smdr_subscribe(&caller, since_id)
         .await

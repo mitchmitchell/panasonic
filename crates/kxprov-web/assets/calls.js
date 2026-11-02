@@ -4,6 +4,7 @@
     return;
   }
   var since = marker.getAttribute("data-since-id");
+  var newest = since ? Number(since) : 0;
   var source = new EventSource(
     since ? "/calls/stream?since_id=" + encodeURIComponent(since) : "/calls/stream"
   );
@@ -26,6 +27,10 @@
       return;
     }
     var c = JSON.parse(e.data);
+    if (c.id <= newest) {
+      return;
+    }
+    newest = c.id;
     var row = document.createElement("tr");
     cell(row, fmt.format(new Date(c.rx_ts_utc)).replace(",", ""));
     cell(row, c.ext);

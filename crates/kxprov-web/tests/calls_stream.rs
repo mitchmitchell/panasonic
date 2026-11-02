@@ -116,6 +116,23 @@ async fn since_id_and_last_event_id_replay_missed_calls() {
 }
 
 #[tokio::test]
+async fn a_reconnect_resumes_from_last_event_id_not_the_page_start() {
+    let mock = Arc::new(MockDaemon::new());
+    for id in 1..=4 {
+        mock.test_add_call(0, call(id)).await;
+    }
+    let app = app(Arc::clone(&mock));
+    let mut body = open(&app, "/calls/stream?since_id=1", Some("3"))
+        .await
+        .into_body();
+    let seen = read_until(&mut body, "5550004").await;
+    assert!(
+        !seen.contains("5550002") && !seen.contains("5550003"),
+        "rows the page already shows were replayed: {seen}"
+    );
+}
+
+#[tokio::test]
 async fn heartbeat_is_an_sse_comment() {
     let mock = Arc::new(MockDaemon::new());
     mock.test_set_heartbeat(Duration::from_millis(20)).await;
