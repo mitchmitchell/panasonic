@@ -1941,7 +1941,7 @@ mod tests {
         store
             .verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan)
             .expect("grace may serve last good snapshot");
-        age_outage(&store, timing.grace);
+        backdate_outage_for_test(&store, timing.grace);
         assert!(matches!(
             store.verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan),
             Err(TokenError::StoreUnavailable)
@@ -1954,6 +1954,7 @@ mod tests {
         let path = tmp.path().join("tokens.json");
         write_tokens_revoking_writer(&path, false);
         let store = TokenStore::load_insecure(path.clone()).expect("load");
+        let timing = use_grace(&store, STALL_TOLERANT_GRACE);
         store
             .verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan)
             .expect("warm");
@@ -1963,10 +1964,10 @@ mod tests {
             .verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan)
             .expect("grace snapshot");
         assert!(
-            grace_start.elapsed() <= Duration::from_secs(2) + Duration::from_millis(200),
-            "transient reload must finish within ~2s"
+            grace_start.elapsed() < timing.grace,
+            "transient reload must give up its retries inside the grace"
         );
-        std::thread::sleep(Duration::from_millis(2100));
+        backdate_outage_for_test(&store, timing.grace);
         assert!(matches!(
             store.verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan),
             Err(TokenError::StoreUnavailable)
@@ -2061,10 +2062,9 @@ mod tests {
                     probe_thread_exit(&exiter_store, ticket);
                     done_tx.send(()).unwrap();
                 }));
-                assert!(
-                at_lock_rx.recv_timeout(Duration::from_secs(10)).is_ok(),
-                "exiting probe never reached the refcount lock: the 10 s limit only catches a deadlock"
-            );
+                at_lock_rx
+                    .recv()
+                    .expect("exiting probe ended without reaching the refcount lock");
                 assert!(
                     !watched.exited.load(Ordering::Acquire),
                     "probe marked itself exited before taking the refcount lock"
@@ -2128,10 +2128,11 @@ mod tests {
             }
             let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
             *store.after_send_hook.lock().unwrap() = Some(Box::new(move || {
-                assert!(
-                    release_rx.recv_timeout(Duration::from_secs(10)).is_ok(),
-                    "test never released the probe thread: the 10 s limit only catches a deadlock"
-                );
+                if release_rx.recv().is_err() {
+                    tracing::debug!(
+                        "probe exits unreleased: the test dropped its release sender when it ended"
+                    );
+                }
             }));
             write_tokens_revoking_writer(&path, true);
             assert!(matches!(
@@ -2529,7 +2530,7 @@ mod tests {
 
     /// A grace long enough that no scheduler or memory-pressure stall seen on
     /// a loaded test host outlasts it. A test that needs the grace to have run
-    /// out moves the outage start back with [`age_outage`] instead of sleeping.
+    /// out moves the outage start back with [`backdate_outage_for_test`] instead of sleeping.
     const STALL_TOLERANT_GRACE: Duration = Duration::from_secs(30);
 
     /// Timing for tests whose probes hang: a stall-tolerant grace, and a short
@@ -2543,26 +2544,19 @@ mod tests {
         timing
     }
 
-    /// Moves the current outage's start and its stale-since mark back by
-    /// `by`, so the store judges it exactly as if `by` had passed.
-    fn age_outage(store: &TokenStore, by: Duration) {
-        let mut state = store.inner.lock().unwrap();
-        let back = |t: Instant| t.checked_sub(by).expect("age within Instant range");
-        assert!(
-            state.reload_failure_since.is_some(),
-            "age_outage needs an outage in progress"
-        );
-        state.reload_failure_since = state.reload_failure_since.map(back);
-        state.stale_since = state.stale_since.map(back);
-    }
-
+    /// Holds the next probe's delivery until the returned sender sends.
+    ///
+    /// Waits without a time limit, so a stalled test host cannot release the
+    /// probe early; a real deadlock is caught by [`run_bounded`]. If the test
+    /// ends without sending, its dropped sender releases the probe.
     fn block_next_probe_delivery(store: &TokenStore) -> std::sync::mpsc::Sender<()> {
         let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
         *store.before_send_hook.lock().unwrap() = Some(Box::new(move || {
-            assert!(
-                release_rx.recv_timeout(Duration::from_secs(10)).is_ok(),
-                "test never released the probe thread: the 10 s limit only catches a deadlock"
-            );
+            if release_rx.recv().is_err() {
+                tracing::debug!(
+                    "probe delivers unreleased: the test dropped its release sender when it ended"
+                );
+            }
         }));
         release_tx
     }
@@ -2593,7 +2587,7 @@ mod tests {
                 "the outage must start when the timeout was observed, not be backdated"
             );
 
-            age_outage(&store, timing.grace);
+            backdate_outage_for_test(&store, timing.grace);
             let outage_start = outage_start
                 .checked_sub(timing.grace)
                 .expect("aged outage start within Instant range");
@@ -3056,7 +3050,7 @@ mod tests {
                     );
                     if i == 0 {
                         waits_after_first = TokenStore::reload_waits_on_this_thread_for_test();
-                        age_outage(&store, timing.max_stale_serve());
+                        backdate_outage_for_test(&store, timing.max_stale_serve());
                     }
                     assert_eq!(
                         TokenStore::reload_waits_on_this_thread_for_test(),
@@ -3111,7 +3105,7 @@ mod tests {
                         result.is_ok(),
                         "round 0: a hung probe that starts inside the grace serves cached entries"
                     );
-                        age_outage(&store, timing.max_stale_serve());
+                        backdate_outage_for_test(&store, timing.max_stale_serve());
                     } else {
                         assert!(
                         matches!(result, Err(TokenError::StoreUnavailable)),
@@ -3320,7 +3314,7 @@ mod tests {
             store
                 .verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan)
                 .expect("grace snapshot");
-            age_outage(&store, timing.grace);
+            backdate_outage_for_test(&store, timing.grace);
             assert!(matches!(
                 store.verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan),
                 Err(TokenError::StoreUnavailable)
@@ -3453,9 +3447,7 @@ mod tests {
                     w.write_all(&bytes_feed).expect("write tokens");
                 });
             });
-            let ok = done_rx
-                .recv_timeout(Duration::from_secs(10))
-                .expect("fifo read result");
+            let ok = done_rx.recv().expect("fifo read result");
             reader.join().expect("join fifo reader");
             assert!(ok.is_ok(), "expected valid fifo read, got {ok:?}");
             assert_eq!(fds_open_on(&path), 0, "successful fifo read must close fd");
