@@ -1779,22 +1779,31 @@ mod tests {
             Ok(tasks) => tasks,
             Err(e) => return format!("thread dump unavailable: /proc/self/task: {e}"),
         };
-        let mut dirs: Vec<std::path::PathBuf> = tasks
-            .filter_map(|entry| entry.ok().map(|e| e.path()))
-            .collect();
+        let mut dirs = Vec::new();
+        let mut unreadable = Vec::new();
+        for entry in tasks {
+            match entry {
+                Ok(entry) => dirs.push(entry.path()),
+                Err(e) => unreadable.push(format!("unreadable task entry: {e}\n")),
+            }
+        }
         dirs.sort();
         let mut out = format!("thread dump ({} threads):\n", dirs.len());
+        for line in unreadable {
+            out.push_str(&line);
+        }
         for dir in dirs {
             let stat = read(dir.join("stat"));
-            let state = stat
+            let state = match stat
                 .rsplit_once(") ")
                 .and_then(|(_, rest)| rest.split_whitespace().next())
-                .unwrap_or("?")
-                .to_string();
+            {
+                Some(state) => state.to_string(),
+                None => format!("<unparsed stat: {stat}>"),
+            };
             out.push_str(&format!(
-                "tid {} name={} state={} wchan={} syscall={}\n  stack: {}\n",
-                dir.file_name()
-                    .map_or_else(String::new, |n| n.to_string_lossy().into_owned()),
+                "{} name={} state={} wchan={} syscall={}\n  stack: {}\n",
+                task_label(&dir),
                 read(dir.join("comm")),
                 state,
                 read(dir.join("wchan")),
@@ -1803,6 +1812,16 @@ mod tests {
             ));
         }
         out
+    }
+
+    /// Names a `/proc/self/task/<tid>` directory as `tid <tid>`, or by its
+    /// full path if it has no final component, so no thread is left out of
+    /// the dump.
+    fn task_label(dir: &Path) -> String {
+        match dir.file_name() {
+            Some(tid) => format!("tid {}", tid.to_string_lossy()),
+            None => format!("task {}", dir.display()),
+        }
     }
 
     #[test]
@@ -3339,9 +3358,10 @@ mod tests {
             let reader_path = path.clone();
             let reader = std::thread::spawn(move || {
                 let ok = TokenStore::try_read_fifo_tokens_bytes(&reader_path, Some(&cancel_live));
-                let _ = done_tx.send(ok);
+                done_tx
+                    .send(ok)
+                    .expect("the test waits on done_rx for this result; a closed receiver means it already failed");
             });
-            // Let the reader thread open its O_NONBLOCK read fd before pairing ends (avoid FIFO open deadlock).
             std::thread::sleep(Duration::from_millis(50));
             std::thread::scope(|scope| {
                 use nix::fcntl::{open, OFlag};
@@ -3359,7 +3379,7 @@ mod tests {
                     )
                     .expect("fifo read end for paired open");
                     std::thread::sleep(Duration::from_secs(2));
-                    let _ = close(fd);
+                    close(fd).expect("closing the paired read fd this thread opened");
                 });
                 scope.spawn(move || {
                     let mut w = std::fs::OpenOptions::new()
