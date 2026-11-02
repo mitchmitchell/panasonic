@@ -368,6 +368,7 @@ fn apply_job_prod_gate(ctx: &WorkerCtx, profile: Profile) -> Option<JobOutcome> 
         .unwrap_or(false);
     let gate = prod_write_gate(
         profile,
+        ctx.config.transport == crate::config::TransportKind::Serial,
         locked,
         live_writes,
         ctx.transition.writes_blocked(),
@@ -592,6 +593,19 @@ mod prod_gate_tests {
         let tmp = tempfile::tempdir().unwrap();
         let ctx = test_worker_ctx(&tmp, true);
         assert!(apply_job_prod_gate(&ctx, Profile::Sim).is_none());
+    }
+
+    #[tokio::test]
+    async fn apply_job_live_writes_gate_blocks_serial_transport_on_test_profile() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut ctx = test_worker_ctx(&tmp, false);
+        ctx.config.transport = crate::config::TransportKind::Serial;
+        ctx.gates.write().await.config.live_writes_approved = false;
+        let outcome = apply_job_prod_gate(&ctx, Profile::Test).expect("blocked");
+        assert!(
+            matches!(outcome, JobOutcome::Err { ref code, .. } if code == "gate"),
+            "{outcome:?}"
+        );
     }
 }
 

@@ -581,6 +581,7 @@ async fn apply_plan(
     let live_writes = state.gates.read().await.config.live_writes_approved;
     if let Some(gate) = prod_write_gate(
         profile,
+        state.config.transport == crate::config::TransportKind::Serial,
         locked,
         live_writes,
         state.transition.writes_blocked(),
