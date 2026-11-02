@@ -185,3 +185,56 @@ fn release<T: Transport>(client: &mut Client<T>) -> Option<&'static str> {
     }
     client.end_binary().err().map(|e| e.kind())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{classify, Disposition, TRANSIENT_NAK_CODE};
+    use crate::error::FrameError;
+    use crate::error::{Error, LoginFailure};
+
+    #[test]
+    fn classify_follows_spec_section_6_2() {
+        let transient = [
+            Error::Timeout,
+            Error::BusyTimeout,
+            Error::ExtraFrame,
+            Error::Garbled(FrameError::Empty),
+            Error::MismatchedReply {
+                expected: 0x01,
+                got: 0x02,
+            },
+            Error::Nak {
+                cmd: 0x01,
+                code: TRANSIENT_NAK_CODE,
+            },
+            Error::PreSend(Box::new(Error::Timeout)),
+        ];
+        for e in &transient {
+            assert_eq!(classify(e, true), Disposition::Transient, "{e:?}");
+        }
+        let definitive = [
+            Error::Refused { cmd: 0x01 },
+            Error::Nak {
+                cmd: 0x01,
+                code: 0x07,
+            },
+            Error::UnexpectedReply("status".into()),
+            Error::LinkDown("gone".into()),
+            Error::SessionLost,
+            Error::PreSend(Box::new(Error::LinkDown("gone".into()))),
+            Error::Login(LoginFailure::PasswordRejected),
+            Error::Login(LoginFailure::AnotherTerminal),
+            Error::Login(LoginFailure::Ng),
+        ];
+        for e in &definitive {
+            assert_eq!(classify(e, false), Disposition::Definitive, "{e:?}");
+        }
+    }
+
+    #[test]
+    fn login_timeout_is_transient_only_before_xon() {
+        let e = Error::Login(LoginFailure::TimedOut { ms: 30_000 });
+        assert_eq!(classify(&e, false), Disposition::Transient);
+        assert_eq!(classify(&e, true), Disposition::Definitive);
+    }
+}
