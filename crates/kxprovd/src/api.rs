@@ -1548,12 +1548,87 @@ mod smdr_dispatch_tests {
         );
     }
 
+    struct DeviceSentinel {
+        path: std::path::PathBuf,
+        watch: nix::sys::inotify::Inotify,
+    }
+
+    impl DeviceSentinel {
+        fn arm(tmp: &tempfile::TempDir, st: &mut ApiState) -> Self {
+            use nix::sys::inotify::{AddWatchFlags, InitFlags, Inotify};
+            let path = tmp.path().join("sentinel-tty");
+            std::fs::write(&path, b"").unwrap();
+            let watch = Inotify::init(InitFlags::IN_NONBLOCK | InitFlags::IN_CLOEXEC).unwrap();
+            watch
+                .add_watch(
+                    &path,
+                    AddWatchFlags::IN_OPEN
+                        | AddWatchFlags::IN_ACCESS
+                        | AddWatchFlags::IN_MODIFY
+                        | AddWatchFlags::IN_ATTRIB
+                        | AddWatchFlags::IN_DELETE_SELF,
+                )
+                .unwrap();
+            st.config.serial_device = path.clone();
+            Self { path, watch }
+        }
+
+        fn assert_untouched(&self) {
+            let events = match self.watch.read_events() {
+                Ok(events) => events,
+                Err(nix::errno::Errno::EAGAIN) => Vec::new(),
+                Err(e) => panic!("inotify read failed: {e}"),
+            };
+            assert!(
+                events.is_empty(),
+                "serial_device sentinel was touched: {:?}",
+                events.iter().map(|e| e.mask).collect::<Vec<_>>()
+            );
+            assert_eq!(std::fs::read(&self.path).unwrap(), b"");
+        }
+    }
+
+    fn handler_source(name: &str) -> &'static str {
+        let src = include_str!("api.rs");
+        let body = src.split("#[cfg(test)]").next().unwrap();
+        let start = body
+            .find(&format!("fn {name}"))
+            .unwrap_or_else(|| panic!("{name} not found"));
+        let len = body[start..].find("\n}\n").unwrap();
+        &body[start..start + len]
+    }
+
+    #[test]
+    fn smdr_handlers_never_open_a_device_or_take_a_lease() {
+        for name in [
+            "smdr_query",
+            "smdr_status",
+            "smdr_subscribe",
+            "port_mode_view",
+        ] {
+            let body = handler_source(name);
+            for word in [
+                "serial_device",
+                "File::open",
+                "OpenOptions",
+                "std::fs",
+                "tokio::fs",
+                "request_lease",
+                "transport",
+                "tty",
+            ] {
+                assert!(!body.contains(word), "{name} must not reference {word}");
+            }
+        }
+    }
+
     #[tokio::test]
     async fn smdr_status_and_subscribe_never_touch_the_port_even_while_it_is_leased() {
         let tmp = tempfile::tempdir().unwrap();
         let mut st = state(&tmp);
         st.config.transport = crate::config::TransportKind::Serial;
         st.config.sim_pbx = None;
+        let sentinel = DeviceSentinel::arm(&tmp, &mut st);
         let st = Arc::new(st);
         let lease = st
             .port
@@ -1576,6 +1651,7 @@ mod smdr_dispatch_tests {
         assert_eq!(st.port.holder(), holder);
         assert_eq!(st.port.mode(), crate::port::PortMode::Programming);
         assert_eq!(std::fs::read(&journal).unwrap_or_default(), before);
+        sentinel.assert_untouched();
         drop(lease);
     }
 
@@ -1600,6 +1676,7 @@ mod smdr_dispatch_tests {
         let mut st = state(&tmp);
         st.config.transport = crate::config::TransportKind::Serial;
         st.config.sim_pbx = None;
+        let sentinel = DeviceSentinel::arm(&tmp, &mut st);
         let lease = st
             .port
             .request_lease("job-hold", std::time::Duration::from_secs(5))
@@ -1615,6 +1692,7 @@ mod smdr_dispatch_tests {
         assert_eq!(st.port.holder(), holder);
         assert_eq!(st.port.mode(), crate::port::PortMode::Programming);
         assert_eq!(std::fs::read(&journal).unwrap_or_default(), before);
+        sentinel.assert_untouched();
         drop(lease);
     }
 
