@@ -1,277 +1,309 @@
-//! S7 SMDR health: line silence, CTS low and header mismatch, as a pure state machine.
+//! S7 SMDR health alerts: line silence, CTS low and header mismatch.
 //!
-//! Design: grokbots/architecture/panasonic/2026-10-31-kx-provision-s7-design.md §1, §4, §6.
-//! The monitor holds no transport and no lease, so it can never transmit or toggle modem lines.
-//! Durations use a caller-supplied monotonic `Instant`; wall time is carried for display only.
+//! [`HealthMonitor`] is a pure state machine driven by [`Observation`]s and an injected
+//! monotonic `Instant`. It owns no port handle, so it cannot transmit; its byte input is a
+//! counter fed by [`ByteTap`], which wraps an [`SmdrSource`] (receive only). It writes nothing
+//! to SQLite. [`HealthBoard`] publishes its edges through [`SmdrLive`].
 
-use crate::smdr_reader::ReaderEvent;
-use chrono::{DateTime, Utc};
-use std::collections::VecDeque;
+use crate::smdr_bus::SmdrLive;
+use crate::smdr_reader::{ReaderEvent, SmdrSource};
+use chrono::{DateTime, SecondsFormat, Utc};
+use kxprov_api::{CtsStatus, SmdrAlert, SmdrAlertKind, SmdrAlertState};
+use kxtd1232::TransportError;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+/// Validated thresholds, built by [`crate::config::SmdrConfig::health`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Severity {
-    Info,
-    Warn,
-    Crit,
+pub struct HealthConfig {
+    pub silence_after: Duration,
+    pub cts_low_after: Duration,
+    pub cts_monitor: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum SignalKind {
-    LineSilence,
-    CtsLow,
-    HeaderMismatch,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum HealthSignal {
-    LineSilence { since_last_byte: Duration },
-    CtsLow { since: DateTime<Utc> },
-    HeaderMismatch { rx: DateTime<Utc>, count_24h: u32 },
-}
-
-impl HealthSignal {
-    pub fn kind(&self) -> SignalKind {
-        match self {
-            HealthSignal::LineSilence { .. } => SignalKind::LineSilence,
-            HealthSignal::CtsLow { .. } => SignalKind::CtsLow,
-            HealthSignal::HeaderMismatch { .. } => SignalKind::HeaderMismatch,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Transition {
-    Raised {
-        signal: HealthSignal,
-        severity: Severity,
-    },
-    Cleared {
-        kind: SignalKind,
-    },
-}
-
+/// What the SMDR port is doing, as far as S7 cares.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PortState {
+    Smdr,
+    Programming,
+    Closed,
+}
+
+/// A modem-status read that failed, with the reason shown in `smdr_status`.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("modem status read failed: {0}")]
+pub struct ModemStatusError(pub String);
+
+/// One input to [`HealthMonitor::step`].
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Observation {
-    /// Any non-empty `recv` from the SMDR source, including bytes the line splitter strips.
-    Byte,
-    HeaderMismatch {
-        rx: DateTime<Utc>,
-    },
-    Modem {
-        cts: bool,
-    },
-    ReaderPaused,
-    ReaderResumed,
+    /// At least one byte arrived on the receive handle.
+    Bytes,
+    /// S4 reported a header that differs from the spec.
+    HeaderMismatch,
+    /// S4 reported a header that matches the spec.
+    HeaderMatched,
+    Port(PortState),
+    /// Result of one modem-status read; `Ok(true)` is CTS high.
+    ModemStatus(Result<bool, ModemStatusError>),
+    /// Time passed; re-evaluate thresholds.
     Tick,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct HealthConfig {
-    pub silence_warn: Duration,
-    pub silence_crit: Duration,
-    pub cts_low_grace: Duration,
-    pub header_window: Duration,
-}
-
-impl Default for HealthConfig {
-    fn default() -> Self {
-        Self {
-            silence_warn: Duration::from_secs(24 * 3600),
-            silence_crit: Duration::from_secs(72 * 3600),
-            cts_low_grace: Duration::from_secs(30),
-            header_window: Duration::from_secs(24 * 3600),
-        }
-    }
-}
-
-#[derive(Debug)]
-pub struct HealthMonitor {
-    config: HealthConfig,
-    silence_accum: Duration,
-    silence_mark: Option<Instant>,
-    silence_raised: Option<Severity>,
-    cts_low_since: Option<(Instant, DateTime<Utc>)>,
-    cts_raised: bool,
-    mismatches: VecDeque<Instant>,
-    header_raised: bool,
-}
-
-impl HealthMonitor {
-    /// Starts the silence clock at `now`, as if a byte had just arrived.
-    pub fn new(config: HealthConfig, now: Instant) -> Self {
-        Self {
-            config,
-            silence_accum: Duration::ZERO,
-            silence_mark: Some(now),
-            silence_raised: None,
-            cts_low_since: None,
-            cts_raised: false,
-            mismatches: VecDeque::new(),
-            header_raised: false,
-        }
-    }
-
-    pub fn config(&self) -> &HealthConfig {
-        &self.config
-    }
-
-    /// Silence counted so far, excluding time spent paused for a programming lease.
-    pub fn silence(&self, now: Instant) -> Duration {
-        self.silence_accum
-            + self
-                .silence_mark
-                .map_or(Duration::ZERO, |m| now.saturating_duration_since(m))
-    }
-
-    pub fn active(&self) -> Vec<(SignalKind, Severity)> {
-        let mut out = Vec::new();
-        if let Some(s) = self.silence_raised {
-            out.push((SignalKind::LineSilence, s));
-        }
-        if self.cts_raised {
-            out.push((SignalKind::CtsLow, Severity::Warn));
-        }
-        if self.header_raised {
-            out.push((SignalKind::HeaderMismatch, Severity::Warn));
-        }
-        out
-    }
-
-    pub fn step(&mut self, obs: Observation, now: Instant, wall: DateTime<Utc>) -> Vec<Transition> {
-        let mut out = Vec::new();
-        match obs {
-            Observation::Byte => {
-                self.silence_accum = Duration::ZERO;
-                if self.silence_mark.is_some() {
-                    self.silence_mark = Some(now);
-                }
-                if self.silence_raised.take().is_some() {
-                    out.push(Transition::Cleared {
-                        kind: SignalKind::LineSilence,
-                    });
-                }
-            }
-            Observation::ReaderPaused => {
-                if let Some(m) = self.silence_mark.take() {
-                    self.silence_accum += now.saturating_duration_since(m);
-                }
-            }
-            Observation::ReaderResumed => {
-                if self.silence_mark.is_none() {
-                    self.silence_mark = Some(now);
-                }
-            }
-            Observation::Modem { cts: true } => {
-                self.cts_low_since = None;
-                if std::mem::take(&mut self.cts_raised) {
-                    out.push(Transition::Cleared {
-                        kind: SignalKind::CtsLow,
-                    });
-                }
-            }
-            Observation::Modem { cts: false } => {
-                if self.cts_low_since.is_none() {
-                    self.cts_low_since = Some((now, wall));
-                }
-            }
-            Observation::HeaderMismatch { rx } => {
-                self.mismatches.push_back(now);
-                self.prune_mismatches(now);
-                let count_24h = u32::try_from(self.mismatches.len()).unwrap_or(u32::MAX);
-                if !self.header_raised {
-                    self.header_raised = true;
-                    out.push(Transition::Raised {
-                        signal: HealthSignal::HeaderMismatch { rx, count_24h },
-                        severity: Severity::Warn,
-                    });
-                }
-            }
-            Observation::Tick => {}
-        }
-        self.evaluate(now, &mut out);
-        out
-    }
-
-    fn prune_mismatches(&mut self, now: Instant) {
-        while let Some(&first) = self.mismatches.front() {
-            if now.saturating_duration_since(first) >= self.config.header_window {
-                self.mismatches.pop_front();
-            } else {
-                break;
-            }
-        }
-    }
-
-    fn evaluate(&mut self, now: Instant, out: &mut Vec<Transition>) {
-        let silence = self.silence(now);
-        let want = if silence >= self.config.silence_crit {
-            Some(Severity::Crit)
-        } else if silence >= self.config.silence_warn {
-            Some(Severity::Warn)
-        } else {
-            None
-        };
-        if let Some(sev) = want {
-            if self.silence_raised != Some(sev) && self.silence_raised != Some(Severity::Crit) {
-                self.silence_raised = Some(sev);
-                out.push(Transition::Raised {
-                    signal: HealthSignal::LineSilence {
-                        since_last_byte: silence,
-                    },
-                    severity: sev,
-                });
-            }
-        }
-
-        if let Some((since, wall)) = self.cts_low_since {
-            if !self.cts_raised && now.saturating_duration_since(since) >= self.config.cts_low_grace
-            {
-                self.cts_raised = true;
-                out.push(Transition::Raised {
-                    signal: HealthSignal::CtsLow { since: wall },
-                    severity: Severity::Warn,
-                });
-            }
-        }
-
-        self.prune_mismatches(now);
-        if self.header_raised && self.mismatches.is_empty() {
-            self.header_raised = false;
-            out.push(Transition::Cleared {
-                kind: SignalKind::HeaderMismatch,
-            });
-        }
-    }
-}
-
-/// Maps S4 reader events to health observations; ingest outcomes carry no health signal.
+/// Maps S4 reader events to observations. Ingest outcomes and idle polls carry no health
+/// signal: bytes are counted by [`ByteTap`], not by records.
 pub fn observations_from_reader(events: &[ReaderEvent]) -> Vec<Observation> {
     events
         .iter()
         .filter_map(|e| match e {
-            ReaderEvent::HeaderMismatch { rx, .. } => Some(Observation::HeaderMismatch { rx: *rx }),
+            ReaderEvent::HeaderMismatch { .. } => Some(Observation::HeaderMismatch),
+            ReaderEvent::HeaderMatched { .. } => Some(Observation::HeaderMatched),
             ReaderEvent::Ingested(_) | ReaderEvent::Idle => None,
         })
         .collect()
 }
 
-/// PII guard: alert text carries only the signal name, a duration or a count.
-pub fn alert_text(t: &Transition) -> String {
-    match t {
-        Transition::Raised { signal, severity } => match signal {
-            HealthSignal::LineSilence { since_last_byte } => format!(
-                "smdr {severity:?}: line silence for {}s",
-                since_last_byte.as_secs()
-            ),
-            HealthSignal::CtsLow { since } => {
-                format!("smdr {severity:?}: CTS low since {}", since.to_rfc3339())
+fn utc(at: DateTime<Utc>) -> String {
+    at.to_rfc3339_opts(SecondsFormat::Millis, true)
+}
+
+#[derive(Debug, Default)]
+struct Cts {
+    high: Option<bool>,
+    read_error: Option<String>,
+    low_since: Option<Instant>,
+    high_since: Option<Instant>,
+}
+
+/// The S7 state machine. One per SMDR port; fresh on every daemon start.
+#[derive(Debug)]
+pub struct HealthMonitor {
+    cfg: HealthConfig,
+    port: PortState,
+    silence_epoch: Option<Instant>,
+    silence: Option<String>,
+    cts: Cts,
+    cts_alert: Option<String>,
+    header: Option<String>,
+    header_mismatches: u64,
+}
+
+impl HealthMonitor {
+    /// Starts with the port closed: no silence is measured until [`PortState::Smdr`].
+    pub fn new(cfg: HealthConfig) -> Self {
+        Self {
+            cfg,
+            port: PortState::Closed,
+            silence_epoch: None,
+            silence: None,
+            cts: Cts::default(),
+            cts_alert: None,
+            header: None,
+            header_mismatches: 0,
+        }
+    }
+
+    /// Applies one observation and returns the alert edges it caused, at most one per kind.
+    #[must_use = "edges must reach smdr_status and the subscribe stream"]
+    pub fn step(&mut self, obs: Observation, now: Instant, wall: DateTime<Utc>) -> Vec<SmdrAlert> {
+        let mut edges = Vec::new();
+        match obs {
+            Observation::Bytes => {
+                if self.port == PortState::Smdr {
+                    self.silence_epoch = Some(now);
+                }
+                if let Some(since) = self.silence.take() {
+                    edges.push(cleared(SmdrAlertKind::LineSilence, since, wall));
+                }
             }
-            HealthSignal::HeaderMismatch { count_24h, .. } => {
-                format!("smdr {severity:?}: header mismatch ({count_24h} in 24h)")
+            Observation::HeaderMismatch => {
+                self.header_mismatches = self.header_mismatches.saturating_add(1);
+                if self.header.is_none() {
+                    let since = utc(wall);
+                    self.header = Some(since.clone());
+                    edges.push(raised(SmdrAlertKind::HeaderMismatch, since));
+                }
             }
-        },
-        Transition::Cleared { kind } => format!("smdr cleared: {kind:?}"),
+            Observation::HeaderMatched => {
+                if let Some(since) = self.header.take() {
+                    edges.push(cleared(SmdrAlertKind::HeaderMismatch, since, wall));
+                }
+            }
+            Observation::Port(state) => {
+                if state == PortState::Smdr && self.port != PortState::Smdr {
+                    self.silence_epoch = Some(now);
+                } else if state != PortState::Smdr {
+                    self.silence_epoch = None;
+                }
+                self.port = state;
+            }
+            Observation::ModemStatus(Ok(high)) => {
+                self.cts.read_error = None;
+                self.cts.high = Some(high);
+                if high {
+                    self.cts.low_since = None;
+                    self.cts.high_since.get_or_insert(now);
+                } else {
+                    self.cts.high_since = None;
+                    self.cts.low_since.get_or_insert(now);
+                }
+            }
+            Observation::ModemStatus(Err(e)) => {
+                tracing::warn!(reason = %e.0, "CTS unknown; low/high continuity reset");
+                self.cts = Cts {
+                    read_error: Some(e.0),
+                    ..Cts::default()
+                };
+            }
+            Observation::Tick => {}
+        }
+        self.evaluate(now, wall, &mut edges);
+        edges
+    }
+
+    fn evaluate(&mut self, now: Instant, wall: DateTime<Utc>, edges: &mut Vec<SmdrAlert>) {
+        let held = |since: Option<Instant>, d: Duration| {
+            since.is_some_and(|s| now.saturating_duration_since(s) >= d)
+        };
+        if self.silence.is_none()
+            && self.port == PortState::Smdr
+            && held(self.silence_epoch, self.cfg.silence_after)
+        {
+            let since = utc(wall);
+            self.silence = Some(since.clone());
+            edges.push(raised(SmdrAlertKind::LineSilence, since));
+        }
+        match self.cts_alert.take() {
+            None if self.cfg.cts_monitor && held(self.cts.low_since, self.cfg.cts_low_after) => {
+                let since = utc(wall);
+                self.cts_alert = Some(since.clone());
+                edges.push(raised(SmdrAlertKind::CtsLow, since));
+            }
+            Some(since) if held(self.cts.high_since, self.cfg.cts_low_after) => {
+                edges.push(cleared(SmdrAlertKind::CtsLow, since, wall));
+            }
+            unchanged => self.cts_alert = unchanged,
+        }
+    }
+
+    /// Active alerts only, in kind order.
+    pub fn active(&self) -> Vec<SmdrAlert> {
+        [
+            (SmdrAlertKind::LineSilence, &self.silence),
+            (SmdrAlertKind::CtsLow, &self.cts_alert),
+            (SmdrAlertKind::HeaderMismatch, &self.header),
+        ]
+        .into_iter()
+        .filter_map(|(kind, since)| since.clone().map(|since| raised(kind, since)))
+        .collect()
+    }
+
+    pub fn cts_status(&self) -> CtsStatus {
+        CtsStatus {
+            monitored: self.cfg.cts_monitor,
+            high: self.cts.high,
+            read_error: self.cts.read_error.clone(),
+        }
+    }
+
+    /// Header mismatches seen since start, saturating.
+    pub fn header_mismatches(&self) -> u64 {
+        self.header_mismatches
+    }
+}
+
+fn raised(kind: SmdrAlertKind, since: String) -> SmdrAlert {
+    SmdrAlert {
+        kind,
+        state: SmdrAlertState::Raised { since },
+    }
+}
+
+fn cleared(kind: SmdrAlertKind, since: String, at: DateTime<Utc>) -> SmdrAlert {
+    SmdrAlert {
+        kind,
+        state: SmdrAlertState::Cleared { since, at: utc(at) },
+    }
+}
+
+/// Counts bytes received through an [`SmdrSource`]. It adds no transmit path.
+pub struct ByteTap<S: SmdrSource> {
+    inner: S,
+    count: Arc<AtomicU64>,
+}
+
+impl<S: SmdrSource> ByteTap<S> {
+    pub fn new(inner: S) -> (Self, ByteCounter) {
+        let count = Arc::new(AtomicU64::new(0));
+        let counter = ByteCounter {
+            count: Arc::clone(&count),
+            seen: 0,
+        };
+        (Self { inner, count }, counter)
+    }
+
+    pub fn into_inner(self) -> S {
+        self.inner
+    }
+}
+
+impl<S: SmdrSource> SmdrSource for ByteTap<S> {
+    fn recv(&mut self, timeout_ms: u64) -> Result<Vec<u8>, TransportError> {
+        let bytes = self.inner.recv(timeout_ms)?;
+        self.count.fetch_add(bytes.len() as u64, Ordering::Relaxed);
+        Ok(bytes)
+    }
+}
+
+/// The health side of a [`ByteTap`].
+#[derive(Debug)]
+pub struct ByteCounter {
+    count: Arc<AtomicU64>,
+    seen: u64,
+}
+
+impl ByteCounter {
+    /// True when bytes arrived since the last call.
+    pub fn take_new(&mut self) -> bool {
+        let now = self.count.load(Ordering::Relaxed);
+        let fresh = now != self.seen;
+        self.seen = now;
+        fresh
+    }
+}
+
+/// Drives a [`HealthMonitor`] and publishes its edges and status through [`SmdrLive`].
+pub struct HealthBoard {
+    monitor: HealthMonitor,
+    live: Arc<SmdrLive>,
+}
+
+impl HealthBoard {
+    pub fn new(cfg: HealthConfig, live: Arc<SmdrLive>) -> Self {
+        let monitor = HealthMonitor::new(cfg);
+        live.set_health(monitor.active(), monitor.cts_status());
+        Self { monitor, live }
+    }
+
+    /// One timer tick: folds in new bytes, then re-evaluates. One timer per daemon drives this.
+    pub fn tick(&mut self, bytes: &mut ByteCounter, now: Instant, wall: DateTime<Utc>) {
+        if bytes.take_new() {
+            self.observe(Observation::Bytes, now, wall);
+        }
+        self.observe(Observation::Tick, now, wall);
+    }
+
+    pub fn observe(&mut self, obs: Observation, now: Instant, wall: DateTime<Utc>) {
+        let edges = self.monitor.step(obs, now, wall);
+        self.live
+            .set_health(self.monitor.active(), self.monitor.cts_status());
+        for edge in edges {
+            self.live.publish_alert(edge);
+        }
+    }
+
+    pub fn monitor(&self) -> &HealthMonitor {
+        &self.monitor
     }
 }

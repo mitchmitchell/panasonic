@@ -143,6 +143,28 @@ fn header_that_differs_from_spec_emits_a_typed_mismatch_event() {
 }
 
 #[test]
+fn a_spec_header_emits_header_matched_and_a_changed_one_does_not() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let mut store = store(&tmp);
+    let changed = SPEC_HEADER.replace("Acc code", "Cost    ");
+    let mut chunks = VecDeque::new();
+    chunks.push_back(format!("{SPEC_HEADER}\r\n{changed}\r\n{SPEC_HEADER}\r\n").into_bytes());
+    let mut reader = SmdrReader::new(ReceiveOnly::new(FakePort {
+        chunks: Rc::new(RefCell::new(chunks)),
+        ..FakePort::default()
+    }));
+    let headers: Vec<&str> = drain(&mut reader, &mut store)
+        .iter()
+        .filter_map(|e| match e {
+            ReaderEvent::HeaderMatched { rx: at } if *at == rx() => Some("ok"),
+            ReaderEvent::HeaderMismatch { .. } => Some("mismatch"),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(headers, vec!["ok", "mismatch", "ok"]);
+}
+
+#[test]
 fn link_down_is_an_error_not_idle() {
     struct Down;
     impl SmdrSource for Down {

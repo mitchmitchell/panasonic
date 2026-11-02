@@ -336,6 +336,48 @@ pub struct SmdrCounters {
 pub struct SmdrStatus {
     pub port_mode: PortModeView,
     pub counters: Option<SmdrCounters>,
+    /// Active S7 health alerts only; a cleared alert is reported once, as a stream event.
+    #[serde(default)]
+    pub alerts: Vec<SmdrAlert>,
+    /// Last CTS reading from the listen-only handle, or the error that replaced it.
+    #[serde(default)]
+    pub cts: CtsStatus,
+}
+
+/// The closed set of S7 health alert kinds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SmdrAlertKind {
+    LineSilence,
+    CtsLow,
+    HeaderMismatch,
+}
+
+/// Lifecycle of one alert: raised at `since`, later cleared at `at` (RFC 3339 UTC).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum SmdrAlertState {
+    Raised { since: String },
+    Cleared { since: String, at: String },
+}
+
+/// One alert edge or active alert. Carries only the kind and timestamps, never line content.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SmdrAlert {
+    pub kind: SmdrAlertKind,
+    #[serde(flatten)]
+    pub state: SmdrAlertState,
+}
+
+/// CTS as last read from modem status.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CtsStatus {
+    /// False when `smdr.cts_monitor` is off: CTS is reported here but never alerted.
+    pub monitored: bool,
+    /// `None` before the first read and after a failed read.
+    pub high: Option<bool>,
+    /// Why the last modem-status read failed; cleared by the next good read.
+    pub read_error: Option<String>,
 }
 
 /// Acknowledges a subscription; events follow on the same connection, one JSON line each.
@@ -349,10 +391,6 @@ pub struct SmdrSubscribed {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 #[non_exhaustive]
-#[expect(
-    clippy::large_enum_variant,
-    reason = "Call is the event sent almost every time; boxing it would only add an allocation per call"
-)]
 pub enum SmdrStreamEvent {
     Call {
         call: SmdrCallView,
@@ -362,6 +400,10 @@ pub enum SmdrStreamEvent {
         skipped: u64,
     },
     Heartbeat,
+    /// An S7 health alert was raised or cleared.
+    Alert {
+        alert: SmdrAlert,
+    },
 }
 
 #[cfg(test)]
@@ -380,6 +422,8 @@ mod tests {
                 job_id: "j1".into(),
             },
             counters: None,
+            alerts: Vec::new(),
+            cts: CtsStatus::default(),
         };
         let v = serde_json::to_value(&s).unwrap();
         assert_eq!(v["port_mode"]["state"], "paused_for_programming");
@@ -394,6 +438,22 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<SmdrStreamEvent>(r#"{"event":"heartbeat"}"#).unwrap(),
             SmdrStreamEvent::Heartbeat
+        );
+        let old: SmdrStatus =
+            serde_json::from_str(r#"{"port_mode":{"state":"listening"},"counters":null}"#).unwrap();
+        assert!(old.alerts.is_empty());
+        let alert = SmdrStreamEvent::Alert {
+            alert: SmdrAlert {
+                kind: SmdrAlertKind::CtsLow,
+                state: SmdrAlertState::Cleared {
+                    since: "a".into(),
+                    at: "b".into(),
+                },
+            },
+        };
+        assert_eq!(
+            serde_json::to_string(&alert).unwrap(),
+            r#"{"event":"alert","alert":{"kind":"cts_low","state":"cleared","since":"a","at":"b"}}"#
         );
     }
 

@@ -4,7 +4,7 @@ use crate::smdr_api::calls_after;
 use crate::smdr_reader::{ReaderEvent, SmdrSink};
 use crate::smdr_store::{IngestOutcome, SmdrStore, SmdrStoreError};
 use chrono::{DateTime, SecondsFormat, Utc};
-use kxprov_api::{SmdrCallView, QUERY_LIMIT_MAX, SMDR_BUS_CAPACITY};
+use kxprov_api::{CtsStatus, SmdrAlert, SmdrCallView, QUERY_LIMIT_MAX, SMDR_BUS_CAPACITY};
 use kxtd1232::smdr::SmdrLine;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -16,7 +16,13 @@ struct LiveStats {
     link_down: bool,
     last_byte_at: Option<String>,
     header_mismatch_count: u64,
+    alerts: Vec<SmdrAlert>,
+    cts: CtsStatus,
 }
+
+/// Capacity of the alert-edge broadcast. Edges are rare (at most one per kind per change);
+/// a subscriber that misses some recovers the active set from `smdr_status`.
+pub const SMDR_ALERT_CAPACITY: usize = 16;
 
 /// What the reader reports about itself, as seen by status calls.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -25,11 +31,14 @@ pub struct LiveSnapshot {
     pub link_down: bool,
     pub last_byte_at: Option<String>,
     pub header_mismatch_count: u64,
+    pub alerts: Vec<SmdrAlert>,
+    pub cts: CtsStatus,
 }
 
 /// Shared between the reader (writer side) and the socket API (reader side).
 pub struct SmdrLive {
     tx: broadcast::Sender<SmdrCallView>,
+    alert_tx: broadcast::Sender<SmdrAlert>,
     stats: Mutex<LiveStats>,
 }
 
@@ -46,8 +55,10 @@ fn utc(at: DateTime<Utc>) -> String {
 impl SmdrLive {
     pub fn new() -> Self {
         let (tx, _unused_initial_receiver) = broadcast::channel(SMDR_BUS_CAPACITY);
+        let (alert_tx, _unused_alert_receiver) = broadcast::channel(SMDR_ALERT_CAPACITY);
         Self {
             tx,
+            alert_tx,
             stats: Mutex::new(LiveStats::default()),
         }
     }
@@ -61,6 +72,24 @@ impl SmdrLive {
         if self.tx.send(call).is_err() {
             tracing::trace!("no call-log subscribers");
         }
+    }
+
+    pub fn subscribe_alerts(&self) -> broadcast::Receiver<SmdrAlert> {
+        self.alert_tx.subscribe()
+    }
+
+    /// Never blocks; an edge with no subscriber is still reflected in the active set.
+    pub fn publish_alert(&self, alert: SmdrAlert) {
+        if self.alert_tx.send(alert).is_err() {
+            tracing::trace!("no alert subscribers");
+        }
+    }
+
+    pub fn set_health(&self, alerts: Vec<SmdrAlert>, cts: CtsStatus) {
+        self.with_stats(|s| {
+            s.alerts = alerts;
+            s.cts = cts;
+        });
     }
 
     fn with_stats<R>(&self, f: impl FnOnce(&mut LiveStats) -> R) -> R {
@@ -84,7 +113,9 @@ impl SmdrLive {
             .iter()
             .filter(|e| matches!(e, ReaderEvent::HeaderMismatch { .. }))
             .count() as u64;
-        self.with_stats(|s| s.header_mismatch_count += mismatches);
+        self.with_stats(|s| {
+            s.header_mismatch_count = s.header_mismatch_count.saturating_add(mismatches)
+        });
     }
 
     pub fn snapshot(&self) -> LiveSnapshot {
@@ -93,6 +124,8 @@ impl SmdrLive {
             link_down: s.link_down,
             last_byte_at: s.last_byte_at.clone(),
             header_mismatch_count: s.header_mismatch_count,
+            alerts: s.alerts.clone(),
+            cts: s.cts.clone(),
         })
     }
 }

@@ -490,6 +490,10 @@ fn sse_event(e: SmdrStreamEvent) -> Event {
         SmdrStreamEvent::Lagged { skipped } => {
             Event::default().event("lagged").data(skipped.to_string())
         }
+        SmdrStreamEvent::Alert { alert } => Event::default()
+            .event("alert")
+            .json_data(&alert)
+            .unwrap_or_else(|_unserializable| Event::default().comment("alert not sent")),
         SmdrStreamEvent::Heartbeat => Event::default().comment("heartbeat"),
         _newer_event_kind_this_page_ignores => Event::default().comment("ignored"),
     }

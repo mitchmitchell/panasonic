@@ -61,15 +61,56 @@ pub struct Config {
 }
 
 /// Call-log settings, `"smdr": { "enabled": false }` in the daemon config. Absent means on.
+///
+/// Thresholds are whole seconds and must be positive; [`Config::validate`] rejects anything
+/// else, naming the key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct SmdrConfig {
     pub enabled: bool,
+    /// Seconds without any received byte, in Smdr mode, before a line-silence alert. Default 86400.
+    pub silence_alert_after: i64,
+    /// Seconds CTS must stay low to raise, and high to clear, a CTS-low alert. Default 30.
+    pub cts_low_alert_after: i64,
+    /// Alert on CTS low. Off still reports CTS in `smdr_status`, never alerting.
+    pub cts_monitor: bool,
 }
+
+pub const DEFAULT_SILENCE_ALERT_AFTER_SECS: i64 = 86_400;
+pub const DEFAULT_CTS_LOW_ALERT_AFTER_SECS: i64 = 30;
 
 impl Default for SmdrConfig {
     fn default() -> Self {
-        Self { enabled: true }
+        Self {
+            enabled: true,
+            silence_alert_after: DEFAULT_SILENCE_ALERT_AFTER_SECS,
+            cts_low_alert_after: DEFAULT_CTS_LOW_ALERT_AFTER_SECS,
+            cts_monitor: true,
+        }
+    }
+}
+
+impl SmdrConfig {
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        positive("smdr.silence_alert_after", self.silence_alert_after)?;
+        positive("smdr.cts_low_alert_after", self.cts_low_alert_after)?;
+        Ok(())
+    }
+
+    /// Thresholds for the S7 health monitor. Call after [`SmdrConfig::validate`].
+    pub fn health(&self) -> Result<crate::smdr_health::HealthConfig, ConfigError> {
+        Ok(crate::smdr_health::HealthConfig {
+            silence_after: positive("smdr.silence_alert_after", self.silence_alert_after)?,
+            cts_low_after: positive("smdr.cts_low_alert_after", self.cts_low_alert_after)?,
+            cts_monitor: self.cts_monitor,
+        })
+    }
+}
+
+fn positive(key: &'static str, secs: i64) -> Result<std::time::Duration, ConfigError> {
+    match u64::try_from(secs) {
+        Ok(s) if s > 0 => Ok(std::time::Duration::from_secs(s)),
+        _non_positive => Err(ConfigError::NotPositive { key, value: secs }),
     }
 }
 
@@ -266,6 +307,8 @@ pub enum ConfigError {
     SignOnPermissions(String),
     #[error("signon file: {0} must not be empty")]
     SignOnEmpty(&'static str),
+    #[error("{key} must be a positive number of seconds, got {value}")]
+    NotPositive { key: &'static str, value: i64 },
 }
 
 impl std::fmt::Debug for Config {
@@ -284,6 +327,7 @@ impl std::fmt::Debug for Config {
 impl Config {
     pub fn validate(&self) -> Result<(), ConfigError> {
         self.timing.validate()?;
+        self.smdr.validate()?;
         if self.gateway_uid == self.admin_uid {
             return Err(ConfigError::UidsMustDiffer);
         }

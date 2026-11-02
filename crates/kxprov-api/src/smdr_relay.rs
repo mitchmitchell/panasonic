@@ -1,6 +1,6 @@
 //! Bounded relay from a live-call broadcast to one subscriber (S6 design §2, §4).
 
-use crate::{SmdrCallView, SmdrStreamEvent};
+use crate::{SmdrAlert, SmdrCallView, SmdrStreamEvent};
 use std::time::Duration;
 use tokio::sync::{broadcast, mpsc};
 
@@ -17,7 +17,21 @@ pub const SMDR_RELAY_BUFFER: usize = 16;
 pub fn spawn_smdr_relay(
     replay: Vec<SmdrCallView>,
     replay_truncated: u64,
+    live: broadcast::Receiver<SmdrCallView>,
+    heartbeat: Duration,
+) -> mpsc::Receiver<SmdrStreamEvent> {
+    spawn_smdr_relay_with_alerts(replay, replay_truncated, live, None, heartbeat)
+}
+
+/// Same as [`spawn_smdr_relay`], also forwarding S7 alert edges as [`SmdrStreamEvent::Alert`].
+///
+/// A subscriber that falls behind on alerts gets no lag event for them: the active set is
+/// always readable from `smdr_status`, so a missed edge is recovered by one status call.
+pub fn spawn_smdr_relay_with_alerts(
+    replay: Vec<SmdrCallView>,
+    replay_truncated: u64,
     mut live: broadcast::Receiver<SmdrCallView>,
+    mut alerts: Option<broadcast::Receiver<SmdrAlert>>,
     heartbeat: Duration,
 ) -> mpsc::Receiver<SmdrStreamEvent> {
     let (tx, rx) = mpsc::channel(SMDR_RELAY_BUFFER);
@@ -53,6 +67,14 @@ pub fn spawn_smdr_relay(
                     }
                     Err(broadcast::error::RecvError::Closed) => return,
                 },
+                got = next_alert(&mut alerts) => match got {
+                    Ok(alert) => SmdrStreamEvent::Alert { alert },
+                    Err(broadcast::error::RecvError::Lagged(_missed)) => continue,
+                    Err(broadcast::error::RecvError::Closed) => {
+                        alerts = None;
+                        continue;
+                    }
+                },
                 _tick = beat.tick() => SmdrStreamEvent::Heartbeat,
             };
             if tx.send(event).await.is_err() {
@@ -61,6 +83,15 @@ pub fn spawn_smdr_relay(
         }
     });
     rx
+}
+
+async fn next_alert(
+    alerts: &mut Option<broadcast::Receiver<SmdrAlert>>,
+) -> Result<SmdrAlert, broadcast::error::RecvError> {
+    match alerts {
+        Some(rx) => rx.recv().await,
+        None => std::future::pending().await,
+    }
 }
 
 #[cfg(test)]
@@ -140,6 +171,27 @@ mod tests {
             SmdrStreamEvent::Lagged { skipped: 40 }
         );
         assert_eq!(id(&rx.recv().await.unwrap()), Some(9));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn alert_edges_are_forwarded_as_alert_events() {
+        let (_calls, live) = broadcast::channel(crate::SMDR_BUS_CAPACITY);
+        let (alert_tx, alerts) = broadcast::channel(4);
+        let mut rx = spawn_smdr_relay_with_alerts(
+            Vec::new(),
+            0,
+            live,
+            Some(alerts),
+            Duration::from_secs(3600),
+        );
+        let alert = SmdrAlert {
+            kind: crate::SmdrAlertKind::LineSilence,
+            state: crate::SmdrAlertState::Raised {
+                since: "2026-11-02T18:00:00.000Z".into(),
+            },
+        };
+        alert_tx.send(alert.clone()).unwrap();
+        assert_eq!(rx.recv().await.unwrap(), SmdrStreamEvent::Alert { alert });
     }
 
     #[tokio::test]
