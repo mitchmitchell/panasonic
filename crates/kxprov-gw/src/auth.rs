@@ -170,8 +170,18 @@ pub async fn effective_scopes(record: &McpTokenRecord, backend: &dyn DaemonBacke
         scopes: base.clone(),
         bearer: record.bearer.clone(),
     });
-    let profile = match backend.status(&probe).await {
-        Ok(s) => s.profile,
+    scopes_for_pulled_profile(record, backend.status(&probe).await.map(|s| s.profile))
+}
+
+/// Scopes for `record` given the result of pulling the daemon profile. A failed pull yields
+/// the role's base scopes, so Sim-only scopes are withheld when the profile is unknown.
+pub fn scopes_for_pulled_profile<E>(
+    record: &McpTokenRecord,
+    pulled: Result<Profile, E>,
+) -> ScopeSet {
+    let base = scopes_for_role(&record.role);
+    let profile = match pulled {
+        Ok(p) => p,
         Err(_profile_unknown_so_sim_only_scopes_are_withheld) => return base,
     };
     let widened = scopes_for_role_on(&record.role, profile);
@@ -249,6 +259,15 @@ mod verify_tests {
             assert_eq!(scopes.allows_call_log(), want, "{profile:?}");
             assert!(!scopes.allows_write(), "{profile:?}");
         }
+    }
+
+    #[test]
+    fn failed_profile_pull_gives_tester_base_scopes_without_call_log() {
+        let tester = record("tester");
+        let scopes = scopes_for_pulled_profile(&tester, Err::<Profile, _>("daemon unreachable"));
+        assert_eq!(scopes, scopes_for_role("tester"));
+        assert!(!scopes.allows_call_log());
+        assert!(scopes_for_pulled_profile(&tester, Ok::<_, ()>(Profile::Sim)).allows_call_log());
     }
 
     #[tokio::test]

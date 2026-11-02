@@ -15,6 +15,9 @@ pub const DEFAULT_RANGE_MS: i64 = 24 * 60 * 60 * 1000;
 const DAY_MS: i64 = 24 * 60 * 60 * 1000;
 /// Extra length allowed on a [`MAX_RANGE_DAYS`] window: one hour, so 31 local calendar days
 /// that span a fall daylight-saving change (25-hour day) still fit.
+///
+/// The cap is measured as UTC elapsed milliseconds (`until_ms - since_ms`), never in local
+/// wall-clock time, so a spring-forward window (31 days minus one hour) is always inside it.
 pub const DST_SLACK_MS: i64 = 60 * 60 * 1000;
 
 /// Typed failures for call-log reads.
@@ -410,6 +413,38 @@ mod tests {
         );
         p.since_ms = p.until_ms;
         assert_eq!(p.validate(), Err(SmdrApiError::BadRange));
+    }
+
+    fn window(since_ms: i64, until_ms: i64) -> SmdrQueryParams {
+        let mut p = SmdrQueryParams::with_defaults(None, Some(until_ms), 0);
+        p.since_ms = since_ms;
+        p
+    }
+
+    const OVER_SLACK_MS: i64 = 3_660_000;
+
+    #[test]
+    fn cap_is_utc_elapsed_across_spring_forward() {
+        let since = 1_771_567_200_000;
+        let until = 1_774_242_000_000;
+        assert_eq!(until - since, 31 * DAY_MS - 3_600_000);
+        assert_eq!(window(since, until).validate(), Ok(()));
+        assert_eq!(
+            window(since, since + 31 * DAY_MS + OVER_SLACK_MS).validate(),
+            Err(SmdrApiError::RangeTooLarge { max_days: 31 })
+        );
+    }
+
+    #[test]
+    fn cap_is_utc_elapsed_across_fall_back() {
+        let since = 1_792_040_400_000;
+        let until = 1_794_722_400_000;
+        assert_eq!(until - since, 31 * DAY_MS + 3_600_000);
+        assert_eq!(window(since, until).validate(), Ok(()));
+        assert_eq!(
+            window(since, since + 31 * DAY_MS + OVER_SLACK_MS).validate(),
+            Err(SmdrApiError::RangeTooLarge { max_days: 31 })
+        );
     }
 
     #[test]
