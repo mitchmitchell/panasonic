@@ -3,7 +3,10 @@
   if (!marker || !window.EventSource) {
     return;
   }
-  var source = new EventSource("/calls/stream");
+  var since = marker.getAttribute("data-since-id");
+  var source = new EventSource(
+    since ? "/calls/stream?since_id=" + encodeURIComponent(since) : "/calls/stream"
+  );
   var fmt = new Intl.DateTimeFormat("en-CA", {
     timeZone: "America/Chicago",
     year: "numeric", month: "2-digit", day: "2-digit",

@@ -91,6 +91,10 @@ pub struct CallsQuery {
     pub direction: String,
     #[serde(default)]
     pub cursor: String,
+    /// Clock (Unix ms) the first page used, carried on "Older calls" links so the default
+    /// last-24-hours window does not move while paging.
+    #[serde(default)]
+    pub at: String,
 }
 
 pub struct CallRow {
@@ -130,6 +134,8 @@ pub struct CallsTemplate {
     pub next_href: String,
     /// Newest unfiltered page: new calls are added live by `calls.js`.
     pub live_tail: bool,
+    /// Newest call id rendered on the live page; the stream replays calls after it.
+    pub live_since_id: String,
     /// Port state line above the table; empty when the status could not be read.
     pub banner: String,
 }
@@ -314,26 +320,26 @@ fn gap_key(g: &GapWindow) -> &str {
 
 /// Merges gaps into the newest-first calls: each gap sits above the first call older than its end.
 ///
-/// A gap newer than every call on the page shows only on the first page, and one older than
-/// every call shows only on the last page, so paging never repeats a marker.
+/// `after` is the previous page's oldest call time (the cursor), `None` on the first page. A gap
+/// ending after it was shown on an earlier page; any other gap shows on the page holding the
+/// first call older than its end, or on the last page when no call is older, so paging shows
+/// every marker exactly once.
 pub fn entries(
     calls: Vec<SmdrCallView>,
     gaps: &[GapWindow],
-    first_page: bool,
+    after: Option<&str>,
     last_page: bool,
 ) -> Vec<Entry> {
     let mut gaps: Vec<&GapWindow> = gaps.iter().collect();
     gaps.sort_by(|a, b| gap_key(b).cmp(gap_key(a)));
     let mut gaps = gaps.into_iter().peekable();
     let mut out = Vec::new();
-    let mut seen_call = false;
     for c in calls {
         while let Some(g) = gaps.next_if(|g| gap_key(g) > c.rx_ts_utc.as_str()) {
-            if seen_call || first_page {
+            if after.is_none_or(|a| gap_key(g) <= a) {
                 out.push(Entry::Gap(gap_row(g)));
             }
         }
-        seen_call = true;
         out.push(Entry::Call(row(c)));
     }
     if last_page {
@@ -353,9 +359,9 @@ fn enc(s: &str) -> String {
         .collect()
 }
 
-fn next_href(q: &CallsQuery, cursor: &SmdrCursor) -> String {
+fn next_href(q: &CallsQuery, cursor: &SmdrCursor, at_ms: i64) -> String {
     format!(
-        "/calls?from={}&to={}&ext={}&direction={}&cursor={}",
+        "/calls?from={}&to={}&ext={}&direction={}&at={at_ms}&cursor={}",
         enc(q.from.trim()),
         enc(q.to.trim()),
         enc(q.ext.trim()),
@@ -364,9 +370,21 @@ fn next_href(q: &CallsQuery, cursor: &SmdrCursor) -> String {
     )
 }
 
+/// The clock for this page: the first page's `at` when the link carries one that is not in the
+/// future, otherwise now. A malformed `at` is treated as absent.
+fn page_clock(q: &CallsQuery) -> i64 {
+    let now = now_ms();
+    q.at.trim()
+        .parse::<i64>()
+        .ok()
+        .filter(|at| *at <= now)
+        .unwrap_or(now)
+}
+
 fn blank(q: &CallsQuery) -> CallsTemplate {
     CallsTemplate {
         live_tail: false,
+        live_since_id: String::new(),
         banner: String::new(),
         from_value: q.from.clone(),
         to_value: q.to.clone(),
@@ -390,7 +408,8 @@ pub async fn calls_page(
     Query(q): Query<CallsQuery>,
 ) -> Response {
     let mut tpl = blank(&q);
-    let params = match query_from_form(&q, now_ms()) {
+    let clock = page_clock(&q);
+    let params = match query_from_form(&q, clock) {
         Ok(p) => p,
         Err(msg) => {
             tpl.show_error = true;
@@ -403,18 +422,33 @@ pub async fn calls_page(
     if let Ok(status) = client.smdr_status(&caller).await {
         tpl.banner = banner_text(&status.port_mode);
     }
+    let after = params.cursor.as_ref().map(|c| c.rx_ts_utc().to_string());
     match client.smdr_query(&caller, params).await {
         Ok(page) => {
             if let Some(c) = &page.next {
                 tpl.show_next = true;
-                tpl.next_href = next_href(&q, c);
+                tpl.next_href = next_href(&q, c, clock);
             }
             let first_page = q.cursor.trim().is_empty();
             tpl.live_tail = first_page
                 && [&q.to, &q.ext, &q.direction]
                     .iter()
                     .all(|v| v.trim().is_empty());
-            tpl.entries = entries(page.calls, &page.gaps, first_page, page.next.is_none());
+            if tpl.live_tail {
+                tpl.live_since_id = page
+                    .calls
+                    .iter()
+                    .map(|c| c.id)
+                    .max()
+                    .map(|id| id.to_string())
+                    .unwrap_or_default();
+            }
+            tpl.entries = entries(
+                page.calls,
+                &page.gaps,
+                after.as_deref(),
+                page.next.is_none(),
+            );
             crate::render_page(&tpl).into_response()
         }
         Err(e) => {
@@ -468,10 +502,7 @@ fn last_event_id(headers: &HeaderMap) -> Option<i64> {
         Ok(t) => t,
         Err(_non_ascii_header_means_start_live_without_replay) => return None,
     };
-    match text.trim().parse() {
-        Ok(id) => Some(id),
-        Err(_not_an_event_id_this_server_sent_so_start_live) => None,
-    }
+    text.trim().parse().ok()
 }
 
 /// `GET /calls/stream`: Server-Sent Events of new calls. `since_id` or the browser's
@@ -766,7 +797,7 @@ mod tests {
             ),
             gap("live", "2026-11-01T19:00:00.000Z", None),
         ];
-        let all = entries(calls.clone(), &gaps, true, true);
+        let all = entries(calls.clone(), &gaps, None, true);
         let s = shape(&all);
         assert_eq!(s.len(), 6);
         assert!(
@@ -781,12 +812,59 @@ mod tests {
             Entry::Gap(g) => g.href == "https://github.com/mitchmitchell/panasonic/issues/14",
             Entry::Call(_) => true,
         }));
-        let middle = shape(&entries(calls, &gaps, false, false));
+        let middle = shape(&entries(
+            calls.clone(),
+            &gaps,
+            Some("2026-11-01T18:30:00.000Z"),
+            false,
+        ));
         assert_eq!(
             middle.len(),
             4,
             "edge gaps belong to the first and last pages only"
         );
         assert!(middle[1].contains("session mid"));
+    }
+
+    #[test]
+    fn a_gap_on_a_page_boundary_shows_once_on_the_later_page() {
+        let gaps = [gap(
+            "edge",
+            "2026-11-01T14:30:00.000Z",
+            Some("2026-11-01T15:00:00.000Z"),
+        )];
+        let first = shape(&entries(
+            vec![
+                view(3, "2026-11-01T18:00:00.000Z"),
+                view(2, "2026-11-01T16:00:00.000Z"),
+            ],
+            &gaps,
+            None,
+            false,
+        ));
+        let second = shape(&entries(
+            vec![view(1, "2026-11-01T14:00:00.000Z")],
+            &gaps,
+            Some("2026-11-01T16:00:00.000Z"),
+            true,
+        ));
+        assert_eq!(
+            first.iter().filter(|e| e.contains("session edge")).count(),
+            0
+        );
+        assert_eq!(second.len(), 2);
+        assert!(second[0].contains("session edge"), "{}", second[0]);
+    }
+
+    #[test]
+    fn page_clock_keeps_a_past_at_and_ignores_future_or_garbage() {
+        let q = |at: &str| CallsQuery {
+            at: at.into(),
+            ..CallsQuery::default()
+        };
+        assert_eq!(page_clock(&q("1000")), 1000);
+        let now = now_ms();
+        assert!(page_clock(&q(&(now + 86_400_000).to_string())) >= now);
+        assert!(page_clock(&q("soon")) >= now);
     }
 }

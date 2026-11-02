@@ -156,3 +156,31 @@ async fn bad_filters_are_400_with_a_message() {
         assert!(!html.contains("<script>"), "{uri}");
     }
 }
+
+#[tokio::test]
+async fn older_link_pins_the_clock_and_live_page_names_its_newest_call() {
+    let now = chrono::Utc::now();
+    let calls: Vec<SmdrCallView> = (1..=150)
+        .map(|i| {
+            let t = (now - chrono::Duration::seconds(3600 + 150 - i))
+                .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+            call(i, &t, &format!("555{i:04}"), "x")
+        })
+        .collect();
+    let (_, html) = get(app(calls).await, "/calls").await;
+    assert!(html.contains("data-since-id=\"150\""), "{html}");
+    let href = html
+        .split("<a href=\"")
+        .find(|s| s.starts_with("/calls?"))
+        .and_then(|s| s.split('"').next())
+        .unwrap()
+        .replace("&amp;", "&");
+    let at: i64 = href
+        .split("at=")
+        .nth(1)
+        .and_then(|s| s.split('&').next())
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!((now.timestamp_millis() - at).abs() < 60_000, "{href}");
+}
