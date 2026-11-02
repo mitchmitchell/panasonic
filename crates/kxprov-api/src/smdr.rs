@@ -242,7 +242,10 @@ impl SmdrQueryParams {
     }
 }
 
-/// One stored call as shown to callers. Carries no raw line.
+/// One stored call as shown to callers (every caller holds the CallLog scope).
+///
+/// `raw` is the PBX's SMDR line exactly as received, including the CD column, uninterpreted
+/// (#97). No answered/unanswered or mapped-CD field is derived from it; #95 tracks a mapped enum.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SmdrCallView {
     pub id: i64,
@@ -256,6 +259,8 @@ pub struct SmdrCallView {
     pub ring_s: Option<u32>,
     pub duration_s: Option<u32>,
     pub acc: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw: Option<String>,
 }
 
 /// Tracking issue for calls the PBX may not report while the reader is paused for programming.
@@ -340,6 +345,10 @@ pub struct SmdrSubscribed {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 #[non_exhaustive]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "Call is the event sent almost every time; boxing it would only add an allocation per call"
+)]
 pub enum SmdrStreamEvent {
     Call {
         call: SmdrCallView,
@@ -467,7 +476,7 @@ mod tests {
     }
 
     #[test]
-    fn call_view_has_no_raw_or_answered_field() {
+    fn call_view_has_raw_line_but_no_answered_or_mapped_cd_field() {
         let v = SmdrCallView {
             id: 1,
             rx_ts_utc: "2026-11-01T12:00:00.000Z".into(),
@@ -480,6 +489,7 @@ mod tests {
             ring_s: None,
             duration_s: Some(3),
             acc: None,
+            raw: Some("RAW".into()),
         };
         let json = serde_json::to_value(&v).expect("serialize");
         let keys: Vec<&str> = json
@@ -502,10 +512,11 @@ mod tests {
                 "id",
                 "number",
                 "pbx_local",
+                "raw",
                 "ring_s",
                 "rx_ts_utc",
             ],
-            "exact field set: no raw, cd or answered field"
+            "exact field set: raw line only, no cd or answered field"
         );
     }
 }

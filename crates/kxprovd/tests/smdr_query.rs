@@ -199,7 +199,7 @@ fn locked_writer_reports_store_unavailable() {
 }
 
 #[test]
-fn rows_never_carry_the_raw_line() {
+fn rows_carry_the_raw_line_but_no_interpreted_cd() {
     let tmp = tempfile::tempdir().unwrap();
     let db = setup(&tmp);
     insert(&db, base(), "101", "in", "1");
@@ -209,6 +209,10 @@ fn rows_never_carry_the_raw_line() {
         &params(50),
     )
     .unwrap();
-    let json = serde_json::to_string(&page).unwrap();
-    assert!(!json.contains("RAW-SECRET"), "{json}");
+    assert_eq!(page.calls[0].raw.as_deref(), Some("RAW-SECRET"));
+    let json = serde_json::to_value(&page).unwrap();
+    let call = &json["calls"][0];
+    for absent in ["answered", "cd", "disposition"] {
+        assert!(call.get(absent).is_none(), "{absent}: {call}");
+    }
 }

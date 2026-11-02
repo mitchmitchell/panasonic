@@ -1458,6 +1458,7 @@ mod smdr_dispatch_tests {
             ring_s: None,
             duration_s: Some(5),
             acc: None,
+            raw: None,
         }
     }
 

@@ -32,6 +32,7 @@ fn call(id: i64, rx_ts: &str, number: &str, cid: &str) -> SmdrCallView {
         ring_s: Some(4),
         duration_s: Some(30),
         acc: None,
+        raw: None,
     }
 }
 

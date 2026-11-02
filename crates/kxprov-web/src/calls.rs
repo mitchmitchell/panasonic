@@ -595,6 +595,7 @@ mod tests {
             ring_s: None,
             duration_s: None,
             acc: None,
+            raw: None,
         }
     }
 

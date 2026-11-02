@@ -137,7 +137,7 @@ fn direction_wire(d: CallDirection) -> &'static str {
 }
 
 const VIEW_COLUMNS: &str = "id, rx_ts_utc, pbx_local, ext, co, direction, number, cid_text,
-                    ring_s, duration_s, acc";
+                    ring_s, duration_s, acc, raw";
 
 fn read_view(r: &rusqlite::Row<'_>) -> rusqlite::Result<(String, SmdrCallView)> {
     let dir: String = r.get(5)?;
@@ -155,6 +155,7 @@ fn read_view(r: &rusqlite::Row<'_>) -> rusqlite::Result<(String, SmdrCallView)> 
             ring_s: r.get(8)?,
             duration_s: r.get(9)?,
             acc: non_empty(r.get(10)?),
+            raw: Some(r.get(11)?),
         },
     ))
 }
@@ -255,9 +256,8 @@ pub fn query(db: &Path, journal: &Path, p: &SmdrQueryParams) -> Result<SmdrPage,
         None => (None, None),
     };
     let mut stmt = conn
-        .prepare_cached(
-            "SELECT id, rx_ts_utc, pbx_local, ext, co, direction, number, cid_text,
-                    ring_s, duration_s, acc
+        .prepare_cached(&format!(
+            "SELECT {VIEW_COLUMNS}
              FROM smdr_call
              WHERE parse_ok = 1
                AND rx_ts_utc >= ?1 AND rx_ts_utc < ?2
@@ -265,8 +265,8 @@ pub fn query(db: &Path, journal: &Path, p: &SmdrQueryParams) -> Result<SmdrPage,
                AND (?4 IS NULL OR direction = ?4)
                AND (?5 IS NULL OR rx_ts_utc < ?5 OR (rx_ts_utc = ?5 AND id < ?6))
              ORDER BY rx_ts_utc DESC, id DESC
-             LIMIT ?7",
-        )
+             LIMIT ?7"
+        ))
         .map_err(store_err)?;
     let rows = stmt
         .query_map(
@@ -361,7 +361,7 @@ mod tests {
             .unwrap()
             .to_string();
         store
-            .ingest(SmdrLine::new(raw), rx("2026-11-01T12:00:00Z"))
+            .ingest(SmdrLine::new(raw.clone()), rx("2026-11-01T12:00:00Z"))
             .expect("fixture record ingests");
         store
             .ingest(
@@ -385,6 +385,11 @@ mod tests {
         assert_eq!(c.co, "01");
         assert_eq!(c.direction, CallDirection::Outgoing);
         assert_eq!(c.number, "5551230000");
+        assert_eq!(
+            c.raw.as_deref(),
+            Some(raw.as_str()),
+            "#97: raw line as received"
+        );
         assert!(page.next.is_none());
     }
 

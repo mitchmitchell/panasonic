@@ -415,6 +415,7 @@ mod smdr_tool_tests {
                     ring_s: None,
                     duration_s: Some(10),
                     acc: None,
+                    raw: Some(format!("RAW LINE {i}")),
                 },
             )
             .await;
@@ -514,5 +515,25 @@ mod smdr_tool_tests {
             )
             .await;
         assert!(bad.is_err());
+    }
+
+    #[tokio::test]
+    async fn call_log_tokens_including_bots_see_the_raw_line() {
+        let server = server_with_calls(1).await;
+        let who = caller(scopes_for_role("bots"));
+        let r = MCP_CALLER
+            .scope(who, server.smdr_query(Parameters(params(None, None))))
+            .await
+            .unwrap();
+        let text = serde_json::to_value(&r.content).unwrap()[0]["text"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let json: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let call = &json["calls"][0];
+        assert_eq!(call["raw"], "RAW LINE 1");
+        for absent in ["answered", "cd", "disposition"] {
+            assert!(call.get(absent).is_none(), "{absent}");
+        }
     }
 }
