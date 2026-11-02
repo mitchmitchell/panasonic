@@ -142,7 +142,14 @@ pub fn live_caller_id_digest(
     Ok(caller_id_wire_digest(&wire))
 }
 
+/// Prefix of the port-lease holder id for the enter-Production live caller-id check.
 pub const SET_MODE_HOLDER: &str = "set-mode-production-verify";
+
+/// Returns a fresh per-request lease holder id for an enter-Production check, so the lease
+/// journal can tell concurrent or repeated requests apart (#74).
+pub fn set_mode_holder() -> String {
+    format!("{SET_MODE_HOLDER}-{}", crate::queue::next_job_id())
+}
 
 /// N2: entering Production — compare live 0x24/0x25 to latest **Production-mode** backup.
 pub fn verify_enter_production(
@@ -153,7 +160,7 @@ pub fn verify_enter_production(
     let expected = backups
         .latest_prod_caller_id_digest()
         .ok_or(TransitionError::NoDigest)?;
-    let live = live_caller_id_digest(config, port, SET_MODE_HOLDER)?;
+    let live = live_caller_id_digest(config, port, &set_mode_holder())?;
     if live != expected {
         return Err(TransitionError::Mismatch);
     }
@@ -193,5 +200,21 @@ pub fn verify_enter_production_or_block(
             Err(e)
         }
         Err(e @ TransitionError::BlockPersist(_)) => Err(e),
+    }
+}
+
+#[cfg(test)]
+mod holder_tests {
+    use super::{set_mode_holder, SET_MODE_HOLDER};
+    use crate::api::{apply_preflight_holder, APPLY_PREFLIGHT_HOLDER};
+
+    #[test]
+    fn lease_holders_outside_the_worker_are_unique_per_request() {
+        let (a, b) = (set_mode_holder(), set_mode_holder());
+        assert_ne!(a, b);
+        assert!(a.starts_with(SET_MODE_HOLDER), "{a}");
+        let (c, d) = (apply_preflight_holder(), apply_preflight_holder());
+        assert_ne!(c, d);
+        assert!(c.starts_with(APPLY_PREFLIGHT_HOLDER), "{c}");
     }
 }
