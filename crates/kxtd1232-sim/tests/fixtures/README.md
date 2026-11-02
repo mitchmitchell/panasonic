@@ -2,7 +2,7 @@
 
 **All bytes are synthetic**, derived from the KX-TD1232 **behavior spec** and design v2.2 §6/§9b.
 No byte is copied from live captures or a real unit. The `sessions/` files keep only the frame
-order, direction, type, length and relative timing of two read-only captures (see below).
+order, direction, type, length, plan index and relative timing of two read-only captures (see below).
 
 | File | Role | Provenance |
 |---|---|---|
@@ -16,14 +16,14 @@ order, direction, type, length and relative timing of two read-only captures (se
 - Binary phase of the read path only. Sign-on text (banner, prompt, password), `BYE`, every write
   and upload frame and the `0A`/`10` end-of-upload frames are dropped entirely.
 - Kept per frame: `t_ms` (ms since the first binary frame), `dir` (`host`/`pbx`), `type`, `len`.
-- `frame` is synthetic. Host frames are the read-plan and probe headers from the spec. Every pbx
-  frame is what `SimPbx` (`synthetic_db()`, `PLACEHOLDER_ROM_ID`) answers to that host frame, with
-  the checksum computed over the synthetic bytes, so no checksum carries information about the
-  original payload. Each synthetic reply was checked to have the same length and type as the
-  observed one (all 1,530 frames match; the 85 end-of-table refusals land on the same requests).
+  Host `read_req` rows add `plan` (index into `read-plan-headers.json`; the repeated end-of-table
+  probes share their request's index). Host `probe` rows add `probe` (`version` or `status`).
+- No frame bytes are stored. `tests/read_sessions.rs` rebuilds every host frame from the read
+  plan and the spec encoder, sends it to `SimPbx` (`synthetic_db()`, `PLACEHOLDER_ROM_ID`) and
+  checks each reply's type and length against the recorded row (all 1,530 frames match; the
+  85 end-of-table refusals land on the same requests). This keeps the files clear of the
+  `no_vendor_header` hex-run rule.
 - The repeated end-of-table probes (5 per table) are kept as they were sent, for timing.
-- The empty caller-ID slots in tables 0x24/0x25 encode the same way in the synthetic database as
-  the spec's empty encoding, so those frames are identical by construction, not by copying.
 
 Exchange steps and full-upload **headers** live under `crates/kxtd1232/tests/fixtures/` (shared
 with the core contract tests). This crate references those paths in `tests/fixtures.rs` only.
