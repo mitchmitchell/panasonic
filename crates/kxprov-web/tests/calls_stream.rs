@@ -190,3 +190,66 @@ async fn newest_unfiltered_page_loads_the_live_script_and_filtered_pages_do_not(
     let js = page("/static/calls.js").await;
     assert!(js.contains("EventSource") && !js.contains("innerHTML"));
 }
+
+async fn add_dated(mock: &MockDaemon, c: SmdrCallView) {
+    let ms = chrono::DateTime::parse_from_rfc3339(&c.rx_ts_utc)
+        .unwrap()
+        .timestamp_millis();
+    mock.test_add_call(ms, c).await;
+}
+
+async fn page_body(app: &Router, uri: &str) -> (StatusCode, String) {
+    let resp = open(app, uri, None).await;
+    let status = resp.status();
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    (status, String::from_utf8_lossy(&bytes).into_owned())
+}
+
+#[tokio::test]
+async fn banner_names_every_port_state_and_paused_still_serves_history() {
+    use kxprov_api::DownReason;
+    let mock = Arc::new(MockDaemon::new());
+    add_dated(&mock, call(1)).await;
+    let app = app(Arc::clone(&mock));
+    let cases = [
+        (PortModeView::Listening, "Listening"),
+        (
+            PortModeView::PausedForProgramming {
+                job_id: "job-9".into(),
+            },
+            "Paused for programming session (job job-9)",
+        ),
+        (
+            PortModeView::Down {
+                reason: DownReason::ReaderNotRunning,
+            },
+            "Port down: reader not running",
+        ),
+        (
+            PortModeView::Down {
+                reason: DownReason::LinkDown,
+            },
+            "Port down: link down",
+        ),
+    ];
+    for (mode, text) in cases {
+        mock.test_set_port_mode(mode).await;
+        let (status, html) = page_body(&app, "/calls?from=2026-10-01&to=2026-10-31").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(html.contains(&format!(">{text}</p>")), "{text}: {html}");
+        assert!(html.contains("5550001"), "history hidden for {text}");
+    }
+}
+
+#[tokio::test]
+async fn disabled_port_hides_history_and_says_port_disabled() {
+    let mock = Arc::new(MockDaemon::new());
+    add_dated(&mock, call(1)).await;
+    mock.test_set_port_mode(PortModeView::Disabled).await;
+    let app = app(Arc::clone(&mock));
+    let (_, html) = page_body(&app, "/calls?from=2026-10-01&to=2026-10-31").await;
+    assert!(html.contains(">Port disabled</p>"), "{html}");
+    assert!(!html.contains("5550001"), "{html}");
+    let stream = open(&app, "/calls/stream", None).await;
+    assert_ne!(stream.status(), StatusCode::OK);
+}

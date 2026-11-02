@@ -8,6 +8,9 @@
   {% include "_header.html" %}
   <main>
     <h1>Call log</h1>
+    {% if !banner.is_empty() %}
+    <p class="port-banner" role="status">{{ banner }}</p>
+    {% endif %}
     <p class="help">Calls the phone system reported, newest first. Times are US Central. This page is read-only.</p>
     <form method="get" action="/calls" class="calls-filter">
       <label>

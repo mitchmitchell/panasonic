@@ -130,6 +130,29 @@ pub struct CallsTemplate {
     pub next_href: String,
     /// Newest unfiltered page: new calls are added live by `calls.js`.
     pub live_tail: bool,
+    /// Port state line above the table; empty when the status could not be read.
+    pub banner: String,
+}
+
+/// Banner text for each port state (design §5).
+pub fn banner_text(mode: &kxprov_api::PortModeView) -> String {
+    use kxprov_api::{DownReason, PortModeView};
+    match mode {
+        PortModeView::Listening => "Listening".into(),
+        PortModeView::PausedForProgramming { job_id } => {
+            format!("Paused for programming session (job {job_id})")
+        }
+        PortModeView::Disabled => "Port disabled".into(),
+        PortModeView::Down { reason } => {
+            let why = match reason {
+                DownReason::ReaderNotRunning => "reader not running",
+                DownReason::LinkDown => "link down",
+                _newer_reason_shown_generically => "unknown reason",
+            };
+            format!("Port down: {why}")
+        }
+        _newer_state_shown_generically => "Port state unknown".into(),
+    }
 }
 
 fn chicago_midnight_ms(day: NaiveDate) -> Option<i64> {
@@ -344,6 +367,7 @@ fn next_href(q: &CallsQuery, cursor: &SmdrCursor) -> String {
 fn blank(q: &CallsQuery) -> CallsTemplate {
     CallsTemplate {
         live_tail: false,
+        banner: String::new(),
         from_value: q.from.clone(),
         to_value: q.to.clone(),
         ext_value: q.ext.clone(),
@@ -376,6 +400,9 @@ pub async fn calls_page(
     };
     let caller = crate::caller_from_session(&session);
     let client = kxprov_mock::ReadOnlyPbxClient::new(state.backend.clone());
+    if let Ok(status) = client.smdr_status(&caller).await {
+        tpl.banner = banner_text(&status.port_mode);
+    }
     match client.smdr_query(&caller, params).await {
         Ok(page) => {
             if let Some(c) = &page.next {

@@ -493,6 +493,9 @@ impl DaemonBackend for MockDaemon {
         Self::require_scope(caller, Scope::CallLog)?;
         let live = self.calls_tx.subscribe();
         let inner = self.inner.read().await;
+        if inner.port_mode == PortModeView::Disabled {
+            return Err(BackendError::CallLog(kxprov_api::SmdrApiError::Disabled));
+        }
         let mut replay: Vec<SmdrCallView> = match since_id {
             Some(after) => inner
                 .calls
@@ -519,6 +522,9 @@ impl DaemonBackend for MockDaemon {
         Self::require_scope(caller, Scope::CallLog)?;
         params.validate().map_err(BackendError::CallLog)?;
         let inner = self.inner.read().await;
+        if inner.port_mode == PortModeView::Disabled {
+            return Err(BackendError::CallLog(kxprov_api::SmdrApiError::Disabled));
+        }
         let after_cursor = |c: &SmdrCallView| match &params.cursor {
             Some(cur) => (c.rx_ts_utc.as_str(), c.id) < (cur.rx_ts_utc(), cur.id()),
             None => true,

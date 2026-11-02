@@ -107,6 +107,10 @@ async fn smdr_subscribe<W: tokio::io::AsyncWrite + Unpin>(
         write_response(&mut w, &err_response(env.id.clone(), e)).await?;
         return Ok(());
     }
+    if !state.config.smdr.enabled {
+        write_response(&mut w, &err_response(env.id.clone(), smdr_disabled())).await?;
+        return Ok(());
+    }
     let live = state.smdr.subscribe();
     let db = crate::smdr_api::db_path(&state.config.data_dir);
     let replay = tokio::task::spawn_blocking(move || {
@@ -477,10 +481,18 @@ fn require_access(
     }
 }
 
+fn smdr_disabled() -> ApiErrorBody {
+    let e = kxprov_api::SmdrApiError::Disabled;
+    api_err(e.code(), &e.to_string())
+}
+
 async fn smdr_query(
     state: &ApiState,
     params: kxprov_api::SmdrQueryParams,
 ) -> Result<ResponseResult, ApiErrorBody> {
+    if !state.config.smdr.enabled {
+        return Err(smdr_disabled());
+    }
     let db = crate::smdr_api::db_path(&state.config.data_dir);
     let journal = crate::smdr_api::lease_journal_path(&state.config.data_dir);
     match tokio::task::spawn_blocking(move || crate::smdr_api::query(&db, &journal, &params)).await
@@ -498,6 +510,9 @@ async fn smdr_query(
 /// Banner state from the port's `mode()`/`holder()` and the reader's own report; no serial I/O.
 pub fn port_mode_view(state: &ApiState) -> kxprov_api::PortModeView {
     use kxprov_api::{DownReason, PortModeView};
+    if !state.config.smdr.enabled {
+        return PortModeView::Disabled;
+    }
     if state.port.mode() == crate::port::PortMode::Programming {
         return PortModeView::PausedForProgramming {
             job_id: state.port.holder().unwrap_or_default(),
@@ -533,7 +548,7 @@ async fn smdr_status(
     with_counters: bool,
 ) -> Result<ResponseResult, ApiErrorBody> {
     let port_mode = port_mode_view(state);
-    if !with_counters {
+    if !with_counters || !state.config.smdr.enabled {
         return Ok(ResponseResult::SmdrStatus(kxprov_api::SmdrStatus {
             port_mode,
             counters: None,
@@ -1561,6 +1576,21 @@ mod smdr_dispatch_tests {
         assert_eq!(st.port.mode(), crate::port::PortMode::Programming);
         assert_eq!(std::fs::read(&journal).unwrap_or_default(), before);
         drop(lease);
+    }
+
+    #[tokio::test]
+    async fn smdr_disabled_in_config_is_a_typed_refusal_everywhere() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut st = state(&tmp);
+        st.config.smdr.enabled = false;
+        let st = Arc::new(st);
+        let q = call(&st, GATEWAY, Some("bots")).await;
+        assert_eq!(q.error.unwrap().code, "smdr_disabled");
+        let s = status_of(&st, "bots").await;
+        assert_eq!(s.port_mode, kxprov_api::PortModeView::Disabled);
+        assert!(s.counters.is_none());
+        let (sub, _) = open_subscription(&st, "bots").await;
+        assert_eq!(sub.error.unwrap().code, "smdr_disabled");
     }
 
     #[tokio::test]
