@@ -2,21 +2,42 @@
 
 #![allow(clippy::unwrap_used)] // tests: a panic is the failure report
 
-use kxtd1232::attempts::{read_tables, Disposition, BACKOFF_MS, MAX_ATTEMPTS};
+use kxtd1232::attempts::{read_tables, Basis, Disposition, BACKOFF_MS, MAX_ATTEMPTS};
 use kxtd1232::client::{Transport, TransportError};
-use kxtd1232::frame::Access;
+use kxtd1232::frame::{Access, Cmd};
 use kxtd1232::{Client, Timing};
 use kxtd1232_sim::{Fault, SimPbx, SimTransport, PLACEHOLDER_PASSWORD};
 
 /// The simulator with a DTR line: a DTR cycle drops the session and the PBX greets
 /// again, as the unit does (serial-signon.md), so each attempt can sign on fresh.
-struct DtrSim(SimTransport);
+///
+/// With `mute_after_password` set, the PBX goes silent once the password line is sent,
+/// as a unit that stops answering mid sign-on would.
+struct DtrSim(SimTransport, Option<&'static str>, bool);
+
+impl DtrSim {
+    fn new() -> Self {
+        Self(SimTransport::new(SimPbx::default()), None, false)
+    }
+
+    fn mute_after_password(password: &'static str) -> Self {
+        Self(SimTransport::new(SimPbx::default()), Some(password), false)
+    }
+}
 
 impl Transport for DtrSim {
     fn send(&mut self, data: &[u8]) -> Result<(), TransportError> {
+        if let Some(pw) = self.1 {
+            if data.starts_with(pw.as_bytes()) && data.ends_with(b"\r") {
+                self.2 = true;
+            }
+        }
         self.0.send(data)
     }
     fn recv(&mut self, timeout_ms: u64) -> Result<Vec<u8>, TransportError> {
+        if self.2 {
+            return Err(TransportError::Timeout);
+        }
         self.0.recv(timeout_ms)
     }
     fn now_ms(&mut self) -> u64 {
@@ -31,11 +52,7 @@ impl Transport for DtrSim {
 const TABLES: [u8; 2] = [0x24, 0x25];
 
 fn client() -> Client<DtrSim> {
-    Client::with(
-        DtrSim(SimTransport::new(SimPbx::default())),
-        Access::ReadOnly,
-        Timing::default(),
-    )
+    Client::with(DtrSim::new(), Access::ReadOnly, Timing::default())
 }
 
 fn expected_tables() -> Vec<Vec<u8>> {
@@ -50,7 +67,7 @@ fn write_commands(c: &Client<DtrSim>) -> usize {
         .sim()
         .commands
         .iter()
-        .filter(|&&b| b == 0x00)
+        .filter(|&&b| b == Cmd::Write.byte())
         .count()
 }
 
@@ -65,10 +82,7 @@ fn nak_then_success_reads_every_table_on_attempt_two() {
     .unwrap();
     assert_eq!(slept, vec![BACKOFF_MS[0]]);
     assert_eq!(ok.attempts.len(), 2);
-    assert_eq!(
-        ok.attempts[0].failure,
-        Some((Disposition::Transient, "Nak"))
-    );
+    assert_eq!(ok.attempts[0].failure, Some((Basis::ReadNak, "Nak")));
     assert_eq!(ok.attempts[0].table, Some(0x24));
     assert_eq!(ok.attempts[0].release_error, None);
     assert_eq!(ok.attempts[1].failure, None);
@@ -94,7 +108,7 @@ fn three_transient_failures_surface_the_error() {
     .unwrap_err();
     assert_eq!(slept, BACKOFF_MS.to_vec());
     assert_eq!(err.attempts.len(), MAX_ATTEMPTS as usize);
-    assert_eq!(err.disposition, Disposition::Transient);
+    assert_eq!(err.disposition(), Disposition::Transient);
     assert!(matches!(err.error, kxtd1232::Error::Nak { code: 0x02, .. }));
     assert!(err.tables.is_empty());
     let releases: Vec<_> = err.attempts.iter().map(|a| a.release_error).collect();
@@ -112,7 +126,7 @@ fn wrong_password_is_definitive_and_sent_once() {
     let err = read_tables(&mut c, "9999", &TABLES, &mut |ms| slept.push(ms)).unwrap_err();
     assert!(slept.is_empty());
     assert_eq!(err.attempts.len(), 1);
-    assert_eq!(err.disposition, Disposition::Definitive);
+    assert_eq!(err.disposition(), Disposition::Definitive);
     assert!(matches!(err.error, kxtd1232::Error::Login(_)));
     let sent = String::from_utf8_lossy(&c.transport().0.sent).into_owned();
     assert_eq!(sent.matches("9999").count(), 1, "password sent once");
@@ -130,7 +144,7 @@ fn refused_in_range_read_is_definitive() {
     .unwrap_err();
     assert!(slept.is_empty());
     assert_eq!(err.attempts.len(), 1);
-    assert_eq!(err.disposition, Disposition::Definitive);
+    assert_eq!(err.disposition(), Disposition::Definitive);
     assert_eq!(err.attempts[0].table, Some(0x24));
 }
 
@@ -150,4 +164,50 @@ fn failed_attempt_in_binary_mode_ends_binary_before_the_next_sign_on() {
         2,
         "one sign-on per attempt"
     );
+}
+
+fn end_binary_frames(c: &Client<DtrSim>) -> usize {
+    let frame = [0x02, Cmd::EndBinary.byte(), 0x0D];
+    c.transport()
+        .0
+        .sent
+        .windows(3)
+        .filter(|w| *w == frame)
+        .count()
+}
+
+#[test]
+fn silence_after_the_password_is_definitive_and_the_password_is_not_resent() {
+    let mut c = Client::with(
+        DtrSim::mute_after_password(PLACEHOLDER_PASSWORD),
+        Access::ReadOnly,
+        Timing::default(),
+    );
+    let mut slept = Vec::new();
+    let err = read_tables(&mut c, PLACEHOLDER_PASSWORD, &TABLES, &mut |ms| {
+        slept.push(ms)
+    })
+    .unwrap_err();
+    assert!(slept.is_empty());
+    assert_eq!(err.attempts.len(), 1);
+    assert_eq!(err.basis, Basis::PasswordMaybeSent);
+    let sent = String::from_utf8_lossy(&c.transport().0.sent).into_owned();
+    assert_eq!(sent.matches(PLACEHOLDER_PASSWORD).count(), 1);
+}
+
+#[test]
+fn failed_sign_on_after_a_failed_release_sends_no_stale_end_binary() {
+    let mut c = client();
+    c.transport_mut().0.sim_mut().inject(Fault::Nak);
+    c.transport_mut().0.sim_mut().inject(Fault::Nak);
+    c.transport_mut()
+        .0
+        .sim_mut()
+        .inject(Fault::AnotherTerminal("<TERMINAL_IN_USE>".into()));
+    let err = read_tables(&mut c, PLACEHOLDER_PASSWORD, &TABLES, &mut |_| {}).unwrap_err();
+    assert_eq!(err.attempts.len(), 2);
+    assert!(err.attempts[0].release_error.is_some());
+    assert_eq!(err.basis, Basis::SessionRefused);
+    assert_eq!(err.attempts[1].release_error, None);
+    assert_eq!(end_binary_frames(&c), 1, "only attempt 1's release");
 }
