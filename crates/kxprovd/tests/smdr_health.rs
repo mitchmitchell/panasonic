@@ -281,7 +281,11 @@ fn cts_low_is_debounced_both_ways_and_disabled_or_unreadable_cts_never_alerts() 
     assert_eq!(cts.high, Some(false), "5. disabled still reports CTS");
 
     let mut err = Rig::new(cfg(true));
-    let failed = || Observation::ModemStatus(Err(ModemStatusError("EIO".into())));
+    let failed = || {
+        Observation::ModemStatus(Err(ModemStatusError::from(&std::io::Error::from(
+            std::io::ErrorKind::BrokenPipe,
+        ))))
+    };
     assert!(err.observe(low(), s(0)).is_empty());
     assert!(err.observe(failed(), s(20)).is_empty());
     assert!(err.observe(low(), s(25)).is_empty());
@@ -298,7 +302,7 @@ fn cts_low_is_debounced_both_ways_and_disabled_or_unreadable_cts_never_alerts() 
     assert_eq!(cts.high, None, "6. an error is neither high nor low");
     assert_eq!(
         cts.read_error.as_deref(),
-        Some("EIO"),
+        Some("modem status read failed: broken pipe"),
         "6. error visible in status"
     );
 }
@@ -349,18 +353,34 @@ fn header_mismatch_raises_once_and_clears_on_the_s4_matched_signal() {
     assert!(r.active().is_empty(), "4. matching header clears");
 }
 
+fn data_version(db: &rusqlite::Connection) -> i64 {
+    db.query_row("PRAGMA data_version", [], |row| row.get(0))
+        .unwrap()
+}
+
 #[test]
 fn evaluation_writes_nothing_to_sqlite_or_the_port() {
     let mut r = Rig::new(cfg(true));
-    let db = r._tmp.path().join(kxprovd::smdr_store::SMDR_DB_NAME);
-    let before = std::fs::read(&db).unwrap_or_default();
+    let path = r.store.dir().join(kxprovd::smdr_store::SMDR_DB_NAME);
+    assert!(path.is_file(), "store db at {}", path.display());
+    let watcher = rusqlite::Connection::open(&path).unwrap();
     let calls = r.store.call_count().unwrap();
+    let before = data_version(&watcher);
     for i in 0..50u32 {
         let at = SILENCE * i;
-        let _edges = r.observe(Observation::ModemStatus(Ok(i % 2 == 0)), at);
-        let _edges = r.observe(Observation::HeaderMismatch, at);
-        let _edges = r.run(at);
+        let _edges_not_under_test = r.observe(Observation::ModemStatus(Ok(i % 2 == 0)), at);
+        let _edges_not_under_test = r.observe(Observation::HeaderMismatch, at);
+        let _edges_not_under_test = r.observe(Observation::HeaderMatched, at);
+        let _edges_not_under_test = r.run(at);
     }
     assert_eq!(r.store.call_count().unwrap(), calls);
-    assert_eq!(std::fs::read(&db).unwrap_or_default(), before);
+    assert_eq!(data_version(&watcher), before, "alert evaluation committed to SQLite");
+
+    let line = SmdrLine::new(call(42).to_line().unwrap());
+    r.store.ingest(line, wall()).unwrap();
+    assert_ne!(
+        data_version(&watcher),
+        before,
+        "the watcher sees a real ingest, so the check above can fail"
+    );
 }

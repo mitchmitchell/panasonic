@@ -43,7 +43,7 @@ pub enum PortState {
 /// A modem-status read that failed. Keeps the `io::ErrorKind`; text is rendered only for
 /// `smdr_status`.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error("modem status read failed: {detail} ({kind})")]
+#[error("modem status read failed: {detail}")]
 pub struct ModemStatusError {
     pub kind: std::io::ErrorKind,
     pub detail: String,

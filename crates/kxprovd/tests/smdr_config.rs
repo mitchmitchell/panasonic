@@ -67,7 +67,8 @@ fn health_thresholds_default_and_load_from_config() {
         r#","smdr":{"silence_alert_after":600,"cts_low_alert_after":5,"cts_monitor":false}"#,
     ))
     .unwrap();
-    let health = set.smdr.health().unwrap();
+    let health = set.smdr_health;
+    assert_eq!(set.smdr.health().unwrap(), health);
     assert_eq!(health.silence_after, Duration::from_secs(600));
     assert_eq!(health.cts_low_after, Duration::from_secs(5));
     assert!(!health.cts_monitor);
