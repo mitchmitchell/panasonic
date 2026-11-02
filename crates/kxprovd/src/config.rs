@@ -58,12 +58,14 @@ pub struct Config {
     pub sim_pbx: Option<Arc<Mutex<SimPbx>>>,
     pub tokens_path: PathBuf,
     pub smdr: SmdrConfig,
+    /// S7 thresholds, parsed once from `smdr` at load so the daemon never holds an unusable value.
+    pub smdr_health: crate::smdr_health::HealthConfig,
 }
 
 /// Call-log settings, `"smdr": { "enabled": false }` in the daemon config. Absent means on.
 ///
-/// Thresholds are whole seconds and must be positive; [`Config::validate`] rejects anything
-/// else, naming the key.
+/// Thresholds are whole seconds and must be positive. [`Config::load_from_etc`] parses them
+/// into [`Config::smdr_health`] and rejects anything else, naming the key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct SmdrConfig {
@@ -91,13 +93,7 @@ impl Default for SmdrConfig {
 }
 
 impl SmdrConfig {
-    pub fn validate(&self) -> Result<(), ConfigError> {
-        positive("smdr.silence_alert_after", self.silence_alert_after)?;
-        positive("smdr.cts_low_alert_after", self.cts_low_alert_after)?;
-        Ok(())
-    }
-
-    /// Thresholds for the S7 health monitor. Call after [`SmdrConfig::validate`].
+    /// Parses the S7 thresholds; the only place they are checked.
     pub fn health(&self) -> Result<crate::smdr_health::HealthConfig, ConfigError> {
         Ok(crate::smdr_health::HealthConfig {
             silence_after: positive("smdr.silence_alert_after", self.silence_alert_after)?,
@@ -327,7 +323,6 @@ impl std::fmt::Debug for Config {
 impl Config {
     pub fn validate(&self) -> Result<(), ConfigError> {
         self.timing.validate()?;
-        self.smdr.validate()?;
         if self.gateway_uid == self.admin_uid {
             return Err(ConfigError::UidsMustDiffer);
         }
@@ -388,6 +383,7 @@ impl Config {
             signon,
             sim_pbx,
             tokens_path: file.tokens_path,
+            smdr_health: file.smdr.health()?,
             smdr: file.smdr,
         };
         cfg.validate()?;
@@ -419,6 +415,7 @@ impl Config {
             sim_pbx: Some(Arc::new(Mutex::new(SimPbx::default()))),
             tokens_path: data_dir.join("tokens.json"),
             smdr: SmdrConfig::default(),
+            smdr_health: crate::smdr_health::HealthConfig::default(),
         }
     }
 
@@ -452,6 +449,7 @@ impl Config {
             sim_pbx: Some(Arc::new(Mutex::new(SimPbx::default()))),
             tokens_path: data_dir.join("tokens.json"),
             smdr: SmdrConfig::default(),
+            smdr_health: crate::smdr_health::HealthConfig::default(),
         }
     }
 }

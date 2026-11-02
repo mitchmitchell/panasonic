@@ -14,12 +14,22 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-/// Validated thresholds, built by [`crate::config::SmdrConfig::health`].
+/// Parsed thresholds, built by [`crate::config::SmdrConfig::health`]. Both durations are non-zero.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HealthConfig {
     pub silence_after: Duration,
     pub cts_low_after: Duration,
     pub cts_monitor: bool,
+}
+
+impl Default for HealthConfig {
+    fn default() -> Self {
+        Self {
+            silence_after: Duration::from_secs(86_400),
+            cts_low_after: Duration::from_secs(30),
+            cts_monitor: true,
+        }
+    }
 }
 
 /// What the SMDR port is doing, as far as S7 cares.
@@ -30,10 +40,23 @@ pub enum PortState {
     Closed,
 }
 
-/// A modem-status read that failed, with the reason shown in `smdr_status`.
+/// A modem-status read that failed. Keeps the `io::ErrorKind`; text is rendered only for
+/// `smdr_status`.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error("modem status read failed: {0}")]
-pub struct ModemStatusError(pub String);
+#[error("modem status read failed: {detail} ({kind})")]
+pub struct ModemStatusError {
+    pub kind: std::io::ErrorKind,
+    pub detail: String,
+}
+
+impl From<&std::io::Error> for ModemStatusError {
+    fn from(e: &std::io::Error) -> Self {
+        Self {
+            kind: e.kind(),
+            detail: e.to_string(),
+        }
+    }
+}
 
 /// One input to [`HealthMonitor::step`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -45,7 +68,8 @@ pub enum Observation {
     /// S4 reported a header that matches the spec.
     HeaderMatched,
     Port(PortState),
-    /// Result of one modem-status read; `Ok(true)` is CTS high.
+    /// Result of one modem-status read; `Ok(true)` is CTS high. An error resets both the low
+    /// and high runs, so a raised CtsLow stays raised until good high reads span the debounce.
     ModemStatus(Result<bool, ModemStatusError>),
     /// Time passed; re-evaluate thresholds.
     Tick,
@@ -105,6 +129,9 @@ impl HealthMonitor {
     }
 
     /// Applies one observation and returns the alert edges it caused, at most one per kind.
+    ///
+    /// `now` must come from one monotonic clock for the life of the monitor; all thresholds
+    /// are measured on it. `wall` only stamps `since`/`at` on alerts and never drives timing.
     #[must_use = "edges must reach smdr_status and the subscribe stream"]
     pub fn step(&mut self, obs: Observation, now: Instant, wall: DateTime<Utc>) -> Vec<SmdrAlert> {
         let mut edges = Vec::new();
@@ -150,9 +177,9 @@ impl HealthMonitor {
                 }
             }
             Observation::ModemStatus(Err(e)) => {
-                tracing::warn!(reason = %e.0, "CTS unknown; low/high continuity reset");
+                tracing::warn!(kind = ?e.kind, reason = %e.detail, "CTS unknown; low/high continuity reset");
                 self.cts = Cts {
-                    read_error: Some(e.0),
+                    read_error: Some(e.to_string()),
                     ..Cts::default()
                 };
             }
@@ -187,7 +214,8 @@ impl HealthMonitor {
         }
     }
 
-    /// Active alerts only, in kind order.
+    /// Alerts currently raised, in kind order, each with its original `since`. Cleared alerts
+    /// are not kept; they exist only as the edge `step` returned.
     pub fn active(&self) -> Vec<SmdrAlert> {
         [
             (SmdrAlertKind::LineSilence, &self.silence),
@@ -199,6 +227,7 @@ impl HealthMonitor {
         .collect()
     }
 
+    /// Last CTS reading and, if the last read failed, its rendered error.
     pub fn cts_status(&self) -> CtsStatus {
         CtsStatus {
             monitored: self.cfg.cts_monitor,
@@ -228,6 +257,9 @@ fn cleared(kind: SmdrAlertKind, since: String, at: DateTime<Utc>) -> SmdrAlert {
 }
 
 /// Counts bytes received through an [`SmdrSource`]. It adds no transmit path.
+///
+/// The counter wraps; [`ByteCounter::take_new`] only compares for change, and a non-empty
+/// read can never move it by a multiple of 2^64.
 pub struct ByteTap<S: SmdrSource> {
     inner: S,
     count: Arc<AtomicU64>,
@@ -251,7 +283,11 @@ impl<S: SmdrSource> ByteTap<S> {
 impl<S: SmdrSource> SmdrSource for ByteTap<S> {
     fn recv(&mut self, timeout_ms: u64) -> Result<Vec<u8>, TransportError> {
         let bytes = self.inner.recv(timeout_ms)?;
-        self.count.fetch_add(bytes.len() as u64, Ordering::Relaxed);
+        let n = match u64::try_from(bytes.len()) {
+            Ok(n) => n,
+            Err(_usize_wider_than_u64) => u64::MAX,
+        };
+        self.count.fetch_add(n, Ordering::Relaxed);
         Ok(bytes)
     }
 }
