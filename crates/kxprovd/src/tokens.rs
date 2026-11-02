@@ -54,7 +54,7 @@ struct TokenState {
     reload_failure_since: Option<Instant>,
     /// Earliest moment in this outage episode the cached entries stopped being
     /// confirmed by disk: the start of the first stalled probe, or the outage
-    /// start if that is earlier. [`TokenStore::max_stale_serve`] is measured
+    /// start if that is earlier. [`ReloadTiming::max_stale_serve`] is measured
     /// from here when an answer is returned.
     stale_since: Option<Instant>,
     /// After grace expires, reject bearer auth until a good reload succeeds.
@@ -67,6 +67,53 @@ struct TokenState {
     /// Bumped by every good merge. A bad probe whose plan saw an older value
     /// predates that recovery and must not re-open or latch the outage.
     merge_generation: u64,
+    /// The grace and delivery deadline this store's reload path runs on.
+    reload_timing: ReloadTiming,
+}
+
+/// How long the reload path serves cached entries and waits for a probe.
+///
+/// Production always runs on [`ReloadTiming::PRODUCTION`]. It is held by the
+/// store, and copied into each [`ReloadPlan`], so the caller and its
+/// `token-reload-probe` thread judge the same outage by the same values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ReloadTiming {
+    /// How long after an outage starts cached entries may still be served.
+    grace: Duration,
+    /// How long a caller waits for its probe thread to deliver a result.
+    delivery_deadline: Duration,
+}
+
+impl ReloadTiming {
+    const PRODUCTION: Self = Self::with_grace(TokenStore::RELOAD_GRACE);
+
+    /// A timing whose delivery deadline is `grace` plus
+    /// [`TokenStore::PROBE_DELIVERY_SLACK`], the production relation.
+    const fn with_grace(grace: Duration) -> Self {
+        Self {
+            grace,
+            delivery_deadline: grace.saturating_add(TokenStore::PROBE_DELIVERY_SLACK),
+        }
+    }
+
+    /// Worst-case time a stale or revoked cached entry can still be served,
+    /// measured from when the first stalled probe began.
+    ///
+    /// A stalled probe is abandoned after `delivery_deadline`; the outage
+    /// starts when that timeout is observed, and cached entries are served for
+    /// a further `grace` before bearer access fails closed. That is
+    /// `2 * RELOAD_GRACE + PROBE_DELIVERY_SLACK`, 4.3 s in production.
+    /// Saturates at [`Duration::MAX`] instead of panicking.
+    ///
+    /// Enforced when an answer is returned, not when a request is admitted:
+    /// a cached answer is given only while `now - stale_since` is at most this
+    /// bound, so a request admitted just before it whose probe then stalls
+    /// fails closed instead of returning cached entries late.
+    fn max_stale_serve(self) -> Duration {
+        self.delivery_deadline
+            .checked_add(self.grace)
+            .unwrap_or(Duration::MAX)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -83,6 +130,7 @@ struct ReloadPlan {
     transient_done: bool,
     failed_fp: Option<DiskFingerprint>,
     merge_generation: u64,
+    timing: ReloadTiming,
     probe_cancel: Arc<AtomicBool>,
     #[cfg(feature = "test-util")]
     probe_hang: Arc<AtomicBool>,
@@ -128,15 +176,7 @@ thread_local! {
 type AbandonHook = Box<dyn FnOnce() + Send>;
 
 #[cfg(test)]
-thread_local! {
-    /// Test-only override of [`TokenStore::reload_grace_duration`].
-    ///
-    /// Thread-local, so it affects only the thread that set it: the caller
-    /// that computes the grace and the delivery deadline. A
-    /// `token-reload-probe` thread never sees it, so a helper using this stops
-    /// working if any grace or deadline is ever computed on the probe thread.
-    static RELOAD_GRACE_OVERRIDE: std::cell::Cell<Option<Duration>> = const { std::cell::Cell::new(None) };
-}
+thread_local! {}
 
 pub struct TokenStore {
     inner: Arc<Mutex<TokenState>>,
@@ -454,6 +494,18 @@ impl TokenStore {
             .lock()
             .expect("token store lock")
             .enforce_secure_reload = enforce;
+    }
+
+    /// Runs this store's reload path on `grace` and `delivery_deadline`
+    /// instead of the production values, for the caller and its probe
+    /// threads alike. Lets a test choose how much scheduler delay its outcome
+    /// can absorb, so it does not depend on wall-clock promptness.
+    #[cfg(feature = "test-util")]
+    pub fn set_reload_timing_for_test(&self, grace: Duration, delivery_deadline: Duration) {
+        lock_ignoring_poison(&self.inner).reload_timing = ReloadTiming {
+            grace,
+            delivery_deadline,
+        };
     }
 
     #[cfg(feature = "test-util")]
@@ -784,39 +836,6 @@ impl TokenStore {
     const PROBE_DELIVERY_SLACK: Duration = Duration::from_millis(300);
     const RELOAD_MAX_ATTEMPTS: usize = 3;
 
-    fn reload_grace_duration() -> Duration {
-        #[cfg(test)]
-        if let Some(grace) = RELOAD_GRACE_OVERRIDE.with(std::cell::Cell::get) {
-            return grace;
-        }
-        Self::RELOAD_GRACE
-    }
-
-    /// How long a caller waits for a probe result: the grace plus
-    /// [`Self::PROBE_DELIVERY_SLACK`].
-    fn probe_delivery_deadline() -> Duration {
-        Self::reload_grace_duration().saturating_add(Self::PROBE_DELIVERY_SLACK)
-    }
-
-    /// Worst-case time a stale or revoked cached entry can still be served,
-    /// measured from when the first stalled probe began.
-    ///
-    /// A stalled probe is abandoned after [`Self::probe_delivery_deadline`];
-    /// the outage starts when that timeout is observed, and cached entries are
-    /// served for a further [`Self::reload_grace_duration`] before bearer access
-    /// fails closed. That is `2 * RELOAD_GRACE + PROBE_DELIVERY_SLACK`, 4.3 s in
-    /// production. Saturates at [`Duration::MAX`] instead of panicking.
-    ///
-    /// Enforced when an answer is returned, not when a request is admitted:
-    /// a cached answer is given only while `now - stale_since` is at most this
-    /// bound, so a request admitted just before it whose probe then stalls
-    /// fails closed instead of returning cached entries late.
-    fn max_stale_serve() -> Duration {
-        Self::probe_delivery_deadline()
-            .checked_add(Self::reload_grace_duration())
-            .unwrap_or(Duration::MAX)
-    }
-
     #[cfg(unix)]
     fn fifo_fingerprint(path: &Path) -> Option<DiskFingerprint> {
         use std::os::unix::fs::{FileTypeExt, MetadataExt};
@@ -975,11 +994,9 @@ impl TokenStore {
 
     /// The result handed to followers when the leader could not run a probe
     /// at all: an outage whose grace has already run out, so they fail closed.
-    fn expired_disk_probe() -> DiskProbe {
+    fn expired_disk_probe(grace: Duration) -> DiskProbe {
         let now = Instant::now();
-        let outage_start = now
-            .checked_sub(Self::reload_grace_duration())
-            .unwrap_or(now);
+        let outage_start = now.checked_sub(grace).unwrap_or(now);
         Self::timed_out_disk_probe(outage_start, now)
     }
 
@@ -1018,7 +1035,7 @@ impl TokenStore {
             )
         };
         let deadline = probe_started
-            .checked_add(Self::probe_delivery_deadline())
+            .checked_add(plan.timing.delivery_deadline)
             .unwrap_or_else(|| {
                 tracing::warn!(
                     "token-reload-probe delivery deadline overflows Instant; the probe is treated as timed out so the normal grace applies"
@@ -1138,7 +1155,7 @@ impl TokenStore {
     ) -> Result<ProbeOutcome, TokenError> {
         let follower = |probe: DiskProbe| ProbeOutcome { probe, slot: None };
         let follower_outage_start = plan.outage_start.unwrap_or_else(Instant::now);
-        let wait_until = follower_outage_start + Self::reload_grace_duration();
+        let wait_until = follower_outage_start + plan.timing.grace;
         let mut guard = flight.inner.lock().expect("transient flight lock");
         loop {
             match &*guard {
@@ -1184,13 +1201,15 @@ impl TokenStore {
                     #[cfg(test)]
                     flight.leaders.fetch_add(1, Ordering::AcqRel);
                     drop(guard);
-                    let _leader =
-                        TransientProbeLeaderGuard::new(flight, Self::expired_disk_probe());
+                    let _leader = TransientProbeLeaderGuard::new(
+                        flight,
+                        Self::expired_disk_probe(plan.timing.grace),
+                    );
                     let probe = match self.run_disk_probe_off_thread(plan.clone()) {
                         Ok(p) => p,
                         Err(TokenError::StoreUnavailable) => {
                             let mut guard = flight.inner.lock().expect("transient flight lock");
-                            let probe = Self::expired_disk_probe();
+                            let probe = Self::expired_disk_probe(plan.timing.grace);
                             *guard = TransientFlightState::Done(probe);
                             flight.cv.notify_all();
                             return Err(TokenError::StoreUnavailable);
@@ -1226,7 +1245,7 @@ impl TokenStore {
                 return DiskProbe::Ok(raw);
             }
             if let Some(start) = plan.outage_start {
-                if start.elapsed() >= Self::reload_grace_duration() {
+                if start.elapsed() >= plan.timing.grace {
                     let fp = Self::disk_fingerprint(&plan.path);
                     return DiskProbe::StillBad {
                         fp,
@@ -1239,7 +1258,7 @@ impl TokenStore {
         }
 
         let outage_start = plan.outage_start.unwrap_or_else(Instant::now);
-        let deadline = outage_start + Self::reload_grace_duration();
+        let deadline = outage_start + plan.timing.grace;
         match Self::read_tokens_until_deadline(&plan.path, deadline, Some(&plan.probe_cancel)) {
             Ok(raw) => DiskProbe::Ok(raw),
             Err((fp, last_bad_read)) => DiskProbe::StillBad {
@@ -1278,6 +1297,7 @@ impl TokenStore {
             reload_transient_done: false,
             reload_failed_disk_fingerprint: None,
             merge_generation: 0,
+            reload_timing: ReloadTiming::PRODUCTION,
         })
     }
 
@@ -1296,6 +1316,7 @@ impl TokenStore {
             reload_transient_done: false,
             reload_failed_disk_fingerprint: None,
             merge_generation: 0,
+            reload_timing: ReloadTiming::PRODUCTION,
         })
     }
 
@@ -1398,7 +1419,7 @@ impl TokenStore {
                     return Err(TokenError::StoreUnavailable);
                 }
                 if let Some(since) = state.reload_failure_since {
-                    if since.elapsed() >= Self::reload_grace_duration() {
+                    if since.elapsed() >= state.reload_timing.grace {
                         return Err(Self::latch_store_unavailable(state));
                     }
                 }
@@ -1422,7 +1443,7 @@ impl TokenStore {
                 state.reload_transient_done = true;
                 state.reload_failed_disk_fingerprint = Some(fp);
                 if last_bad_read.saturating_duration_since(outage_start)
-                    >= Self::reload_grace_duration()
+                    >= state.reload_timing.grace
                     || state.store_unavailable
                 {
                     Err(Self::latch_store_unavailable(state))
@@ -1453,10 +1474,12 @@ impl TokenStore {
     }
 
     /// Fails closed, latching the outage, when a cached answer at `now` would
-    /// be older than [`Self::max_stale_serve`] measured from `stale_since`.
+    /// be older than [`ReloadTiming::max_stale_serve`] measured from `stale_since`.
     fn enforce_max_stale_serve(state: &mut TokenState, now: Instant) -> Result<(), TokenError> {
         match state.stale_since {
-            Some(since) if now.saturating_duration_since(since) > Self::max_stale_serve() => {
+            Some(since)
+                if now.saturating_duration_since(since) > state.reload_timing.max_stale_serve() =>
+            {
                 Err(Self::latch_store_unavailable(state))
             }
             _ => Ok(()),
@@ -1482,6 +1505,7 @@ impl TokenStore {
                 transient_done: state.reload_transient_done,
                 failed_fp: state.reload_failed_disk_fingerprint,
                 merge_generation: state.merge_generation,
+                timing: state.reload_timing,
                 probe_cancel: Arc::new(AtomicBool::new(false)),
                 #[cfg(feature = "test-util")]
                 probe_hang: Arc::clone(&self.reload_probe_hang),
@@ -1583,9 +1607,11 @@ impl TokenStore {
             .map(|t| t.id.clone())
             .collect();
         let merge_generation = state.merge_generation;
+        let reload_timing = state.reload_timing;
         *state = fresh;
         state.enforce_secure_reload = enforce_secure;
         state.merge_generation = merge_generation;
+        state.reload_timing = reload_timing;
         Ok(TokenRefreshDelta {
             newly_revoked,
             reactivated,
@@ -1705,6 +1731,7 @@ impl TokenStore {
             reload_transient_done: false,
             reload_failed_disk_fingerprint: None,
             merge_generation: 0,
+            reload_timing: ReloadTiming::PRODUCTION,
         };
         Self::wrap_state(state)
     }
@@ -2414,11 +2441,11 @@ mod tests {
     fn timed_out_merge_after_a_newer_good_merge_does_not_reopen_the_outage() {
         run_bounded(|| {
             let grace = Duration::from_millis(50);
-            let _grace = GraceOverride::set(grace);
             let tmp = tempfile::tempdir().expect("tempdir");
             let path = tmp.path().join("tokens.json");
             write_tokens_revoking_writer(&path, false);
             let store = TokenStore::load_insecure(path.clone()).expect("load");
+            use_grace(&store, grace);
             {
                 let mut state = store.inner.lock().unwrap();
                 let start = Instant::now()
@@ -2491,19 +2518,12 @@ mod tests {
         });
     }
 
-    struct GraceOverride;
-
-    impl GraceOverride {
-        fn set(grace: Duration) -> Self {
-            RELOAD_GRACE_OVERRIDE.with(|g| g.set(Some(grace)));
-            Self
-        }
-    }
-
-    impl Drop for GraceOverride {
-        fn drop(&mut self) {
-            RELOAD_GRACE_OVERRIDE.with(|g| g.set(None));
-        }
+    /// Gives `store` the production timing relation around `grace`, for its
+    /// caller and probe threads alike, and returns it for the test's bounds.
+    fn use_grace(store: &TokenStore, grace: Duration) -> ReloadTiming {
+        let timing = ReloadTiming::with_grace(grace);
+        store.set_reload_timing_for_test(timing.grace, timing.delivery_deadline);
+        timing
     }
 
     fn block_next_probe_delivery(store: &TokenStore) -> std::sync::mpsc::Sender<()> {
@@ -2520,11 +2540,11 @@ mod tests {
     #[test]
     fn probe_timeout_is_an_outage_from_the_observed_timeout_with_normal_grace() {
         run_bounded(|| {
-            let _grace = GraceOverride::set(Duration::from_millis(50));
             let tmp = tempfile::tempdir().expect("tempdir");
             let path = tmp.path().join("tokens.json");
             write_tokens_revoking_writer(&path, false);
             let store = TokenStore::load_insecure(path.clone()).expect("load");
+            let timing = use_grace(&store, Duration::from_millis(50));
 
             let first = block_next_probe_delivery(&store);
             let before_first = Instant::now();
@@ -2539,7 +2559,7 @@ mod tests {
                     .expect("timeout starts an outage")
             };
             assert!(
-                outage_start >= before_first + TokenStore::probe_delivery_deadline(),
+                outage_start >= before_first + timing.delivery_deadline,
                 "the outage must start when the timeout was observed, not be backdated"
             );
 
@@ -2591,7 +2611,7 @@ mod tests {
     /// The overshoot stays small enough that loosening the bound by more than
     /// the slack lets that answer be served.
     fn seed_first_stall_that_just_timed_out(store: &TokenStore) -> (Instant, Instant) {
-        let deadline = TokenStore::probe_delivery_deadline();
+        let deadline = store.inner.lock().unwrap().reload_timing.delivery_deadline;
         let stall_start = Instant::now()
             .checked_sub(deadline)
             .expect("backdate within Instant range");
@@ -2636,11 +2656,11 @@ mod tests {
     fn stall_after_a_timeout_is_admitted_inside_grace_but_fails_closed_past_max_stale_serve() {
         run_bounded(|| {
             let grace = Duration::from_millis(1000);
-            let _grace = GraceOverride::set(grace);
             let tmp = tempfile::tempdir().expect("tempdir");
             let path = tmp.path().join("tokens.json");
             write_tokens_revoking_writer(&path, false);
             let store = TokenStore::load_insecure(path.clone()).expect("load");
+            let timing = use_grace(&store, grace);
             let (stall_start, outage_start) = seed_first_stall_that_just_timed_out(&store);
 
             let (answer, waits, second) = verify_with_hung_probe(&store);
@@ -2652,7 +2672,7 @@ mod tests {
             matches!(answer, Err(TokenError::StoreUnavailable)),
             "its answer lands past max_stale_serve from the first stall, so it fails closed: {answer:?}"
         );
-            assert!(Instant::now() > stall_start + TokenStore::max_stale_serve());
+            assert!(Instant::now() > stall_start + timing.max_stale_serve());
             {
                 let state = store.inner.lock().unwrap();
                 assert!(state.store_unavailable);
@@ -2688,7 +2708,10 @@ mod tests {
 
     #[test]
     fn max_stale_serve_is_two_graces_plus_delivery_slack() {
-        assert_eq!(TokenStore::max_stale_serve(), Duration::from_millis(4300));
+        assert_eq!(
+            ReloadTiming::PRODUCTION.max_stale_serve(),
+            Duration::from_millis(4300)
+        );
     }
 
     #[test]
@@ -2698,7 +2721,7 @@ mod tests {
         write_tokens_revoking_writer(&path, false);
         let store = TokenStore::load_insecure(path.clone()).expect("load");
         let stall_start = Instant::now();
-        let observed_timeout = stall_start + TokenStore::probe_delivery_deadline();
+        let observed_timeout = stall_start + ReloadTiming::PRODUCTION.delivery_deadline;
         let mut state = store.inner.lock().unwrap();
         assert!(TokenStore::merge_at_current_generation(
             &mut state,
@@ -2706,7 +2729,7 @@ mod tests {
             TokenStore::timed_out_disk_probe(observed_timeout, stall_start),
         )
         .is_ok());
-        let last_grace_answer = observed_timeout + TokenStore::reload_grace_duration();
+        let last_grace_answer = observed_timeout + ReloadTiming::PRODUCTION.grace;
         assert!(
             TokenStore::enforce_max_stale_serve(&mut state, last_grace_answer).is_ok(),
             "a request admitted inside the grace may answer up to one more grace after the timeout"
@@ -2720,10 +2743,10 @@ mod tests {
         let path = tmp.path().join("tokens.json");
         write_tokens_revoking_writer(&path, false);
         let store = TokenStore::load_insecure(path.clone()).expect("load");
-        let grace = TokenStore::reload_grace_duration();
-        let bound = TokenStore::max_stale_serve();
+        let grace = ReloadTiming::PRODUCTION.grace;
+        let bound = ReloadTiming::PRODUCTION.max_stale_serve();
         let stall_start = Instant::now();
-        let observed_timeout = stall_start + TokenStore::probe_delivery_deadline();
+        let observed_timeout = stall_start + ReloadTiming::PRODUCTION.delivery_deadline;
         let mut state = store.inner.lock().unwrap();
         let timed_out = TokenStore::timed_out_disk_probe(observed_timeout, stall_start);
         assert!(TokenStore::merge_at_current_generation(
@@ -2769,12 +2792,12 @@ mod tests {
         let path = tmp.path().join("tokens.json");
         write_tokens_revoking_writer(&path, false);
         let store = TokenStore::load_insecure(path.clone()).expect("load");
-        let grace = TokenStore::reload_grace_duration();
+        let grace = ReloadTiming::PRODUCTION.grace;
         let now = Instant::now();
         let stall_start = now
-            .checked_sub(TokenStore::probe_delivery_deadline() + grace / 2)
+            .checked_sub(ReloadTiming::PRODUCTION.delivery_deadline + grace / 2)
             .expect("backdate within Instant range");
-        let observed_timeout = stall_start + TokenStore::probe_delivery_deadline();
+        let observed_timeout = stall_start + ReloadTiming::PRODUCTION.delivery_deadline;
         let mut state = store.inner.lock().unwrap();
         assert!(TokenStore::merge_at_current_generation(
             &mut state,
@@ -2822,12 +2845,12 @@ mod tests {
     fn request_admitted_before_max_stale_serve_whose_probe_stalls_past_it_fails_closed() {
         run_bounded(|| {
             let grace = Duration::from_millis(2000);
-            let _grace = GraceOverride::set(grace);
-            let bound = TokenStore::max_stale_serve();
             let tmp = tempfile::tempdir().expect("tempdir");
             let path = tmp.path().join("tokens.json");
             write_tokens_revoking_writer(&path, false);
             let store = TokenStore::load_insecure(path.clone()).expect("load");
+            let timing = use_grace(&store, grace);
+            let bound = timing.max_stale_serve();
             let (stall_start, outage_start) = seed_first_stall_that_just_timed_out(&store);
             assert!(
                 outage_start < stall_start + bound,
@@ -2887,7 +2910,7 @@ mod tests {
         let path = tmp.path().join("tokens.json");
         write_tokens_revoking_writer(&path, false);
         let store = TokenStore::load_insecure(path.clone()).expect("load");
-        let grace = TokenStore::reload_grace_duration();
+        let grace = ReloadTiming::PRODUCTION.grace;
         let first_start = Instant::now();
         let mut state = store.inner.lock().unwrap();
         let first = TokenStore::timed_out_disk_probe(first_start, first_start);
@@ -2913,11 +2936,11 @@ mod tests {
         write_tokens_revoking_writer(&path, false);
         let store = TokenStore::load_insecure(path.clone()).expect("load");
         let now = Instant::now();
-        let outage_start = now - TokenStore::reload_grace_duration() * 2;
+        let outage_start = now - ReloadTiming::PRODUCTION.grace * 2;
         let probe = DiskProbe::StillBad {
             fp: DiskFingerprint::Missing,
             outage_start,
-            last_bad_read: outage_start + TokenStore::reload_grace_duration() / 2,
+            last_bad_read: outage_start + ReloadTiming::PRODUCTION.grace / 2,
         };
         let mut state = store.inner.lock().unwrap();
         assert!(TokenStore::merge_at_current_generation(
@@ -3078,11 +3101,11 @@ mod tests {
     #[test]
     fn reload_hung_probe_fails_closed_and_recovers() {
         run_bounded(|| {
-            let _grace = GraceOverride::set(Duration::from_millis(200));
             let tmp = tempfile::tempdir().expect("tempdir");
             let path = tmp.path().join("tokens.json");
             write_tokens_revoking_writer(&path, false);
             let store = TokenStore::load_insecure(path.clone()).expect("load");
+            use_grace(&store, Duration::from_millis(200));
             store
                 .verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan)
                 .expect("warm");
