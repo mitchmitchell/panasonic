@@ -175,9 +175,6 @@ thread_local! {
 #[cfg(test)]
 type AbandonHook = Box<dyn FnOnce() + Send>;
 
-#[cfg(test)]
-thread_local! {}
-
 pub struct TokenStore {
     inner: Arc<Mutex<TokenState>>,
     job_queue: Arc<Mutex<Option<Weak<JobQueue>>>>,
