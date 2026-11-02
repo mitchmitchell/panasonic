@@ -368,6 +368,7 @@ fn apply_job_prod_gate(ctx: &WorkerCtx, profile: Profile) -> Option<JobOutcome> 
         .unwrap_or(false);
     let gate = prod_write_gate(
         profile,
+        ctx.config.transport == crate::config::TransportKind::Serial,
         locked,
         live_writes,
         ctx.transition.writes_blocked(),

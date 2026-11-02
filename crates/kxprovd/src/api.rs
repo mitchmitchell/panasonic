@@ -603,6 +603,7 @@ async fn apply_plan(
     let live_writes = state.gates.read().await.config.live_writes_approved;
     if let Some(gate) = prod_write_gate(
         profile,
+        state.config.transport == crate::config::TransportKind::Serial,
         locked,
         live_writes,
         state.transition.writes_blocked(),
@@ -1207,6 +1208,53 @@ mod smdr_dispatch_tests {
             },
         };
         dispatch(state, cred, &env).await
+    }
+
+    #[tokio::test]
+    async fn issue_61_serial_apply_refused_without_live_writes_even_for_admin_call_log() {
+        for profile in [Profile::Test, Profile::Prod] {
+            let tmp = tempfile::tempdir().unwrap();
+            let mut st = state(&tmp);
+            let tokens = TokensFile {
+                approver_token_id: TokenId("approver".into()),
+                tokens: vec![
+                    entry("approver", vec![Scope::Read, Scope::Approve]),
+                    entry(
+                        "admin",
+                        vec![Scope::Read, Scope::Plan, Scope::Write, Scope::CallLog],
+                    ),
+                ],
+            };
+            std::fs::write(&st.config.tokens_path, serde_json::to_vec(&tokens).unwrap()).unwrap();
+            st.tokens = TokenStore::load_insecure(st.config.tokens_path.clone()).unwrap();
+            st.config.transport = crate::config::TransportKind::Serial;
+            st.config.gates.live_writes_approved = false;
+            st.gates = Arc::new(RwLock::new(GateState {
+                config: st.config.gates,
+            }));
+            *st.profile.write().await = profile;
+            let env = RequestEnvelope {
+                id: "1".into(),
+                auth: Some(RequestAuth {
+                    bearer: "admin-secret".into(),
+                }),
+                audit: None,
+                body: RequestBody::ApplyPlan {
+                    params: kxprov_api::ApplyPlanParams {
+                        plan_id: kxprov_api::PlanId("p".into()),
+                        diff_hash: kxprov_api::DiffHash("d".into()),
+                    },
+                },
+            };
+            let resp = dispatch(&st, ADMIN, &env).await;
+            assert!(!resp.ok, "{profile:?}");
+            let code = resp.error.unwrap().code;
+            let want: &[&str] = match profile {
+                Profile::Prod => &["gate", "locked"],
+                _ => &["gate"],
+            };
+            assert!(want.contains(&code.as_str()), "{profile:?} got {code}");
+        }
     }
 
     #[tokio::test]
