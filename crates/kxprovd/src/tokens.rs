@@ -1789,31 +1789,74 @@ mod tests {
 
     const TEST_BODY_BOUND: Duration = Duration::from_secs(60);
 
-    /// Describes every thread of this process from `/proc/self/task`: name,
-    /// scheduler state, the kernel function it sleeps in, its current syscall
-    /// and, where the kernel allows it, its kernel stack. Lets a test that hit
-    /// [`TEST_BODY_BOUND`] show where each thread was stuck.
-    fn thread_dump() -> String {
+    /// Linux reports `/proc` CPU times in `USER_HZ` ticks, fixed at 100 per
+    /// second in the user-space ABI.
+    const PROC_TICKS_PER_SEC: u64 = 100;
+
+    /// This thread's id, from `/proc/thread-self`.
+    fn current_tid() -> String {
+        std::fs::read_link("/proc/thread-self")
+            .expect("/proc/thread-self")
+            .file_name()
+            .and_then(|t| t.to_str())
+            .expect("thread-self ends in the tid")
+            .to_owned()
+    }
+
+    /// CPU time a thread has used, as `utime+stime` from its `stat`, or why
+    /// it could not be read.
+    fn thread_cpu_time(stat: &str) -> Result<Duration, String> {
+        let fields: Vec<&str> = match stat.rsplit_once(") ") {
+            Some((_, rest)) => rest.split_whitespace().collect(),
+            None => return Err(format!("<unparsed stat: {stat}>")),
+        };
+        let tick = |i: usize| fields.get(i).and_then(|f| f.parse::<u64>().ok());
+        match (tick(11), tick(12)) {
+            (Some(utime), Some(stime)) => Ok(Duration::from_millis(
+                (utime + stime) * 1000 / PROC_TICKS_PER_SEC,
+            )),
+            _ => Err(format!("<no utime/stime in stat: {stat}>")),
+        }
+    }
+
+    /// Describes threads of this process from `/proc/self/task`: name,
+    /// scheduler state, CPU time used, the kernel function it sleeps in, its
+    /// current syscall and, where the kernel allows it, its kernel stack.
+    /// Lets a test that hit [`TEST_BODY_BOUND`] show where each thread was
+    /// stuck.
+    ///
+    /// Listing `/proc/self/task` is not a snapshot: the kernel resumes the
+    /// listing by position, so a thread exiting mid-listing can make it skip a
+    /// live one. Every tid in `always` is therefore described by its own path
+    /// even if the listing missed it.
+    fn thread_dump(always: &[String]) -> String {
         let read = |path: std::path::PathBuf| {
             std::fs::read_to_string(&path)
                 .map(|text| text.trim().to_string())
                 .unwrap_or_else(|e| format!("<{}: {e}>", path.display()))
         };
-        let tasks = match std::fs::read_dir("/proc/self/task") {
-            Ok(tasks) => tasks,
-            Err(e) => return format!("thread dump unavailable: /proc/self/task: {e}"),
-        };
         let mut dirs = Vec::new();
-        let mut unreadable = Vec::new();
-        for entry in tasks {
-            match entry {
-                Ok(entry) => dirs.push(entry.path()),
-                Err(e) => unreadable.push(format!("unreadable task entry: {e}\n")),
+        let mut notes = Vec::new();
+        match std::fs::read_dir("/proc/self/task") {
+            Ok(tasks) => {
+                for entry in tasks {
+                    match entry {
+                        Ok(entry) => dirs.push(entry.path()),
+                        Err(e) => notes.push(format!("unreadable task entry: {e}\n")),
+                    }
+                }
+            }
+            Err(e) => notes.push(format!("task listing unavailable: /proc/self/task: {e}\n")),
+        }
+        for tid in always {
+            let dir = Path::new("/proc/self/task").join(tid);
+            if !dirs.contains(&dir) {
+                dirs.push(dir);
             }
         }
         dirs.sort();
         let mut out = format!("thread dump ({} threads):\n", dirs.len());
-        for line in unreadable {
+        for line in notes {
             out.push_str(&line);
         }
         for dir in dirs {
@@ -1825,11 +1868,16 @@ mod tests {
                 Some(state) => state.to_string(),
                 None => format!("<unparsed stat: {stat}>"),
             };
+            let cpu = match thread_cpu_time(&stat) {
+                Ok(cpu) => format!("{cpu:?}"),
+                Err(why) => why,
+            };
             out.push_str(&format!(
-                "{} name={} state={} wchan={} syscall={}\n  stack: {}\n",
+                "{} name={} state={} cpu={} wchan={} syscall={}\n  stack: {}\n",
                 task_label(&dir),
                 read(dir.join("comm")),
                 state,
+                cpu,
                 read(dir.join("wchan")),
                 read(dir.join("syscall")),
                 read(dir.join("stack")).replace('\n', "\n         "),
@@ -1850,36 +1898,65 @@ mod tests {
 
     #[test]
     fn thread_dump_lists_the_calling_thread() {
-        let dump = thread_dump();
+        let tid = current_tid();
+        let dump = thread_dump(std::slice::from_ref(&tid));
         assert!(dump.starts_with("thread dump ("), "{dump}");
-        let own_task = std::fs::read_link("/proc/thread-self").expect("/proc/thread-self");
-        let tid = own_task
-            .file_name()
-            .and_then(|t| t.to_str())
-            .expect("thread-self ends in the tid")
-            .to_owned();
         assert!(dump.contains(&format!("tid {tid} ")), "{dump}");
+        assert!(
+            !dump.contains(&format!("tid {tid} name=<")),
+            "the calling thread is alive, so its files must be readable: {dump}"
+        );
+    }
+
+    #[test]
+    fn thread_cpu_time_reads_utime_plus_stime() {
+        let stat = "42 (a) b) R 1 2 3 4 5 6 7 8 9 10 30 20 0 0";
+        assert_eq!(thread_cpu_time(stat), Ok(Duration::from_millis(500)));
+        assert!(thread_cpu_time("garbage").is_err());
     }
 
     /// Runs a test body on its own thread and fails the test if it has not
     /// finished within [`TEST_BODY_BOUND`], so a blocking wait that never
     /// returns becomes a failure instead of hanging the suite. The bound is a
     /// safety net for hangs, not a timing assertion.
+    ///
+    /// On timeout it reports the wall time and the body thread's CPU time.
+    /// A body that used little CPU in that wall time was starved or blocked;
+    /// one that used nearly all of it was spinning, a livelock.
     fn run_bounded(body: impl FnOnce() + Send + 'static) {
+        let started = Instant::now();
+        let (tid_tx, tid_rx) = std::sync::mpsc::channel::<String>();
         let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
         let handle = std::thread::Builder::new()
             .name("bounded-test-body".into())
             .spawn(move || {
                 let _signals_done_on_drop = done_tx;
+                tid_tx
+                    .send(current_tid())
+                    .expect("run_bounded keeps the tid receiver");
                 body();
             })
             .expect("spawn test body thread");
+        let body_tid = tid_rx
+            .recv()
+            .expect("body thread reports its tid before running");
         if let Err(std::sync::mpsc::RecvTimeoutError::Timeout) =
             done_rx.recv_timeout(TEST_BODY_BOUND)
         {
+            let wall = started.elapsed();
+            let stat_path = Path::new("/proc/self/task").join(&body_tid).join("stat");
+            let body_cpu = match std::fs::read_to_string(&stat_path) {
+                Ok(stat) => match thread_cpu_time(&stat) {
+                    Ok(cpu) => format!("{cpu:?}"),
+                    Err(why) => why,
+                },
+                Err(e) => format!("<{}: {e}>", stat_path.display()),
+            };
             panic!(
-                "test body did not finish within {TEST_BODY_BOUND:?}: a blocking wait never returned\n{}",
-                thread_dump()
+                "test body did not finish within {TEST_BODY_BOUND:?}: a blocking wait never returned\n\
+                 wall time {wall:?}; body thread tid {body_tid} CPU time {body_cpu} \
+                 (near the wall time means livelock, near zero means starved or blocked)\n{}",
+                thread_dump(&[current_tid(), body_tid.clone()])
             );
         }
         if let Err(payload) = handle.join() {
