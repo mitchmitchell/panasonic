@@ -9,7 +9,11 @@ use std::time::SystemTime;
 
 use argon2::password_hash::{PasswordHash, PasswordVerifier};
 use argon2::Argon2;
-use kxprov_mock::{scopes_for_role, ScopeSet};
+use kxprov_api::Profile;
+use kxprov_mock::{
+    scopes_for_role, scopes_for_role_on, validate_scopes_for_profile, CallerIdentity,
+    DaemonBackend, McpTokenIdentity, ScopeSet,
+};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
@@ -20,6 +24,8 @@ pub struct McpTokenRecord {
     pub token_id: String,
     pub agent_name: String,
     pub scopes: ScopeSet,
+    /// Role from the token file; scopes may widen per profile (see [`effective_scopes`]).
+    pub role: String,
     expires_at_ms: Option<u64>,
     pub bearer: String,
 }
@@ -150,6 +156,31 @@ impl McpTokenStore {
     }
 }
 
+/// Scopes this token holds on the daemon's current profile. Roles whose scopes differ by
+/// profile (the tester's call log is sim-only, S6 design §3) ask the daemon for its profile on
+/// every request; when the daemon cannot say, the profile-dependent scopes are withheld.
+pub async fn effective_scopes(record: &McpTokenRecord, backend: &dyn DaemonBackend) -> ScopeSet {
+    let base = scopes_for_role(&record.role);
+    if scopes_for_role_on(&record.role, Profile::Sim) == base {
+        return base;
+    }
+    let probe = CallerIdentity::Mcp(McpTokenIdentity {
+        token_id: kxprov_api::TokenId(record.token_id.clone()),
+        agent_name: record.agent_name.clone(),
+        scopes: base.clone(),
+        bearer: record.bearer.clone(),
+    });
+    let profile = match backend.status(&probe).await {
+        Ok(s) => s.profile,
+        Err(_profile_unknown_so_sim_only_scopes_are_withheld) => return base,
+    };
+    let widened = scopes_for_role_on(&record.role, profile);
+    match validate_scopes_for_profile(&widened, profile) {
+        Ok(()) => widened,
+        Err(_refused_for_this_profile_so_base_scopes_apply) => base,
+    }
+}
+
 fn load_by_hash_from_file(
     mut file: &fs::File,
 ) -> anyhow::Result<HashMap<[u8; 32], McpTokenRecord>> {
@@ -181,6 +212,7 @@ fn load_by_hash_from_raw(raw: &str) -> anyhow::Result<HashMap<[u8; 32], McpToken
                 token_id: entry.id,
                 agent_name: entry.name,
                 scopes,
+                role: entry.role,
                 expires_at_ms: entry.expires_at_ms,
                 bearer: String::new(),
             },
@@ -193,6 +225,45 @@ fn load_by_hash_from_raw(raw: &str) -> anyhow::Result<HashMap<[u8; 32], McpToken
 mod verify_tests {
     use super::*;
     use std::collections::HashMap;
+
+    fn record(role: &str) -> McpTokenRecord {
+        McpTokenRecord {
+            token_id: format!("{role}-1"),
+            agent_name: role.into(),
+            scopes: scopes_for_role(role),
+            role: role.into(),
+            expires_at_ms: None,
+            bearer: "unused-in-mock".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn tester_gets_the_call_log_at_runtime_on_sim_only() {
+        for (profile, want) in [
+            (Profile::Sim, true),
+            (Profile::Test, false),
+            (Profile::Prod, false),
+        ] {
+            let daemon = kxprov_mock::MockDaemon::with_profile(profile);
+            let scopes = effective_scopes(&record("tester"), &daemon).await;
+            assert_eq!(scopes.allows_call_log(), want, "{profile:?}");
+            assert!(!scopes.allows_write(), "{profile:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn profile_independent_roles_keep_their_file_scopes() {
+        for profile in [Profile::Sim, Profile::Test, Profile::Prod] {
+            let daemon = kxprov_mock::MockDaemon::with_profile(profile);
+            for role in ["bots", "communications", "approver"] {
+                assert_eq!(
+                    effective_scopes(&record(role), &daemon).await,
+                    scopes_for_role(role),
+                    "{role} {profile:?}"
+                );
+            }
+        }
+    }
 
     #[test]
     fn verify_bearer_rejects_expired_token_after_load() {
@@ -207,6 +278,7 @@ mod verify_tests {
                 token_id: "t1".into(),
                 agent_name: "T".into(),
                 scopes: scopes_for_role("approver"),
+                role: "approver".into(),
                 expires_at_ms: Some(1),
                 bearer: String::new(),
             },
