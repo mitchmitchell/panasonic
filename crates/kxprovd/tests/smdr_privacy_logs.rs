@@ -102,6 +102,16 @@ async fn call_log_paths_never_log_caller_data_at_info_or_tokens_at_any_level() {
         panic!("{page:?}")
     };
     assert!(page.calls.iter().any(|c| c.number == CALLER_DATA[1]));
+    let raw_lines: Vec<String> = page
+        .calls
+        .iter()
+        .filter_map(|c| c.raw.clone())
+        .filter(|r| !r.trim().is_empty())
+        .collect();
+    assert!(
+        !raw_lines.is_empty(),
+        "the query must return the seeded raw lines (#97)"
+    );
     let status = c
         .call_auth_audit(RequestBody::SmdrStatus, auth(), audit())
         .await
@@ -125,6 +135,9 @@ async fn call_log_paths_never_log_caller_data_at_info_or_tokens_at_any_level() {
     for line in text.lines() {
         for secret in [GATEWAY_SECRET, WRONG_BEARER] {
             assert!(!line.contains(secret), "token in log: {line}");
+        }
+        for raw in &raw_lines {
+            assert!(!line.contains(raw.trim()), "raw SMDR line in log: {line}");
         }
         let info_or_above = [" INFO ", " WARN ", " ERROR "]
             .iter()

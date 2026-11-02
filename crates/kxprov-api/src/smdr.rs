@@ -250,6 +250,10 @@ impl SmdrQueryParams {
 pub struct SmdrCallView {
     pub id: i64,
     pub rx_ts_utc: String,
+    /// The PBX's own date and time from the record, as `YYYY-MM-DDTHH:MM`. The store parses
+    /// the PBX date as MDY, and this PBX's date order is unconfirmed, so don't trust this
+    /// value over `rx_ts_utc` until #98 adds `smdr.date_order`
+    /// (<https://github.com/mitchmitchell/panasonic/issues/98>).
     pub pbx_local: String,
     pub ext: String,
     pub co: String,
