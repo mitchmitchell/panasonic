@@ -403,6 +403,18 @@ fn pending_bytes_with_a_high_cts_reading_at_the_debounce_crossing_raise_nothing(
     );
 }
 
+#[test]
+fn line_silence_raises_after_bytes_stop() {
+    let mut r = Rig::new(cfg(false));
+    r.feed(b"\r\n".to_vec());
+    assert!(r.run(EPS).is_empty());
+    assert!(
+        r.run(EPS + SILENCE - EPS).is_empty(),
+        "ticks without new bytes"
+    );
+    one(&r.run(EPS + SILENCE), is_raised(SmdrAlertKind::LineSilence));
+}
+
 fn data_version(db: &rusqlite::Connection) -> i64 {
     db.query_row("PRAGMA data_version", [], |row| row.get(0))
         .unwrap()

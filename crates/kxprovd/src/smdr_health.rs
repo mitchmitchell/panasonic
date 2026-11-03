@@ -181,9 +181,7 @@ impl HealthMonitor {
     ) {
         match obs {
             Observation::Bytes => {
-                if self.port == PortState::Smdr {
-                    self.silence_epoch = Some(now);
-                }
+                self.silence_epoch = Some(now);
                 if let Some(since) = self.silence.take() {
                     edges.push(cleared(SmdrAlertKind::LineSilence, since, wall));
                 }
