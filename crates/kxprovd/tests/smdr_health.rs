@@ -366,13 +366,28 @@ fn evaluation_writes_nothing_to_sqlite_or_the_port() {
     let watcher = rusqlite::Connection::open(&path).unwrap();
     let calls = r.store.call_count().unwrap();
     let before = data_version(&watcher);
+    let mut edges = Vec::new();
     for i in 0..50u32 {
         let at = SILENCE * i;
-        let _edges_not_under_test = r.observe(Observation::ModemStatus(Ok(i % 2 == 0)), at);
-        let _edges_not_under_test = r.observe(Observation::HeaderMismatch, at);
-        let _edges_not_under_test = r.observe(Observation::HeaderMatched, at);
-        let _edges_not_under_test = r.run(at);
+        edges.extend(r.observe(Observation::ModemStatus(Ok(i % 2 == 0)), at));
+        edges.extend(r.observe(Observation::HeaderMismatch, at));
+        edges.extend(r.observe(Observation::HeaderMatched, at));
+        edges.extend(r.run(at));
     }
+    let tally = |kind: SmdrAlertKind, raised: bool| {
+        edges
+            .iter()
+            .filter(|e| {
+                e.kind == kind && matches!(e.state, SmdrAlertState::Raised { .. }) == raised
+            })
+            .count()
+    };
+    assert_eq!(tally(SmdrAlertKind::HeaderMismatch, true), 50);
+    assert_eq!(tally(SmdrAlertKind::HeaderMismatch, false), 50);
+    assert_eq!(tally(SmdrAlertKind::LineSilence, true), 1);
+    assert_eq!(tally(SmdrAlertKind::LineSilence, false), 0);
+    assert_eq!(tally(SmdrAlertKind::CtsLow, true), 0);
+    assert_eq!(tally(SmdrAlertKind::CtsLow, false), 0);
     assert_eq!(r.store.call_count().unwrap(), calls);
     assert_eq!(
         data_version(&watcher),
