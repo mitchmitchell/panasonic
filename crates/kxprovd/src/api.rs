@@ -581,6 +581,7 @@ async fn apply_plan(
     let live_writes = state.gates.read().await.config.live_writes_approved;
     if let Some(gate) = prod_write_gate(
         profile,
+        state.config.transport == crate::config::TransportKind::Serial,
         locked,
         live_writes,
         state.transition.writes_blocked(),
@@ -908,6 +909,57 @@ mod apply_plan_tests {
             )
             .expect("approval");
         (rec.id, rec.diff_hash, token)
+    }
+
+    async fn apply_plan_error_on(
+        transport: crate::config::TransportKind,
+        profile: Profile,
+        live_writes_approved: bool,
+    ) -> ApiErrorBody {
+        let tmp = tempfile::tempdir().unwrap();
+        let (tx, _rx) = mpsc::channel(8);
+        let mut state = test_api_state(&tmp, Arc::new(JobQueue::new(tx)));
+        state.config.transport = transport;
+        *state.profile.write().await = profile;
+        state.gates.write().await.config.live_writes_approved = live_writes_approved;
+        apply_plan(
+            &state,
+            &ApplyPlanParams {
+                plan_id: kxprov_api::PlanId("unknown".into()),
+                diff_hash: kxprov_api::DiffHash("unknown".into()),
+            },
+            TokenId("writer".into()),
+            false,
+        )
+        .await
+        .expect_err("an unknown plan never applies")
+    }
+
+    #[tokio::test]
+    async fn apply_plan_live_writes_gate_blocks_serial_transport_on_non_prod_profiles() {
+        for profile in [Profile::Test, Profile::Sim] {
+            let err =
+                apply_plan_error_on(crate::config::TransportKind::Serial, profile, false).await;
+            assert_eq!(err.code, "gate", "{profile:?}");
+            assert_eq!(err.message, "live_writes_approved is false", "{profile:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn apply_plan_live_writes_gate_skips_non_prod_profiles_on_sim_transport() {
+        for profile in [Profile::Test, Profile::Sim] {
+            let err = apply_plan_error_on(crate::config::TransportKind::Sim, profile, false).await;
+            assert_eq!(err.code, "plan", "{profile:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn apply_plan_serial_transport_passes_the_gate_when_live_writes_approved() {
+        for profile in [Profile::Test, Profile::Sim] {
+            let err =
+                apply_plan_error_on(crate::config::TransportKind::Serial, profile, true).await;
+            assert_eq!(err.code, "plan", "{profile:?}");
+        }
     }
 
     #[tokio::test]
