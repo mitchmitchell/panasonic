@@ -56,7 +56,7 @@ impl Default for HealthConfig {
         Self {
             silence_after: Duration::from_secs(86_400),
             cts_low_after: Duration::from_secs(30),
-            cts_monitor: true,
+            cts_monitor: false,
         }
     }
 }

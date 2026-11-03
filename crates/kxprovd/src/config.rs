@@ -74,7 +74,7 @@ pub struct SmdrConfig {
     pub silence_alert_after: i64,
     /// Seconds CTS must stay low to raise, and high to clear, a CTS-low alert. Default 30.
     pub cts_low_alert_after: i64,
-    /// Alert on CTS low. Off still reports CTS in `smdr_status`, never alerting.
+    /// Alert on CTS low. Default false (opt-in); off still reports CTS in `smdr_status`, never alerting.
     pub cts_monitor: bool,
 }
 
@@ -87,7 +87,7 @@ impl Default for SmdrConfig {
             enabled: true,
             silence_alert_after: DEFAULT_SILENCE_ALERT_AFTER_SECS,
             cts_low_alert_after: DEFAULT_CTS_LOW_ALERT_AFTER_SECS,
-            cts_monitor: true,
+            cts_monitor: false,
         }
     }
 }

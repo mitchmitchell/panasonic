@@ -314,6 +314,25 @@ fn cts_low_is_debounced_both_ways_and_disabled_or_unreadable_cts_never_alerts() 
 }
 
 #[test]
+fn default_config_never_raises_cts_low_on_a_line_that_reads_low() {
+    let parsed = kxprovd::config::SmdrConfig::default().health().unwrap();
+    assert_eq!(parsed, HealthConfig::default());
+    assert!(!parsed.cts_monitor);
+    let mut r = Rig::new(parsed);
+    for t in (0..3600).step_by(5) {
+        let edges = r.observe(Observation::ModemStatus(Ok(false)), Duration::from_secs(t));
+        assert!(
+            !edges.iter().any(is_raised(SmdrAlertKind::CtsLow)),
+            "default config raised CtsLow at {t}s"
+        );
+    }
+    assert!(!r.active().contains(&SmdrAlertKind::CtsLow));
+    let cts = r.live.snapshot().cts;
+    assert!(!cts.monitored);
+    assert_eq!(cts.high, Some(false));
+}
+
+#[test]
 fn header_mismatch_raises_once_and_clears_on_the_s4_matched_signal() {
     use SmdrAlertKind::HeaderMismatch;
     let changed = SPEC_HEADER.replace("Acc code", "Cost    ");

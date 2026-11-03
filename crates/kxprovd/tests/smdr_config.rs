@@ -61,17 +61,18 @@ fn health_thresholds_default_and_load_from_config() {
         on.smdr.cts_low_alert_after,
         DEFAULT_CTS_LOW_ALERT_AFTER_SECS
     );
-    assert!(on.smdr.cts_monitor);
+    assert!(!on.smdr.cts_monitor);
+    assert!(!on.smdr_health.cts_monitor);
     let set = Config::load_from_etc(etc(
         d.path(),
-        r#","smdr":{"silence_alert_after":600,"cts_low_alert_after":5,"cts_monitor":false}"#,
+        r#","smdr":{"silence_alert_after":600,"cts_low_alert_after":5,"cts_monitor":true}"#,
     ))
     .unwrap();
     let health = set.smdr_health;
     assert_eq!(set.smdr.health().unwrap(), health);
     assert_eq!(health.silence_after, Duration::from_secs(600));
     assert_eq!(health.cts_low_after, Duration::from_secs(5));
-    assert!(!health.cts_monitor);
+    assert!(health.cts_monitor);
 }
 
 #[test]
