@@ -650,11 +650,14 @@ mod log_redaction_tests {
         }
     }
 
+    /// Captures formatted log lines without timestamps, so digit checks on the output can
+    /// only match logged fields.
     pub(super) fn capture() -> (Capture, tracing::subscriber::DefaultGuard) {
         let cap = Capture::default();
         let writer = cap.clone();
         let subscriber = tracing_subscriber::fmt()
             .with_ansi(false)
+            .without_time()
             .with_writer(move || writer.clone())
             .finish();
         let guard = tracing::subscriber::set_default(subscriber);
