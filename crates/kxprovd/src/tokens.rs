@@ -2033,19 +2033,68 @@ mod tests {
             .verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan)
             .expect("warm");
         std::fs::write(&path, b"{not-json").unwrap();
+        assert_eq!(store.live_disk_probe_threads_for_test(), 0);
+        assert_eq!(store.leaked_disk_probe_threads_for_test(), 0);
         let grace_start = Instant::now();
-        store
-            .verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan)
-            .expect("grace snapshot");
-        assert!(
-            grace_start.elapsed() < timing.grace,
-            "transient reload must give up its retries inside the grace"
-        );
+        let snapshot = store.verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan);
+        let elapsed = grace_start.elapsed();
+        if elapsed < timing.grace {
+            snapshot.expect("a grace snapshot answered inside the grace serves the cached entry");
+        } else {
+            assert!(
+                matches!(snapshot, Ok(_) | Err(TokenError::StoreUnavailable)),
+                "a host stall of {elapsed:?} outlasted the grace; only the cached entry or fail-closed is allowed, got {snapshot:?}"
+            );
+        }
         backdate_outage_for_test(&store, timing.grace);
         assert!(matches!(
             store.verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan),
             Err(TokenError::StoreUnavailable)
         ));
+    }
+
+    #[test]
+    fn another_stores_abandoned_probe_and_fast_fail_latch_do_not_reach_a_fresh_store() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("tokens.json");
+        write_tokens_revoking_writer(&path, false);
+        let earlier = TokenStore::load_insecure(path.clone()).expect("load earlier");
+        use_hung_probe_timing(&earlier);
+        earlier
+            .verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan)
+            .expect("warm earlier");
+        std::fs::write(&path, b"{bad").unwrap();
+        let hang = ReloadProbeHangGuard::enable(&earlier);
+        earlier
+            .verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan)
+            .expect("timed-out probe inside the grace serves the cached entry");
+        assert_eq!(earlier.leaked_disk_probe_threads_for_test(), 1);
+        assert!(matches!(
+            earlier.verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan),
+            Err(TokenError::StoreUnavailable)
+        ));
+
+        write_tokens_revoking_writer(&path, false);
+        let fresh = TokenStore::load_insecure(path.clone()).expect("load fresh");
+        let timing = use_grace(&fresh, STALL_TOLERANT_GRACE);
+        fresh
+            .verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan)
+            .expect("warm fresh");
+        let ino_before = path_identity(&path);
+        std::fs::write(&path, b"{not-json").unwrap();
+        assert_eq!(
+            path_identity(&path),
+            ino_before,
+            "same inode as the abandoned probe's"
+        );
+        let grace_start = Instant::now();
+        fresh
+            .verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan)
+            .expect("a fresh store's grace snapshot ignores another store's probe state");
+        assert!(grace_start.elapsed() < timing.grace);
+
+        drop(hang);
+        assert!(earlier.wait_probe_threads_exited_for_test(Duration::from_secs(10)));
     }
 
     struct ReloadProbeHangGuard {
