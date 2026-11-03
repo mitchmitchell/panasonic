@@ -52,17 +52,14 @@ impl<S: SmdrSource> ByteTap<S> {
 impl<S: SmdrSource> SmdrSource for ByteTap<S> {
     fn recv(&mut self, timeout_ms: u64) -> Result<Vec<u8>, TransportError> {
         let bytes = self.inner.recv(timeout_ms)?;
-        let n = match u64::try_from(bytes.len()) {
-            Ok(n) => n,
-            Err(_usize_wider_than_u64) => u64::MAX,
-        };
-        self.count.fetch_add(n, Ordering::Relaxed);
+        self.count.fetch_add(bytes.len() as u64, Ordering::Relaxed);
         Ok(bytes)
     }
 }
 
-/// The health side of a [`ByteTap`].
-#[derive(Debug)]
+/// The health side of a [`ByteTap`]. `Default` is a counter with no tap, which never
+/// reports new bytes.
+#[derive(Debug, Default)]
 pub struct ByteCounter {
     count: Arc<AtomicU64>,
     seen: u64,
@@ -82,24 +79,36 @@ impl ByteCounter {
 pub struct HealthBoard {
     monitor: HealthMonitor,
     live: Arc<SmdrLive>,
+    bytes: ByteCounter,
 }
 
 impl HealthBoard {
-    pub fn new(cfg: HealthConfig, live: Arc<SmdrLive>) -> Self {
+    pub fn new(cfg: HealthConfig, live: Arc<SmdrLive>, bytes: ByteCounter) -> Self {
         let monitor = HealthMonitor::new(cfg);
         live.set_health(monitor.active(), monitor.cts_status());
-        Self { monitor, live }
+        Self {
+            monitor,
+            live,
+            bytes,
+        }
     }
 
     /// One timer tick: folds in new bytes, then re-evaluates. One timer per daemon drives this.
-    pub fn tick(&mut self, bytes: &mut ByteCounter, now: Instant, wall: DateTime<Utc>) {
-        if bytes.take_new() {
-            self.observe(Observation::Bytes, now, wall);
-        }
+    pub fn tick(&mut self, now: Instant, wall: DateTime<Utc>) {
         self.observe(Observation::Tick, now, wall);
     }
 
+    /// Applies `obs` after folding in any bytes the tap counted since the last step, so
+    /// silence is never judged on a stale epoch (a header after a quiet period raises
+    /// nothing).
     pub fn observe(&mut self, obs: Observation, now: Instant, wall: DateTime<Utc>) {
+        if self.bytes.take_new() {
+            self.apply(Observation::Bytes, now, wall);
+        }
+        self.apply(obs, now, wall);
+    }
+
+    fn apply(&mut self, obs: Observation, now: Instant, wall: DateTime<Utc>) {
         let edges = self.monitor.step(obs, now, wall);
         self.live
             .set_health(self.monitor.active(), self.monitor.cts_status());

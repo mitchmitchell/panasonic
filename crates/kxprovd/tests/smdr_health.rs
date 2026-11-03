@@ -7,8 +7,8 @@ use chrono::{DateTime, TimeZone, Utc};
 use kxprov_api::{SmdrAlert, SmdrAlertKind, SmdrAlertState};
 use kxprovd::smdr_bus::SmdrLive;
 use kxprovd::smdr_health::{
-    observations_from_reader, ByteCounter, ByteTap, HealthBoard, HealthConfig, ModemStatusError,
-    Observation, PortState,
+    observations_from_reader, ByteTap, HealthBoard, HealthConfig, ModemStatusError, Observation,
+    PortState,
 };
 use kxprovd::smdr_reader::{ReaderEvent, ReceiveOnly, SmdrReader};
 use kxprovd::smdr_store::SmdrStore;
@@ -80,7 +80,6 @@ fn call(n: u32) -> SyntheticCall {
 struct Rig {
     reader: SmdrReader<ByteTap<ReceiveOnly<NeverSend>>>,
     chunks: Rc<RefCell<VecDeque<Vec<u8>>>>,
-    bytes: ByteCounter,
     store: SmdrStore,
     board: HealthBoard,
     live: Arc<SmdrLive>,
@@ -102,9 +101,8 @@ impl Rig {
         let mut rig = Self {
             reader: SmdrReader::new(tap),
             chunks,
-            bytes,
             store,
-            board: HealthBoard::new(cfg, Arc::clone(&live)),
+            board: HealthBoard::new(cfg, Arc::clone(&live), bytes),
             live,
             edges,
             t0: Instant::now(),
@@ -133,13 +131,13 @@ impl Rig {
                 self.board.observe(obs, now, wall());
             }
         }
-        self.board.tick(&mut self.bytes, now, wall());
+        self.board.tick(now, wall());
         self.drain_edges()
     }
 
     fn observe(&mut self, obs: Observation, at: Duration) -> Vec<SmdrAlert> {
         self.board.observe(obs, self.t0 + at, wall());
-        self.board.tick(&mut self.bytes, self.t0 + at, wall());
+        self.board.tick(self.t0 + at, wall());
         self.drain_edges()
     }
 
@@ -351,6 +349,21 @@ fn header_mismatch_raises_once_and_clears_on_the_s4_matched_signal() {
     r.feed(em.take_output());
     one(&r.run(s(100)), is_cleared(HeaderMismatch));
     assert!(r.active().is_empty(), "4. matching header clears");
+}
+
+#[test]
+fn header_after_a_quiet_period_raises_no_line_silence() {
+    let changed = SPEC_HEADER.replace("Acc code", "Cost    ");
+    let mut r = Rig::new(cfg(false));
+
+    r.feed(format!("{changed}\r\n").into_bytes());
+    let edges = r.run(SILENCE + EPS);
+    one(&edges, is_raised(SmdrAlertKind::HeaderMismatch));
+    assert_eq!(
+        r.active(),
+        vec![SmdrAlertKind::HeaderMismatch],
+        "bytes carrying the header reset silence before it is judged"
+    );
 }
 
 fn data_version(db: &rusqlite::Connection) -> i64 {

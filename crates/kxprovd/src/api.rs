@@ -1559,7 +1559,7 @@ mod smdr_dispatch_tests {
 
     #[tokio::test]
     async fn s7_alerts_show_in_status_and_stream_as_alert_events() {
-        use crate::smdr_health::{HealthBoard, HealthConfig, Observation};
+        use crate::smdr_health::{ByteCounter, HealthBoard, HealthConfig, Observation};
         let tmp = tempfile::tempdir().unwrap();
         let st = Arc::new(state(&tmp));
         let (_ack, mut lines) = open_subscription(&st, "bots").await;
@@ -1570,6 +1570,7 @@ mod smdr_dispatch_tests {
                 cts_monitor: true,
             },
             Arc::clone(&st.smdr),
+            ByteCounter::default(),
         );
         board.observe(
             Observation::HeaderMismatch,
