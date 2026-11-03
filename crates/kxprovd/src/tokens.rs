@@ -2028,28 +2028,18 @@ mod tests {
         let path = tmp.path().join("tokens.json");
         write_tokens_revoking_writer(&path, false);
         let store = TokenStore::load_insecure(path.clone()).expect("load");
-        let timing = use_grace(&store, STALL_TOLERANT_GRACE);
+        use_grace(&store, UNEXPIRABLE_GRACE);
         store
             .verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan)
             .expect("warm");
         std::fs::write(&path, b"{not-json").unwrap();
         assert_eq!(store.live_disk_probe_threads_for_test(), 0);
         assert_eq!(store.leaked_disk_probe_threads_for_test(), 0);
-        let grace_start = Instant::now();
-        let snapshot = store.verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan);
-        let elapsed = grace_start.elapsed();
-        if elapsed < timing.grace {
-            snapshot.expect("a grace snapshot answered inside the grace serves the cached entry");
-        } else {
-            assert!(
-                matches!(snapshot, Ok(_) | Err(TokenError::StoreUnavailable)),
-                "a host stall of {elapsed:?} outlasted the grace; only the cached entry or fail-closed is allowed, got {snapshot:?}"
-            );
-            eprintln!(
-                "reload_corrupt_fails_closed_after_grace_window: in-grace path NOT exercised; the grace snapshot took {elapsed:?} (grace {:?}), got {snapshot:?}",
-                timing.grace
-            );
-        }
+        store
+            .verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan)
+            .expect("a grace snapshot answered inside the grace serves the cached entry");
+        assert_served_inside_the_grace(&store, "reload_corrupt_fails_closed_after_grace_window");
+        let timing = use_grace(&store, STALL_TOLERANT_GRACE);
         backdate_outage_for_test(&store, timing.grace);
         assert!(matches!(
             store.verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan),
@@ -2083,7 +2073,7 @@ mod tests {
 
         std::fs::write(&path, &good).expect("restore good tokens in place");
         let fresh = TokenStore::load_insecure(path.clone()).expect("load fresh");
-        let timing = use_grace(&fresh, STALL_TOLERANT_GRACE);
+        use_grace(&fresh, UNEXPIRABLE_GRACE);
         fresh
             .verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan)
             .expect("warm fresh");
@@ -2096,21 +2086,13 @@ mod tests {
         assert_eq!(earlier.leaked_disk_probe_threads_for_test(), 1);
         assert_eq!(fresh.live_disk_probe_threads_for_test(), 0);
         assert_eq!(fresh.leaked_disk_probe_threads_for_test(), 0);
-        let grace_start = Instant::now();
-        let snapshot = fresh.verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan);
-        let elapsed = grace_start.elapsed();
-        if elapsed < timing.grace {
-            snapshot.expect("a fresh store's grace snapshot ignores another store's probe state");
-        } else {
-            assert!(
-                matches!(snapshot, Ok(_) | Err(TokenError::StoreUnavailable)),
-                "a host stall of {elapsed:?} outlasted the grace; only the cached entry or fail-closed is allowed, got {snapshot:?}"
-            );
-            eprintln!(
-                "another_stores_abandoned_probe_and_fast_fail_latch_do_not_reach_a_fresh_store: in-grace path NOT exercised; the grace snapshot took {elapsed:?} (grace {:?}), got {snapshot:?}",
-                timing.grace
-            );
-        }
+        fresh
+            .verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan)
+            .expect("a fresh store's grace snapshot ignores another store's probe state");
+        assert_served_inside_the_grace(
+            &fresh,
+            "another_stores_abandoned_probe_and_fast_fail_latch_do_not_reach_a_fresh_store",
+        );
         assert_eq!(fresh.leaked_disk_probe_threads_for_test(), 0);
 
         drop(hang);
@@ -2675,6 +2657,28 @@ mod tests {
     /// a loaded test host outlasts it. A test that needs the grace to have run
     /// out moves the outage start back with [`backdate_outage_for_test`] instead of sleeping.
     const STALL_TOLERANT_GRACE: Duration = Duration::from_secs(30);
+
+    /// A grace no test run can outlast: the runner's outer timeout kills a
+    /// run long before it ends, so a test on it always takes the in-grace
+    /// path however slowly the host schedules it. Only adds to `Instant`s,
+    /// so it cannot underflow on a host that booted recently.
+    const UNEXPIRABLE_GRACE: Duration = Duration::from_secs(24 * 60 * 60);
+
+    /// Checks that the last verify started an outage and served the cached
+    /// entry from inside its grace instead of latching the store, and
+    /// reports that the in-grace path was exercised.
+    fn assert_served_inside_the_grace(store: &TokenStore, test: &str) {
+        let state = store.inner.lock().unwrap();
+        assert!(
+            state.reload_failure_since.is_some(),
+            "{test}: the bad read must have started an outage"
+        );
+        assert!(
+            !state.store_unavailable,
+            "{test}: the store latched instead of serving inside the grace"
+        );
+        eprintln!("{test}: in-grace path exercised");
+    }
 
     /// Timing for tests whose probes hang: a stall-tolerant grace, and a short
     /// delivery deadline so each hung wait stays cheap.
