@@ -192,13 +192,25 @@ struct PathIdentity {
     ino: u64,
 }
 
+/// Releases a probe thread's slot when the thread exits.
+///
+/// When the last probe thread exits and no probe is live, nothing is stuck
+/// any more, so the fast-fail latch that a timed-out (abandoned) probe left
+/// behind is cleared too. An abandoned probe's [`DiskProbeLiveGuard`] skips
+/// that clear because the store already stopped counting it as live.
 struct ProbeThreadSlotGuard {
     alive: Arc<AtomicUsize>,
+    live: Arc<AtomicUsize>,
+    fast_fail_until: Arc<Mutex<Option<Instant>>>,
 }
 
 impl Drop for ProbeThreadSlotGuard {
     fn drop(&mut self) {
-        self.alive.fetch_sub(1, Ordering::AcqRel);
+        let mut fast_fail = self.fast_fail_until.lock().expect("probe fast-fail lock");
+        let prev_alive = self.alive.fetch_sub(1, Ordering::AcqRel);
+        if prev_alive == 1 && self.live.load(Ordering::Acquire) == 0 {
+            *fast_fail = None;
+        }
     }
 }
 
@@ -541,6 +553,8 @@ impl TokenStore {
 
     const RELOAD_GRACE: Duration = Duration::from_secs(2);
     const RELOAD_MAX_ATTEMPTS: usize = 3;
+    const RELOAD_RETRY_PAUSE: Duration = Duration::from_millis(700);
+    const CANCEL_POLL: Duration = Duration::from_millis(5);
 
     #[cfg(feature = "test-util")]
     fn reload_grace_duration() -> Duration {
@@ -661,6 +675,26 @@ impl TokenStore {
         deadline: Instant,
         cancel: Option<&AtomicBool>,
     ) -> Result<Vec<u8>, DiskFingerprint> {
+        Self::read_tokens_until_deadline_with_pause(
+            path,
+            deadline,
+            cancel,
+            Self::RELOAD_RETRY_PAUSE,
+        )
+    }
+
+    /// The retry loop of [`Self::read_tokens_until_deadline`] with the pause
+    /// between attempts as a parameter.
+    ///
+    /// Once `cancel` is set the probe has been abandoned and nobody is
+    /// waiting for its result, so the loop stops at the next attempt or
+    /// pause instead of sleeping out its remaining retries.
+    fn read_tokens_until_deadline_with_pause(
+        path: &Path,
+        deadline: Instant,
+        cancel: Option<&AtomicBool>,
+        pause: Duration,
+    ) -> Result<Vec<u8>, DiskFingerprint> {
         let mut last_fp = DiskFingerprint::Missing;
         for attempt in 0..Self::RELOAD_MAX_ATTEMPTS {
             match Self::try_read_valid_tokens_bytes(path, cancel) {
@@ -671,9 +705,31 @@ impl TokenStore {
                 break;
             }
             let remaining = deadline.saturating_duration_since(Instant::now());
-            std::thread::sleep(remaining.min(Duration::from_millis(700)));
+            if Self::pause_unless_cancelled(remaining.min(pause), cancel) {
+                break;
+            }
         }
         Err(last_fp)
+    }
+
+    /// Pauses for `pause`, returning early with `true` once `cancel` is set.
+    ///
+    /// `cancel` is a plain flag set by the caller that abandons the probe, so
+    /// it is checked every [`Self::CANCEL_POLL`], the same interval the FIFO
+    /// read loop polls it at.
+    fn pause_unless_cancelled(pause: Duration, cancel: Option<&AtomicBool>) -> bool {
+        let cancelled = || cancel.is_some_and(|c| c.load(Ordering::Acquire));
+        let until = Instant::now() + pause;
+        loop {
+            if cancelled() {
+                return true;
+            }
+            let left = until.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return false;
+            }
+            std::thread::sleep(left.min(Self::CANCEL_POLL));
+        }
     }
 
     fn clear_reload_outage(state: &mut TokenState, flight: &TransientReloadFlight) {
@@ -722,6 +778,8 @@ impl TokenStore {
         let (tx, rx) = std::sync::mpsc::sync_channel(1);
         let probe_alive = Arc::clone(&self.probe_threads_alive);
         let probe_alive_err = Arc::clone(&probe_alive);
+        let slot_live = Arc::clone(&self.disk_probe_live);
+        let slot_fast_fail = Arc::clone(&self.probe_fast_fail_until);
         let abandoned_refcounts = Arc::clone(&self.abandoned_probe_refcounts);
         let thread_identity = path_identity(&plan.path);
         let prev = probe_alive.fetch_add(1, Ordering::AcqRel);
@@ -735,7 +793,11 @@ impl TokenStore {
         let spawn_ok = std::thread::Builder::new()
             .name("token-reload-probe".into())
             .spawn(move || {
-                let _slot = ProbeThreadSlotGuard { alive: probe_alive };
+                let _slot = ProbeThreadSlotGuard {
+                    alive: probe_alive,
+                    live: slot_live,
+                    fast_fail_until: slot_fast_fail,
+                };
                 let _thread_guard = ProbeThreadAliveGuard {
                     identity: thread_identity,
                     abandoned_refcounts,
@@ -1293,6 +1355,30 @@ mod tests {
     use kxprov_api::hash_bearer_secret;
 
     #[test]
+    fn abandoned_probe_stops_its_retry_pause_when_cancelled() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("missing-tokens.json");
+        let cancel = Arc::new(AtomicBool::new(false));
+        let (tx, rx) = std::sync::mpsc::channel();
+        let worker_cancel = Arc::clone(&cancel);
+        let worker = std::thread::spawn(move || {
+            let an_hour = Duration::from_secs(3600);
+            let result = TokenStore::read_tokens_until_deadline_with_pause(
+                &path,
+                Instant::now() + an_hour,
+                Some(&worker_cancel),
+                an_hour,
+            );
+            tx.send(result).expect("test thread waits for the result");
+        });
+        cancel.store(true, Ordering::Release);
+        let result = rx
+            .recv_timeout(Duration::from_secs(60))
+            .expect("a cancelled probe must leave its hour-long retry pause");
+        assert!(result.is_err());
+        worker.join().expect("worker");
+    }
+    #[test]
     fn approve_scope_requires_configured_cos_token_id() {
         let file = TokensFile {
             approver_token_id: TokenId("approver".into()),
@@ -1440,7 +1526,14 @@ mod tests {
         store
             .verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan)
             .expect("reload recovers after hung probe");
-        assert_eq!(store.live_disk_probe_threads_for_test(), 0);
+        let exit_deadline = Instant::now() + Duration::from_secs(5);
+        while store.live_disk_probe_threads_for_test() > 0 {
+            assert!(
+                Instant::now() < exit_deadline,
+                "recovery probe thread did not exit after sending its result"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 
     #[test]
