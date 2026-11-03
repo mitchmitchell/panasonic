@@ -150,7 +150,35 @@ impl HealthMonitor {
     /// are measured on it. `wall` only stamps `since`/`at` on alerts and never drives timing.
     #[must_use = "edges must reach smdr_status and the subscribe stream"]
     pub fn step(&mut self, obs: Observation, now: Instant, wall: DateTime<Utc>) -> Vec<SmdrAlert> {
+        self.step_after_bytes(false, obs, now, wall)
+    }
+
+    /// Like [`HealthMonitor::step`], but when `bytes_arrived` first folds in a byte arrival
+    /// without evaluating, so thresholds are judged once, after both inputs are applied.
+    #[must_use = "edges must reach smdr_status and the subscribe stream"]
+    pub fn step_after_bytes(
+        &mut self,
+        bytes_arrived: bool,
+        obs: Observation,
+        now: Instant,
+        wall: DateTime<Utc>,
+    ) -> Vec<SmdrAlert> {
         let mut edges = Vec::new();
+        if bytes_arrived {
+            self.apply(Observation::Bytes, now, wall, &mut edges);
+        }
+        self.apply(obs, now, wall, &mut edges);
+        self.evaluate(now, wall, &mut edges);
+        edges
+    }
+
+    fn apply(
+        &mut self,
+        obs: Observation,
+        now: Instant,
+        wall: DateTime<Utc>,
+        edges: &mut Vec<SmdrAlert>,
+    ) {
         match obs {
             Observation::Bytes => {
                 if self.port == PortState::Smdr {
@@ -201,8 +229,6 @@ impl HealthMonitor {
             }
             Observation::Tick => {}
         }
-        self.evaluate(now, wall, &mut edges);
-        edges
     }
 
     fn evaluate(&mut self, now: Instant, wall: DateTime<Utc>, edges: &mut Vec<SmdrAlert>) {

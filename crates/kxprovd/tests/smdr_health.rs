@@ -141,6 +141,14 @@ impl Rig {
         self.drain_edges()
     }
 
+    /// Has the tap count bytes that no step has folded in yet, then applies `obs` alone.
+    fn observe_with_pending_bytes(&mut self, obs: Observation, at: Duration) -> Vec<SmdrAlert> {
+        self.feed(b"1".to_vec());
+        while self.reader.poll_once(&mut self.store, 1, wall).unwrap() != [ReaderEvent::Idle] {}
+        self.board.observe(obs, self.t0 + at, wall());
+        self.drain_edges()
+    }
+
     fn drain_edges(&mut self) -> Vec<SmdrAlert> {
         std::iter::from_fn(|| self.edges.try_recv().ok()).collect()
     }
@@ -363,6 +371,35 @@ fn header_after_a_quiet_period_raises_no_line_silence() {
         r.active(),
         vec![SmdrAlertKind::HeaderMismatch],
         "bytes carrying the header reset silence before it is judged"
+    );
+}
+
+fn cts_reading(high: Option<bool>) -> Observation {
+    Observation::ModemStatus(high.ok_or_else(|| {
+        ModemStatusError::from(&std::io::Error::from(std::io::ErrorKind::BrokenPipe))
+    }))
+}
+
+fn pending_bytes_at_the_cts_debounce_crossing(reading: Option<bool>) -> Vec<SmdrAlert> {
+    let s = Duration::from_secs;
+    let mut r = Rig::new(cfg(true));
+    assert!(r.observe(cts_reading(Some(false)), s(200)).is_empty());
+    assert!(r.observe(cts_reading(Some(false)), s(229)).is_empty());
+    let edges = r.observe_with_pending_bytes(cts_reading(reading), s(230));
+    assert!(r.active().is_empty(), "{edges:?}");
+    edges
+}
+
+#[test]
+fn pending_bytes_with_an_err_cts_reading_at_the_debounce_crossing_raise_nothing() {
+    assert_eq!(pending_bytes_at_the_cts_debounce_crossing(None), Vec::new());
+}
+
+#[test]
+fn pending_bytes_with_a_high_cts_reading_at_the_debounce_crossing_raise_nothing() {
+    assert_eq!(
+        pending_bytes_at_the_cts_debounce_crossing(Some(true)),
+        Vec::new()
     );
 }
 

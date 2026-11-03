@@ -28,7 +28,8 @@ pub fn observations_from_reader(events: &[ReaderEvent]) -> Vec<Observation> {
 /// Counts bytes received through an [`SmdrSource`]. It adds no transmit path.
 ///
 /// The counter wraps; [`ByteCounter::take_new`] only compares for change, and a non-empty
-/// read can never move it by a multiple of 2^64.
+/// read can never move it by a multiple of 2^64. A read longer than `u64::MAX` (impossible
+/// where usize is at most 64 bits) counts as `u64::MAX`, which still registers as new bytes.
 pub struct ByteTap<S: SmdrSource> {
     inner: S,
     count: Arc<AtomicU64>,
@@ -52,7 +53,8 @@ impl<S: SmdrSource> ByteTap<S> {
 impl<S: SmdrSource> SmdrSource for ByteTap<S> {
     fn recv(&mut self, timeout_ms: u64) -> Result<Vec<u8>, TransportError> {
         let bytes = self.inner.recv(timeout_ms)?;
-        self.count.fetch_add(bytes.len() as u64, Ordering::Relaxed);
+        let n = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+        self.count.fetch_add(n, Ordering::Relaxed);
         Ok(bytes)
     }
 }
@@ -98,18 +100,11 @@ impl HealthBoard {
         self.observe(Observation::Tick, now, wall);
     }
 
-    /// Applies `obs` after folding in any bytes the tap counted since the last step, so
-    /// silence is never judged on a stale epoch (a header after a quiet period raises
-    /// nothing).
+    /// Applies `obs` together with any bytes the tap counted since the last step, then
+    /// evaluates thresholds once, so neither input is judged against the other's stale state.
     pub fn observe(&mut self, obs: Observation, now: Instant, wall: DateTime<Utc>) {
-        if self.bytes.take_new() {
-            self.apply(Observation::Bytes, now, wall);
-        }
-        self.apply(obs, now, wall);
-    }
-
-    fn apply(&mut self, obs: Observation, now: Instant, wall: DateTime<Utc>) {
-        let edges = self.monitor.step(obs, now, wall);
+        let bytes_arrived = self.bytes.take_new();
+        let edges = self.monitor.step_after_bytes(bytes_arrived, obs, now, wall);
         self.live
             .set_health(self.monitor.active(), self.monitor.cts_status());
         for edge in edges {
