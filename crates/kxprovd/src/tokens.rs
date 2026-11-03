@@ -164,6 +164,46 @@ struct TransientReloadFlight {
     leaders: AtomicUsize,
 }
 
+/// A test wait budget charged only for time this process could run.
+///
+/// Each wait is split into short slices. A slice that overran by more than
+/// its own length means the whole process was frozen, as a host under memory
+/// pressure does to every thread at once, so only twice the slice is charged
+/// for it. A wait that never returns still runs out after about its budget,
+/// while a frozen host cannot spend the budget before the awaited thread has
+/// had a chance to run.
+#[cfg(feature = "test-util")]
+pub struct RunnableBudget {
+    left: Duration,
+    last: Instant,
+}
+
+#[cfg(feature = "test-util")]
+impl RunnableBudget {
+    const SLICE: Duration = Duration::from_millis(100);
+
+    /// A budget of `total` runnable time, starting now.
+    pub fn new(total: Duration) -> Self {
+        Self {
+            left: total,
+            last: Instant::now(),
+        }
+    }
+
+    /// How long the next wait may block, or zero once the budget is spent.
+    pub fn slice(&self) -> Duration {
+        self.left.min(Self::SLICE)
+    }
+
+    /// Charges the time since the last charge, capped at twice `slice`.
+    pub fn charge(&mut self, slice: Duration) {
+        let now = Instant::now();
+        let took = now.saturating_duration_since(self.last);
+        self.last = now;
+        self.left = self.left.saturating_sub(took.min(slice.saturating_mul(2)));
+    }
+}
+
 #[cfg(feature = "test-util")]
 static PROBE_JOIN_HANDLES: Mutex<Vec<std::thread::JoinHandle<()>>> = Mutex::new(Vec::new());
 
@@ -522,40 +562,60 @@ impl TokenStore {
         RELOAD_WAITS.with(std::cell::Cell::get)
     }
 
-    /// Blocks until at least one probe thread is running, or `timeout` passes.
+    /// Blocks until at least one probe thread is running, or `timeout` of
+    /// runnable time passes, as counted by [`RunnableBudget`].
     /// Returns whether a probe thread started.
     ///
     /// A poisoned lock is recovered for the reason given on
     /// `lock_ignoring_poison`.
     #[cfg(feature = "test-util")]
     pub fn wait_probe_thread_started_for_test(&self, timeout: Duration) -> bool {
-        let held = lock_ignoring_poison(&self.probe_exit_signal.lock);
-        let (_held, result) = self
-            .probe_exit_signal
-            .cv
-            .wait_timeout_while(held, timeout, |_| {
-                self.probe_threads_alive.load(Ordering::Acquire) == 0
-            })
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        !result.timed_out()
+        let mut budget = RunnableBudget::new(timeout);
+        let mut held = lock_ignoring_poison(&self.probe_exit_signal.lock);
+        loop {
+            if self.probe_threads_alive.load(Ordering::Acquire) != 0 {
+                return true;
+            }
+            let slice = budget.slice();
+            if slice.is_zero() {
+                return false;
+            }
+            held = self
+                .probe_exit_signal
+                .cv
+                .wait_timeout(held, slice)
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .0;
+            budget.charge(slice);
+        }
     }
 
-    /// Blocks until no probe thread is running, or `timeout` passes.
+    /// Blocks until no probe thread is running, or `timeout` of runnable
+    /// time passes, as counted by [`RunnableBudget`].
     /// Returns whether every probe thread exited.
     ///
     /// A poisoned lock is recovered for the reason given on
     /// `lock_ignoring_poison`.
     #[cfg(feature = "test-util")]
     pub fn wait_probe_threads_exited_for_test(&self, timeout: Duration) -> bool {
-        let held = lock_ignoring_poison(&self.probe_exit_signal.lock);
-        let (_held, result) = self
-            .probe_exit_signal
-            .cv
-            .wait_timeout_while(held, timeout, |_| {
-                self.probe_threads_alive.load(Ordering::Acquire) > 0
-            })
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        !result.timed_out()
+        let mut budget = RunnableBudget::new(timeout);
+        let mut held = lock_ignoring_poison(&self.probe_exit_signal.lock);
+        loop {
+            if self.probe_threads_alive.load(Ordering::Acquire) == 0 {
+                return true;
+            }
+            let slice = budget.slice();
+            if slice.is_zero() {
+                return false;
+            }
+            held = self
+                .probe_exit_signal
+                .cv
+                .wait_timeout(held, slice)
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .0;
+            budget.charge(slice);
+        }
     }
 
     /// Ends the probe fast-fail window latched by an earlier call, so the next
@@ -1916,7 +1976,8 @@ mod tests {
     }
 
     /// Runs a test body on its own thread and fails the test if it has not
-    /// finished within [`TEST_BODY_BOUND`], so a blocking wait that never
+    /// finished within [`TEST_BODY_BOUND`] of runnable time, as counted by
+    /// [`RunnableBudget`], so a blocking wait that never
     /// returns becomes a failure instead of hanging the suite. The bound is a
     /// safety net for hangs, not a timing assertion.
     ///
@@ -1940,9 +2001,17 @@ mod tests {
         let body_tid = tid_rx
             .recv()
             .expect("body thread reports its tid before running");
-        if let Err(std::sync::mpsc::RecvTimeoutError::Timeout) =
-            done_rx.recv_timeout(TEST_BODY_BOUND)
-        {
+        let mut budget = RunnableBudget::new(TEST_BODY_BOUND);
+        let mut finished = false;
+        while !finished && !budget.slice().is_zero() {
+            let slice = budget.slice();
+            finished = !matches!(
+                done_rx.recv_timeout(slice),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+            );
+            budget.charge(slice);
+        }
+        if !finished {
             let wall = started.elapsed();
             let stat_path = Path::new("/proc/self/task").join(&body_tid).join("stat");
             let body_cpu = match std::fs::read_to_string(&stat_path) {
@@ -1962,6 +2031,28 @@ mod tests {
         if let Err(payload) = handle.join() {
             std::panic::resume_unwind(payload);
         }
+    }
+
+    #[test]
+    fn runnable_budget_charges_a_frozen_slice_at_most_twice_its_length() {
+        let mut budget = RunnableBudget::new(Duration::from_secs(1));
+        let slice = budget.slice();
+        budget.last = budget.last.checked_sub(Duration::from_secs(50)).unwrap();
+        budget.charge(slice);
+        assert_eq!(budget.left, Duration::from_millis(800));
+    }
+
+    #[test]
+    fn runnable_budget_runs_out_when_every_slice_is_waited_in_full() {
+        let mut budget = RunnableBudget::new(Duration::from_millis(500));
+        let mut slices = 0;
+        while !budget.slice().is_zero() {
+            let slice = budget.slice();
+            std::thread::sleep(slice);
+            budget.charge(slice);
+            slices += 1;
+        }
+        assert!(slices <= 5, "a budget waited in full took {slices} slices");
     }
 
     #[test]
@@ -3136,7 +3227,7 @@ mod tests {
         let path = tmp.path().join("tokens.json");
         write_tokens_revoking_writer(&path, false);
         let store = TokenStore::load_insecure(path.clone()).expect("load");
-        use_grace(&store, STALL_TOLERANT_GRACE);
+        use_grace(&store, UNEXPIRABLE_GRACE);
         store
             .verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan)
             .expect("warm");
