@@ -1473,13 +1473,13 @@ impl TokenStore {
     /// Fails closed, latching the outage, when a cached answer at `now` would
     /// be older than [`ReloadTiming::max_stale_serve`] measured from `stale_since`.
     fn enforce_max_stale_serve(state: &mut TokenState, now: Instant) -> Result<(), TokenError> {
-        match state.stale_since {
-            Some(since)
-                if now.saturating_duration_since(since) > state.reload_timing.max_stale_serve() =>
-            {
-                Err(Self::latch_store_unavailable(state))
-            }
-            _ => Ok(()),
+        let stale_for = state
+            .stale_since
+            .map(|since| now.saturating_duration_since(since));
+        if stale_for.is_some_and(|age| age > state.reload_timing.max_stale_serve()) {
+            Err(Self::latch_store_unavailable(state))
+        } else {
+            Ok(())
         }
     }
 
@@ -1811,12 +1811,12 @@ mod tests {
             None => return Err(format!("<unparsed stat: {stat}>")),
         };
         let tick = |i: usize| fields.get(i).and_then(|f| f.parse::<u64>().ok());
-        match (tick(11), tick(12)) {
-            (Some(utime), Some(stime)) => Ok(Duration::from_millis(
-                (utime + stime) * 1000 / PROC_TICKS_PER_SEC,
-            )),
-            _ => Err(format!("<no utime/stime in stat: {stat}>")),
-        }
+        tick(11)
+            .zip(tick(12))
+            .map(|(utime, stime)| {
+                Duration::from_millis((utime + stime) * 1000 / PROC_TICKS_PER_SEC)
+            })
+            .ok_or_else(|| format!("<no utime/stime in stat: {stat}>"))
     }
 
     /// Describes threads of this process from `/proc/self/task`: name,
