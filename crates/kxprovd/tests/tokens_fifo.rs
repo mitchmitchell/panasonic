@@ -66,35 +66,28 @@ fn wait_live_probe_threads_drained(store: &TokenStore, deadline: Instant) {
     );
 }
 
-/// Pair FIFO ends without blocking `open()` deadlocks (reader/writer peer wait).
+/// Writes `bytes` into the FIFO at `path`, then holds the read end open for
+/// 2 s so a probe can read them.
+///
+/// The read end is opened before the writer starts and stays open until the
+/// write finishes. A blocking `O_WRONLY` open of a FIFO with no reader never
+/// returns, so a writer scheduled late must still find this reader.
 fn write_bytes_through_fifo(path: &std::path::Path, bytes: &[u8]) {
     use nix::fcntl::{open, OFlag};
     use nix::sys::stat::Mode;
     use nix::unistd::close;
     use std::io::Write;
 
-    let path = path.to_path_buf();
-    let bytes = bytes.to_vec();
-    std::thread::scope(|scope| {
-        let path_read = path.clone();
-        scope.spawn(move || {
-            let fd = open(
-                path_read.as_path(),
-                OFlag::O_RDONLY | OFlag::O_NONBLOCK,
-                Mode::empty(),
-            )
-            .expect("fifo read end for paired open");
-            std::thread::sleep(Duration::from_secs(2));
-            let _ = close(fd);
-        });
-        scope.spawn(move || {
-            let mut writer = std::fs::OpenOptions::new()
-                .write(true)
-                .open(path)
-                .expect("fifo write end for paired open");
-            writer.write_all(&bytes).expect("write tokens through fifo");
-        });
-    });
+    let read_fd = open(path, OFlag::O_RDONLY | OFlag::O_NONBLOCK, Mode::empty())
+        .expect("fifo read end for paired open");
+    let mut writer = std::fs::OpenOptions::new()
+        .write(true)
+        .open(path)
+        .expect("fifo write end for paired open");
+    writer.write_all(bytes).expect("write tokens through fifo");
+    drop(writer);
+    std::thread::sleep(Duration::from_secs(2));
+    close(read_fd).expect("close fifo read end");
 }
 
 fn assert_probe_counts_bounded(store: &TokenStore) {
