@@ -112,6 +112,7 @@ async fn smdr_subscribe<W: tokio::io::AsyncWrite + Unpin>(
         return Ok(());
     }
     let live = state.smdr.subscribe();
+    let alerts = state.smdr.subscribe_alerts();
     let db = crate::smdr_api::db_path(&state.config.data_dir);
     let replay = blocking_call_log("smdr replay", move || {
         let after = match since_id {
@@ -147,7 +148,7 @@ async fn smdr_subscribe<W: tokio::io::AsyncWrite + Unpin>(
         calls,
         truncated,
         live,
-        Some(state.smdr.subscribe_alerts()),
+        Some(alerts),
         std::time::Duration::from_secs(kxprov_api::SMDR_HEARTBEAT_SECS),
     );
     while let Some(event) = events.recv().await {
@@ -1675,6 +1676,82 @@ mod smdr_dispatch_tests {
         assert!(
             matches!(ev, kxprov_api::SmdrStreamEvent::Call { ref call } if call.id == 9),
             "{ev:?}"
+        );
+    }
+
+    /// Publishes one alert edge from inside the first write, which is the subscription ack.
+    struct AlertOnAck {
+        inner: tokio::io::DuplexStream,
+        st: Arc<ApiState>,
+        fired: bool,
+    }
+
+    impl tokio::io::AsyncWrite for AlertOnAck {
+        fn poll_write(
+            mut self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+            buf: &[u8],
+        ) -> std::task::Poll<std::io::Result<usize>> {
+            if !self.fired {
+                self.fired = true;
+                self.st.smdr.publish_alert(kxprov_api::SmdrAlert {
+                    kind: kxprov_api::SmdrAlertKind::LineSilence,
+                    state: kxprov_api::SmdrAlertState::Raised {
+                        since: "2026-11-04T22:00:00.000Z".into(),
+                    },
+                });
+            }
+            std::pin::Pin::new(&mut self.inner).poll_write(cx, buf)
+        }
+
+        fn poll_flush(
+            mut self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::pin::Pin::new(&mut self.inner).poll_flush(cx)
+        }
+
+        fn poll_shutdown(
+            mut self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::pin::Pin::new(&mut self.inner).poll_shutdown(cx)
+        }
+    }
+
+    #[tokio::test]
+    async fn an_alert_raised_while_the_ack_is_written_still_reaches_the_subscriber() {
+        use tokio::io::AsyncBufReadExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let st = Arc::new(state(&tmp));
+        let (client, server) = tokio::io::duplex(64 * 1024);
+        let writer = AlertOnAck {
+            inner: server,
+            st: Arc::clone(&st),
+            fired: false,
+        };
+        let st2 = Arc::clone(&st);
+        let e = env("bots", RequestBody::SmdrSubscribe { since_id: None });
+        tokio::spawn(async move {
+            let _client_closed_the_stream = smdr_subscribe(&st2, GATEWAY, &e, None, writer).await;
+        });
+        let mut lines = tokio::io::BufReader::new(client).lines();
+        let ack: Response =
+            serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+        assert!(ack.ok, "{ack:?}");
+        let line = tokio::time::timeout(std::time::Duration::from_secs(10), lines.next_line())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let ev: kxprov_api::SmdrStreamEvent = serde_json::from_str(&line).unwrap();
+        assert!(
+            matches!(
+                ev,
+                kxprov_api::SmdrStreamEvent::Alert { ref alert }
+                    if alert.kind == kxprov_api::SmdrAlertKind::LineSilence
+            ),
+            "{line}"
         );
     }
 
