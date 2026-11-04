@@ -1,7 +1,7 @@
 use kxprov_api::{hash_bearer_secret, Scope, TokenEntry, TokenId, TokensFile};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock, PoisonError};
 use tokio::sync::Notify;
 
 pub const WRITER_SECRET: &str = "test-writer-secret";
@@ -164,4 +164,22 @@ pub fn synthetic_smdr_bytes(first: usize, n: usize) -> Vec<u8> {
         emitter.call_ended(&call).expect("synthetic call");
     }
     emitter.take_output()
+}
+
+static SIM_OPEN_HOLDERS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// Records the lease holder id the in-process sim transport was opened under (#74).
+pub fn record_sim_open_holder(holder: &str) {
+    SIM_OPEN_HOLDERS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .push(holder.to_string());
+}
+
+/// Lease holder ids the in-process sim transport has been opened under, oldest first.
+pub fn sim_open_holders() -> Vec<String> {
+    SIM_OPEN_HOLDERS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone()
 }

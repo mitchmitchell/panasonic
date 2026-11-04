@@ -73,6 +73,10 @@ name = "f1_v28_v29"
 required-features = ["test-util"]
 
 [[test]]
+name = "lease_holder_ids"
+required-features = ["test-util"]
+
+[[test]]
 name = "timing_and_readback"
 required-features = ["test-util"]
 

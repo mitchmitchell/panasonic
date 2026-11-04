@@ -92,6 +92,8 @@ pub fn open(config: &Config, port: &DeviceArbiter, job_id: &str) -> Result<AnyTr
                     .sim_pbx
                     .clone()
                     .ok_or_else(|| "sim transport requires sim_pbx".to_string())?;
+                #[cfg(feature = "test-util")]
+                crate::test_util::record_sim_open_holder(job_id);
                 Ok(AnyTransport::Sim(Box::new(SimTransportBridge::new(pbx))))
             }
             #[cfg(not(feature = "inprocess-sim"))]

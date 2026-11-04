@@ -620,6 +620,19 @@ mod prod_gate_tests {
         let ctx = test_worker_ctx(&tmp, true);
         assert!(apply_job_prod_gate(&ctx, Profile::Sim).is_none());
     }
+
+    #[tokio::test]
+    async fn apply_job_live_writes_gate_blocks_serial_transport_on_test_profile() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut ctx = test_worker_ctx(&tmp, false);
+        ctx.config.transport = crate::config::TransportKind::Serial;
+        ctx.gates.write().await.config.live_writes_approved = false;
+        let outcome = apply_job_prod_gate(&ctx, Profile::Test).expect("blocked");
+        assert!(
+            matches!(outcome, JobOutcome::Err { ref code, .. } if code == "gate"),
+            "{outcome:?}"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -651,11 +664,14 @@ mod log_redaction_tests {
         }
     }
 
+    /// Captures formatted log lines without timestamps, so digit checks on the output can
+    /// only match logged fields.
     pub(super) fn capture() -> (Capture, tracing::subscriber::DefaultGuard) {
         let cap = Capture::default();
         let writer = cap.clone();
         let subscriber = tracing_subscriber::fmt()
             .with_ansi(false)
+            .without_time()
             .with_writer(move || writer.clone())
             .finish();
         let guard = tracing::subscriber::set_default(subscriber);
