@@ -106,6 +106,7 @@ fn three_transient_failures_surface_the_error() {
         slept.push(ms)
     })
     .unwrap_err();
+    assert_eq!(slept, vec![2_000, 5_000]);
     assert_eq!(slept, BACKOFF_MS.to_vec());
     assert_eq!(err.attempts.len(), MAX_ATTEMPTS as usize);
     assert_eq!(err.disposition(), Disposition::Transient);
