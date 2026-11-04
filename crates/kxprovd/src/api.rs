@@ -113,7 +113,7 @@ async fn smdr_subscribe<W: tokio::io::AsyncWrite + Unpin>(
     }
     let live = state.smdr.subscribe();
     let db = crate::smdr_api::db_path(&state.config.data_dir);
-    let replay = tokio::task::spawn_blocking(move || {
+    let replay = blocking_call_log("smdr replay", move || {
         let after = match since_id {
             Some(id) => id,
             None => crate::smdr_api::max_call_id(&db)?,
@@ -128,17 +128,9 @@ async fn smdr_subscribe<W: tokio::io::AsyncWrite + Unpin>(
     })
     .await;
     let (after, calls, truncated) = match replay {
-        Ok(Ok(r)) => r,
-        Ok(Err(e)) => {
-            let resp = err_response(env.id.clone(), api_err(e.code(), &e.to_string()));
-            write_response(&mut w, &resp).await?;
-            return Ok(());
-        }
-        Err(join) => {
-            tracing::warn!(%join, "smdr replay task failed");
-            let e = kxprov_api::SmdrApiError::StoreFailed;
-            let resp = err_response(env.id.clone(), api_err(e.code(), &e.to_string()));
-            write_response(&mut w, &resp).await?;
+        Ok(r) => r,
+        Err(body) => {
+            write_response(&mut w, &err_response(env.id.clone(), body)).await?;
             return Ok(());
         }
     };
@@ -175,6 +167,25 @@ async fn write_response<W: tokio::io::AsyncWrite + Unpin>(
     w.write_all(line.as_bytes()).await?;
     w.write_all(b"\n").await?;
     w.flush().await
+}
+
+/// Runs a blocking call-log read off the async runtime and maps its typed error to the wire.
+///
+/// A task that panicked or was cancelled is a daemon fault, reported with the `internal`
+/// code so it is never counted as a store failure or a busy store.
+async fn blocking_call_log<T, F>(what: &'static str, read: F) -> Result<T, ApiErrorBody>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, kxprov_api::SmdrApiError> + Send + 'static,
+{
+    match tokio::task::spawn_blocking(read).await {
+        Ok(Ok(v)) => Ok(v),
+        Ok(Err(e)) => Err(api_err(e.code(), &e.to_string())),
+        Err(join) => {
+            tracing::warn!(%join, task = what, "call log task failed");
+            Err(api_err("internal", "call log task failed"))
+        }
+    }
 }
 
 fn api_err(code: &str, message: &str) -> ApiErrorBody {
@@ -496,16 +507,11 @@ async fn smdr_query(
     }
     let db = crate::smdr_api::db_path(&state.config.data_dir);
     let journal = crate::smdr_api::lease_journal_path(&state.config.data_dir);
-    match tokio::task::spawn_blocking(move || crate::smdr_api::query(&db, &journal, &params)).await
-    {
-        Ok(Ok(page)) => Ok(ResponseResult::SmdrPage(page)),
-        Ok(Err(e)) => Err(api_err(e.code(), &e.to_string())),
-        Err(join) => {
-            tracing::warn!(%join, "smdr query task failed");
-            let e = kxprov_api::SmdrApiError::StoreFailed;
-            Err(api_err(e.code(), &e.to_string()))
-        }
-    }
+    blocking_call_log("smdr query", move || {
+        crate::smdr_api::query(&db, &journal, &params)
+    })
+    .await
+    .map(ResponseResult::SmdrPage)
 }
 
 /// Banner state from the port's `mode()`/`holder()` and the reader's own report; no serial I/O.
@@ -564,8 +570,12 @@ async fn smdr_status(
     }
     let db = crate::smdr_api::db_path(&state.config.data_dir);
     let since = local_midnight_utc();
-    match tokio::task::spawn_blocking(move || crate::smdr_api::store_counters(&db, &since)).await {
-        Ok(Ok((lines_today, unparsed_count, last_line_at))) => {
+    match blocking_call_log("smdr status", move || {
+        crate::smdr_api::store_counters(&db, &since)
+    })
+    .await
+    {
+        Ok((lines_today, unparsed_count, last_line_at)) => {
             Ok(ResponseResult::SmdrStatus(kxprov_api::SmdrStatus {
                 port_mode,
                 counters: Some(kxprov_api::SmdrCounters {
@@ -579,12 +589,7 @@ async fn smdr_status(
                 cts: live.cts,
             }))
         }
-        Ok(Err(e)) => Err(api_err(e.code(), &e.to_string())),
-        Err(join) => {
-            tracing::warn!(%join, "smdr status task failed");
-            let e = kxprov_api::SmdrApiError::StoreFailed;
-            Err(api_err(e.code(), &e.to_string()))
-        }
+        Err(body) => Err(body),
     }
 }
 
@@ -1596,6 +1601,33 @@ mod smdr_dispatch_tests {
             }
             other => panic!("{other:?} {:?}", resp.error),
         }
+    }
+
+    #[tokio::test]
+    async fn a_panicking_call_log_task_is_internal_not_a_store_error() {
+        let err = blocking_call_log::<(), _>("test", || panic!("injected call log task panic"))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "internal");
+    }
+
+    #[tokio::test]
+    async fn a_corrupt_call_log_database_is_store_failed_at_dispatch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let st = state(&tmp);
+        std::fs::write(
+            crate::smdr_api::db_path(&st.config.data_dir),
+            vec![0x5a; 8192],
+        )
+        .unwrap();
+        let body = RequestBody::SmdrQuery {
+            params: kxprov_api::SmdrQueryParams::with_defaults(None, None, 1_800_000_000_000),
+        };
+        let resp = dispatch(&st, GATEWAY, &env("bots", body)).await;
+        assert!(!resp.ok);
+        assert_eq!(resp.error.unwrap().code, "store_failed");
+        let resp = dispatch(&st, GATEWAY, &env("bots", RequestBody::SmdrStatus)).await;
+        assert_eq!(resp.error.unwrap().code, "store_failed");
     }
 
     async fn open_subscription(

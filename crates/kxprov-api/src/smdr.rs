@@ -34,10 +34,17 @@ pub enum SmdrApiError {
     BadLimit { max: u16 },
     #[error("cursor is not valid")]
     BadCursor,
-    /// The store is busy or locked by the ingest writer; retrying shortly can succeed.
+    /// Wire code `store_unavailable`: the store is busy or locked by the ingest writer.
+    ///
+    /// Retryable: the same request can succeed once the writer releases its lock.
     #[error("call log unavailable")]
     StoreUnavailable,
-    /// The store exists but could not be opened or read for a reason other than busy or locked.
+    /// Wire code `store_failed`: the call-log database exists but could not be opened or read
+    /// for a reason other than busy or locked, or the lease journal that gap windows come from
+    /// exists but could not be read.
+    ///
+    /// Not retryable: retrying the same request returns the same error until an operator
+    /// repairs the file. A missing database is not this error; it reads as an empty call log.
     #[error("call log could not be read")]
     StoreFailed,
     #[error("call log is disabled")]
@@ -420,6 +427,25 @@ mod tests {
     )]
 
     use super::*;
+
+    #[test]
+    fn store_failed_round_trips_and_is_distinct_from_store_unavailable() {
+        assert_eq!(SmdrApiError::StoreFailed.code(), "store_failed");
+        assert_eq!(
+            SmdrApiError::from_code("store_failed"),
+            Some(SmdrApiError::StoreFailed)
+        );
+        assert_eq!(SmdrApiError::StoreUnavailable.code(), "store_unavailable");
+        assert_eq!(
+            SmdrApiError::from_code("store_unavailable"),
+            Some(SmdrApiError::StoreUnavailable)
+        );
+        assert_ne!(
+            SmdrApiError::StoreFailed.code(),
+            SmdrApiError::StoreUnavailable.code()
+        );
+        assert!(!SmdrApiError::StoreFailed.is_client_error());
+    }
 
     #[test]
     fn status_and_stream_events_have_stable_wire_shapes() {
