@@ -529,7 +529,14 @@ async fn submit_approval(
     }))
 }
 
-pub const APPLY_PREFLIGHT_HOLDER: &str = "apply-preflight-diff-verify";
+/// Prefix of the port-lease holder id for the apply preflight live diff check.
+pub(crate) const APPLY_PREFLIGHT_HOLDER: &str = "apply-preflight-diff-verify";
+
+/// Returns a fresh per-request lease holder id for an apply preflight, so the lease journal
+/// can tell concurrent or repeated requests apart (#74).
+pub(crate) fn apply_preflight_holder() -> String {
+    format!("{APPLY_PREFLIGHT_HOLDER}-{}", crate::queue::next_job_id())
+}
 
 async fn set_mode(
     state: &ApiState,
@@ -604,7 +611,7 @@ async fn apply_plan(
     verify_live_diff_hash(
         &state.config,
         &state.port,
-        APPLY_PREFLIGHT_HOLDER,
+        &apply_preflight_holder(),
         profile,
         &state.plans,
         &params.plan_id,
