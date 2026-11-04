@@ -73,3 +73,7 @@ required-features = ["test-transport-access"]
 [[test]]
 name = "read_path_commands"
 required-features = ["test-transport-access"]
+
+[[test]]
+name = "read_sessions"
+required-features = ["test-transport-access"]

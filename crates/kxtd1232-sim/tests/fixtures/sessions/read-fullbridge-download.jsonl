@@ -1,0 +1,771 @@
+{"fixture": "read-fullbridge-download.jsonl", "derived_from": "fullbridge 2026-10-18 (real unit, read portion before the upload)", "scope": "binary phase of the read path only; sign-on text, banner, password, ROM id and all writes, uploads and 0A/10 frames removed", "payload": "none stored: host rows name a read-plan request (`plan`, index into read-plan-headers.json) or a probe kind (`probe`); tests rebuild every host frame and generate every pbx reply from SimPbx (synthetic_db(), PLACEHOLDER_ROM_ID)", "t_ms": "milliseconds since the first binary frame, rounded"}
+{"t_ms": 0, "dir": "host", "type": "probe", "len": 4, "probe": "version"}
+{"t_ms": 193, "dir": "pbx", "type": "probe_reply", "len": 20}
+{"t_ms": 234, "dir": "host", "type": "probe", "len": 4, "probe": "status"}
+{"t_ms": 449, "dir": "pbx", "type": "probe_reply", "len": 5}
+{"t_ms": 494, "dir": "host", "type": "probe", "len": 4, "probe": "status"}
+{"t_ms": 705, "dir": "pbx", "type": "probe_reply", "len": 5}
+{"t_ms": 729, "dir": "host", "type": "probe", "len": 4, "probe": "status"}
+{"t_ms": 961, "dir": "pbx", "type": "probe_reply", "len": 5}
+{"t_ms": 989, "dir": "host", "type": "probe", "len": 4, "probe": "status"}
+{"t_ms": 1232, "dir": "pbx", "type": "probe_reply", "len": 5}
+{"t_ms": 1263, "dir": "host", "type": "probe", "len": 4, "probe": "status"}
+{"t_ms": 1488, "dir": "pbx", "type": "probe_reply", "len": 5}
+{"t_ms": 12403, "dir": "host", "type": "probe", "len": 4, "probe": "version"}
+{"t_ms": 12744, "dir": "pbx", "type": "probe_reply", "len": 20}
+{"t_ms": 12798, "dir": "host", "type": "probe", "len": 4, "probe": "status"}
+{"t_ms": 13000, "dir": "pbx", "type": "probe_reply", "len": 5}
+{"t_ms": 13017, "dir": "host", "type": "probe", "len": 4, "probe": "status"}
+{"t_ms": 13255, "dir": "pbx", "type": "probe_reply", "len": 5}
+{"t_ms": 13293, "dir": "host", "type": "probe", "len": 4, "probe": "status"}
+{"t_ms": 13511, "dir": "pbx", "type": "probe_reply", "len": 5}
+{"t_ms": 13567, "dir": "host", "type": "probe", "len": 4, "probe": "status"}
+{"t_ms": 13767, "dir": "pbx", "type": "probe_reply", "len": 5}
+{"t_ms": 13787, "dir": "host", "type": "probe", "len": 4, "probe": "status"}
+{"t_ms": 14023, "dir": "pbx", "type": "probe_reply", "len": 5}
+{"t_ms": 14065, "dir": "host", "type": "read_req", "len": 9, "plan": 0}
+{"t_ms": 14279, "dir": "pbx", "type": "read_reply", "len": 144}
+{"t_ms": 14444, "dir": "host", "type": "read_req", "len": 9, "plan": 1}
+{"t_ms": 14790, "dir": "pbx", "type": "read_reply", "len": 144}
+{"t_ms": 14959, "dir": "host", "type": "read_req", "len": 9, "plan": 2}
+{"t_ms": 15302, "dir": "pbx", "type": "read_reply", "len": 144}
+{"t_ms": 15470, "dir": "host", "type": "read_req", "len": 9, "plan": 3}
+{"t_ms": 15813, "dir": "pbx", "type": "read_reply", "len": 144}
+{"t_ms": 15983, "dir": "host", "type": "read_req", "len": 9, "plan": 4}
+{"t_ms": 16325, "dir": "pbx", "type": "read_reply", "len": 144}
+{"t_ms": 16490, "dir": "host", "type": "read_req", "len": 9, "plan": 5}
+{"t_ms": 16837, "dir": "pbx", "type": "read_reply", "len": 144}
+{"t_ms": 17001, "dir": "host", "type": "read_req", "len": 9, "plan": 6}
+{"t_ms": 17348, "dir": "pbx", "type": "read_reply", "len": 144}
+{"t_ms": 17517, "dir": "host", "type": "read_req", "len": 9, "plan": 7}
+{"t_ms": 17860, "dir": "pbx", "type": "read_reply", "len": 144}
+{"t_ms": 18030, "dir": "host", "type": "read_req", "len": 9, "plan": 8}
+{"t_ms": 18372, "dir": "pbx", "type": "read_reply", "len": 144}
+{"t_ms": 18542, "dir": "host", "type": "read_req", "len": 9, "plan": 9}
+{"t_ms": 18883, "dir": "pbx", "type": "read_reply", "len": 144}
+{"t_ms": 19055, "dir": "host", "type": "read_req", "len": 9, "plan": 10}
+{"t_ms": 19395, "dir": "pbx", "type": "read_reply", "len": 204}
+{"t_ms": 19630, "dir": "host", "type": "read_req", "len": 9, "plan": 11}
+{"t_ms": 19907, "dir": "pbx", "type": "read_reply", "len": 204}
+{"t_ms": 20142, "dir": "host", "type": "read_req", "len": 9, "plan": 12}
+{"t_ms": 20418, "dir": "pbx", "type": "read_reply", "len": 204}
+{"t_ms": 20653, "dir": "host", "type": "read_req", "len": 9, "plan": 13}
+{"t_ms": 20930, "dir": "pbx", "type": "read_reply", "len": 204}
+{"t_ms": 21165, "dir": "host", "type": "read_req", "len": 9, "plan": 14}
+{"t_ms": 21441, "dir": "pbx", "type": "read_reply", "len": 204}
+{"t_ms": 21677, "dir": "host", "type": "read_req", "len": 9, "plan": 15}
+{"t_ms": 21969, "dir": "pbx", "type": "read_reply", "len": 132}
+{"t_ms": 22114, "dir": "host", "type": "read_req", "len": 9, "plan": 16}
+{"t_ms": 22481, "dir": "pbx", "type": "read_reply", "len": 132}
+{"t_ms": 22625, "dir": "host", "type": "read_req", "len": 9, "plan": 17}
+{"t_ms": 22992, "dir": "pbx", "type": "read_reply", "len": 34}
+{"t_ms": 23034, "dir": "host", "type": "read_req", "len": 9, "plan": 18}
+{"t_ms": 23248, "dir": "pbx", "type": "read_reply", "len": 164}
+{"t_ms": 23427, "dir": "host", "type": "read_req", "len": 9, "plan": 19}
+{"t_ms": 23760, "dir": "pbx", "type": "read_reply", "len": 164}
+{"t_ms": 23939, "dir": "host", "type": "read_req", "len": 9, "plan": 20}
+{"t_ms": 24271, "dir": "pbx", "type": "read_reply", "len": 164}
+{"t_ms": 24450, "dir": "host", "type": "read_req", "len": 9, "plan": 21}
+{"t_ms": 24783, "dir": "pbx", "type": "read_reply", "len": 164}
+{"t_ms": 24963, "dir": "host", "type": "read_req", "len": 9, "plan": 22}
+{"t_ms": 25295, "dir": "pbx", "type": "read_reply", "len": 164}
+{"t_ms": 25478, "dir": "host", "type": "read_req", "len": 9, "plan": 23}
+{"t_ms": 25807, "dir": "pbx", "type": "read_reply", "len": 164}
+{"t_ms": 25987, "dir": "host", "type": "read_req", "len": 9, "plan": 24}
+{"t_ms": 26318, "dir": "pbx", "type": "read_reply", "len": 164}
+{"t_ms": 26499, "dir": "host", "type": "read_req", "len": 9, "plan": 25}
+{"t_ms": 26829, "dir": "pbx", "type": "read_reply", "len": 164}
+{"t_ms": 27013, "dir": "host", "type": "read_req", "len": 9, "plan": 26}
+{"t_ms": 27341, "dir": "pbx", "type": "read_reply", "len": 10}
+{"t_ms": 27408, "dir": "host", "type": "read_req", "len": 9, "plan": 27}
+{"t_ms": 27597, "dir": "pbx", "type": "read_reply", "len": 166}
+{"t_ms": 27781, "dir": "host", "type": "read_req", "len": 9, "plan": 28}
+{"t_ms": 28109, "dir": "pbx", "type": "read_reply", "len": 204}
+{"t_ms": 28334, "dir": "host", "type": "read_req", "len": 9, "plan": 29}
+{"t_ms": 28620, "dir": "pbx", "type": "read_reply", "len": 90}
+{"t_ms": 28726, "dir": "host", "type": "read_req", "len": 9, "plan": 30}
+{"t_ms": 28876, "dir": "pbx", "type": "read_reply", "len": 8}
+{"t_ms": 28891, "dir": "host", "type": "read_req", "len": 9, "plan": 31}
+{"t_ms": 29132, "dir": "pbx", "type": "read_reply", "len": 196}
+{"t_ms": 29350, "dir": "host", "type": "read_req", "len": 9, "plan": 32}
+{"t_ms": 29644, "dir": "pbx", "type": "read_reply", "len": 196}
+{"t_ms": 29862, "dir": "host", "type": "read_req", "len": 9, "plan": 33}
+{"t_ms": 30155, "dir": "pbx", "type": "read_reply", "len": 196}
+{"t_ms": 30373, "dir": "host", "type": "read_req", "len": 9, "plan": 34}
+{"t_ms": 30667, "dir": "pbx", "type": "read_reply", "len": 196}
+{"t_ms": 30886, "dir": "host", "type": "read_req", "len": 9, "plan": 35}
+{"t_ms": 31178, "dir": "pbx", "type": "read_reply", "len": 124}
+{"t_ms": 31319, "dir": "host", "type": "read_req", "len": 9, "plan": 36}
+{"t_ms": 31690, "dir": "pbx", "type": "read_reply", "len": 124}
+{"t_ms": 31832, "dir": "host", "type": "read_req", "len": 9, "plan": 37}
+{"t_ms": 32201, "dir": "pbx", "type": "read_reply", "len": 124}
+{"t_ms": 32346, "dir": "host", "type": "read_req", "len": 9, "plan": 38}
+{"t_ms": 32713, "dir": "pbx", "type": "read_reply", "len": 124}
+{"t_ms": 32857, "dir": "host", "type": "read_req", "len": 9, "plan": 39}
+{"t_ms": 33225, "dir": "pbx", "type": "read_reply", "len": 124}
+{"t_ms": 33370, "dir": "host", "type": "read_req", "len": 9, "plan": 40}
+{"t_ms": 33736, "dir": "pbx", "type": "read_reply", "len": 154}
+{"t_ms": 33913, "dir": "host", "type": "read_req", "len": 9, "plan": 41}
+{"t_ms": 34248, "dir": "pbx", "type": "read_reply", "len": 124}
+{"t_ms": 34391, "dir": "host", "type": "read_req", "len": 9, "plan": 42}
+{"t_ms": 34760, "dir": "pbx", "type": "read_reply", "len": 204}
+{"t_ms": 34992, "dir": "host", "type": "read_req", "len": 9, "plan": 43}
+{"t_ms": 35271, "dir": "pbx", "type": "read_reply", "len": 204}
+{"t_ms": 35503, "dir": "host", "type": "read_req", "len": 9, "plan": 44}
+{"t_ms": 35783, "dir": "pbx", "type": "read_reply", "len": 204}
+{"t_ms": 36015, "dir": "host", "type": "read_req", "len": 9, "plan": 45}
+{"t_ms": 36294, "dir": "pbx", "type": "read_reply", "len": 204}
+{"t_ms": 36527, "dir": "host", "type": "read_req", "len": 9, "plan": 46}
+{"t_ms": 36806, "dir": "pbx", "type": "read_reply", "len": 204}
+{"t_ms": 37040, "dir": "host", "type": "read_req", "len": 9, "plan": 47}
+{"t_ms": 37318, "dir": "pbx", "type": "read_reply", "len": 204}
+{"t_ms": 37552, "dir": "host", "type": "read_req", "len": 9, "plan": 48}
+{"t_ms": 37829, "dir": "pbx", "type": "read_reply", "len": 204}
+{"t_ms": 38064, "dir": "host", "type": "read_req", "len": 9, "plan": 49}
+{"t_ms": 38341, "dir": "pbx", "type": "read_reply", "len": 204}
+{"t_ms": 38575, "dir": "host", "type": "read_req", "len": 9, "plan": 50}
+{"t_ms": 38853, "dir": "pbx", "type": "read_reply", "len": 204}
+{"t_ms": 39086, "dir": "host", "type": "read_req", "len": 9, "plan": 51}
+{"t_ms": 39364, "dir": "pbx", "type": "read_reply", "len": 204}
+{"t_ms": 39598, "dir": "host", "type": "read_req", "len": 9, "plan": 52}
+{"t_ms": 39876, "dir": "pbx", "type": "read_reply", "len": 204}
+{"t_ms": 40111, "dir": "host", "type": "read_req", "len": 9, "plan": 53}
+{"t_ms": 40388, "dir": "pbx", "type": "read_reply", "len": 204}
+{"t_ms": 40624, "dir": "host", "type": "read_req", "len": 9, "plan": 54}
+{"t_ms": 40899, "dir": "pbx", "type": "read_reply", "len": 204}
+{"t_ms": 41135, "dir": "host", "type": "read_req", "len": 9, "plan": 55}
+{"t_ms": 41411, "dir": "pbx", "type": "read_reply", "len": 204}
+{"t_ms": 41647, "dir": "host", "type": "read_req", "len": 9, "plan": 56}
+{"t_ms": 41922, "dir": "pbx", "type": "read_reply", "len": 204}
+{"t_ms": 42159, "dir": "host", "type": "read_req", "len": 9, "plan": 57}
+{"t_ms": 42450, "dir": "pbx", "type": "read_reply", "len": 204}
+{"t_ms": 42671, "dir": "host", "type": "read_req", "len": 9, "plan": 58}
+{"t_ms": 42962, "dir": "pbx", "type": "read_reply", "len": 204}
+{"t_ms": 43183, "dir": "host", "type": "read_req", "len": 9, "plan": 59}
+{"t_ms": 43473, "dir": "pbx", "type": "read_reply", "len": 204}
+{"t_ms": 43696, "dir": "host", "type": "read_req", "len": 9, "plan": 60}
+{"t_ms": 43985, "dir": "pbx", "type": "read_reply", "len": 204}
+{"t_ms": 44206, "dir": "host", "type": "read_req", "len": 9, "plan": 61}
+{"t_ms": 44497, "dir": "pbx", "type": "read_reply", "len": 204}
+{"t_ms": 44720, "dir": "host", "type": "read_req", "len": 9, "plan": 62}
+{"t_ms": 45009, "dir": "pbx", "type": "read_reply", "len": 204}
+{"t_ms": 45231, "dir": "host", "type": "read_req", "len": 9, "plan": 63}
+{"t_ms": 45520, "dir": "pbx", "type": "read_reply", "len": 204}
+{"t_ms": 45743, "dir": "host", "type": "read_req", "len": 9, "plan": 64}
+{"t_ms": 46032, "dir": "pbx", "type": "read_reply", "len": 204}
+{"t_ms": 46255, "dir": "host", "type": "read_req", "len": 9, "plan": 65}
+{"t_ms": 46543, "dir": "pbx", "type": "read_reply", "len": 204}
+{"t_ms": 46770, "dir": "host", "type": "read_req", "len": 9, "plan": 66}
+{"t_ms": 47055, "dir": "pbx", "type": "read_reply", "len": 132}
+{"t_ms": 47200, "dir": "host", "type": "read_req", "len": 9, "plan": 67}
+{"t_ms": 47566, "dir": "pbx", "type": "read_reply", "len": 100}
+{"t_ms": 47679, "dir": "host", "type": "read_req", "len": 9, "plan": 68}
+{"t_ms": 48078, "dir": "pbx", "type": "read_reply", "len": 28}
+{"t_ms": 48117, "dir": "host", "type": "read_req", "len": 9, "plan": 69}
+{"t_ms": 48334, "dir": "pbx", "type": "read_reply", "len": 20}
+{"t_ms": 48391, "dir": "host", "type": "read_req", "len": 9, "plan": 70}
+{"t_ms": 48589, "dir": "pbx", "type": "read_reply", "len": 10}
+{"t_ms": 48610, "dir": "host", "type": "read_req", "len": 9, "plan": 71}
+{"t_ms": 48846, "dir": "pbx", "type": "read_reply", "len": 12}
+{"t_ms": 48885, "dir": "host", "type": "read_req", "len": 9, "plan": 72}
+{"t_ms": 49101, "dir": "pbx", "type": "read_reply", "len": 36}
+{"t_ms": 49161, "dir": "host", "type": "read_req", "len": 9, "plan": 73}
+{"t_ms": 49357, "dir": "pbx", "type": "read_reply", "len": 36}
+{"t_ms": 49408, "dir": "host", "type": "read_req", "len": 9, "plan": 74}
+{"t_ms": 49613, "dir": "pbx", "type": "read_reply", "len": 20}
+{"t_ms": 49655, "dir": "host", "type": "read_req", "len": 9, "plan": 75}
+{"t_ms": 49869, "dir": "pbx", "type": "read_reply", "len": 36}
+{"t_ms": 49929, "dir": "host", "type": "read_req", "len": 9, "plan": 76}
+{"t_ms": 50124, "dir": "pbx", "type": "read_reply", "len": 132}
+{"t_ms": 50275, "dir": "host", "type": "read_req", "len": 9, "plan": 77}
+{"t_ms": 50636, "dir": "pbx", "type": "read_reply", "len": 8}
+{"t_ms": 50696, "dir": "host", "type": "read_req", "len": 9, "plan": 78}
+{"t_ms": 50892, "dir": "pbx", "type": "read_reply", "len": 20}
+{"t_ms": 50923, "dir": "host", "type": "read_req", "len": 9, "plan": 79}
+{"t_ms": 51148, "dir": "pbx", "type": "read_reply", "len": 68}
+{"t_ms": 51232, "dir": "host", "type": "read_req", "len": 9, "plan": 80}
+{"t_ms": 51403, "dir": "pbx", "type": "read_reply", "len": 8}
+{"t_ms": 51466, "dir": "host", "type": "read_req", "len": 9, "plan": 81}
+{"t_ms": 51659, "dir": "pbx", "type": "read_reply", "len": 68}
+{"t_ms": 51744, "dir": "host", "type": "read_req", "len": 9, "plan": 82}
+{"t_ms": 51915, "dir": "pbx", "type": "read_reply", "len": 68}
+{"t_ms": 51999, "dir": "host", "type": "read_req", "len": 9, "plan": 83}
+{"t_ms": 52171, "dir": "pbx", "type": "read_reply", "len": 52}
+{"t_ms": 52240, "dir": "host", "type": "read_req", "len": 9, "plan": 84}
+{"t_ms": 52427, "dir": "pbx", "type": "read_reply", "len": 154}
+{"t_ms": 52603, "dir": "host", "type": "read_req", "len": 9, "plan": 85}
+{"t_ms": 52938, "dir": "pbx", "type": "read_reply", "len": 154}
+{"t_ms": 53113, "dir": "host", "type": "read_req", "len": 9, "plan": 86}
+{"t_ms": 53450, "dir": "pbx", "type": "read_reply", "len": 154}
+{"t_ms": 53626, "dir": "host", "type": "read_req", "len": 9, "plan": 87}
+{"t_ms": 53962, "dir": "pbx", "type": "read_reply", "len": 154}
+{"t_ms": 54140, "dir": "host", "type": "read_req", "len": 9, "plan": 88}
+{"t_ms": 54473, "dir": "pbx", "type": "read_reply", "len": 154}
+{"t_ms": 54651, "dir": "host", "type": "read_req", "len": 9, "plan": 89}
+{"t_ms": 54985, "dir": "pbx", "type": "read_reply", "len": 154}
+{"t_ms": 55162, "dir": "host", "type": "read_req", "len": 9, "plan": 90}
+{"t_ms": 55496, "dir": "pbx", "type": "read_reply", "len": 154}
+{"t_ms": 55675, "dir": "host", "type": "read_req", "len": 9, "plan": 91}
+{"t_ms": 56008, "dir": "pbx", "type": "read_reply", "len": 154}
+{"t_ms": 56185, "dir": "host", "type": "read_req", "len": 9, "plan": 92}
+{"t_ms": 56520, "dir": "pbx", "type": "read_reply", "len": 154}
+{"t_ms": 56696, "dir": "host", "type": "read_req", "len": 9, "plan": 93}
+{"t_ms": 57031, "dir": "pbx", "type": "read_reply", "len": 154}
+{"t_ms": 57210, "dir": "host", "type": "read_req", "len": 9, "plan": 94}
+{"t_ms": 57543, "dir": "pbx", "type": "read_reply", "len": 154}
+{"t_ms": 57722, "dir": "host", "type": "read_req", "len": 9, "plan": 95}
+{"t_ms": 58055, "dir": "pbx", "type": "read_reply", "len": 154}
+{"t_ms": 58237, "dir": "host", "type": "read_req", "len": 9, "plan": 96}
+{"t_ms": 58567, "dir": "pbx", "type": "read_reply", "len": 154}
+{"t_ms": 58745, "dir": "host", "type": "read_req", "len": 9, "plan": 97}
+{"t_ms": 59078, "dir": "pbx", "type": "read_reply", "len": 154}
+{"t_ms": 59258, "dir": "host", "type": "read_req", "len": 9, "plan": 98}
+{"t_ms": 59589, "dir": "pbx", "type": "read_reply", "len": 154}
+{"t_ms": 59770, "dir": "host", "type": "read_req", "len": 9, "plan": 99}
+{"t_ms": 60101, "dir": "pbx", "type": "read_reply", "len": 154}
+{"t_ms": 60283, "dir": "host", "type": "read_req", "len": 9, "plan": 100}
+{"t_ms": 60613, "dir": "pbx", "type": "read_reply", "len": 154}
+{"t_ms": 60798, "dir": "host", "type": "read_req", "len": 9, "plan": 101}
+{"t_ms": 61124, "dir": "pbx", "type": "read_reply", "len": 154}
+{"t_ms": 61309, "dir": "host", "type": "read_req", "len": 9, "plan": 102}
+{"t_ms": 61636, "dir": "pbx", "type": "read_reply", "len": 154}
+{"t_ms": 61821, "dir": "host", "type": "read_req", "len": 9, "plan": 103}
+{"t_ms": 62147, "dir": "pbx", "type": "read_reply", "len": 154}
+{"t_ms": 62337, "dir": "host", "type": "read_req", "len": 9, "plan": 104}
+{"t_ms": 62675, "dir": "pbx", "type": "read_reply", "len": 164}
+{"t_ms": 62853, "dir": "host", "type": "read_req", "len": 9, "plan": 105}
+{"t_ms": 63187, "dir": "pbx", "type": "read_reply", "len": 164}
+{"t_ms": 63366, "dir": "host", "type": "read_req", "len": 9, "plan": 106}
+{"t_ms": 63699, "dir": "pbx", "type": "read_reply", "len": 164}
+{"t_ms": 63876, "dir": "host", "type": "read_req", "len": 9, "plan": 107}
+{"t_ms": 64210, "dir": "pbx", "type": "read_reply", "len": 164}
+{"t_ms": 64389, "dir": "host", "type": "read_req", "len": 9, "plan": 108}
+{"t_ms": 64722, "dir": "pbx", "type": "read_reply", "len": 164}
+{"t_ms": 64898, "dir": "host", "type": "read_req", "len": 9, "plan": 109}
+{"t_ms": 65233, "dir": "pbx", "type": "read_reply", "len": 164}
+{"t_ms": 65413, "dir": "host", "type": "read_req", "len": 9, "plan": 110}
+{"t_ms": 65745, "dir": "pbx", "type": "read_reply", "len": 164}
+{"t_ms": 65926, "dir": "host", "type": "read_req", "len": 9, "plan": 111}
+{"t_ms": 66257, "dir": "pbx", "type": "read_reply", "len": 164}
+{"t_ms": 66438, "dir": "host", "type": "read_req", "len": 9, "plan": 112}
+{"t_ms": 66768, "dir": "pbx", "type": "read_reply", "len": 164}
+{"t_ms": 66947, "dir": "host", "type": "read_req", "len": 9, "plan": 113}
+{"t_ms": 67280, "dir": "pbx", "type": "read_reply", "len": 164}
+{"t_ms": 67462, "dir": "host", "type": "read_req", "len": 9, "plan": 114}
+{"t_ms": 67791, "dir": "pbx", "type": "read_reply", "len": 164}
+{"t_ms": 67975, "dir": "host", "type": "read_req", "len": 9, "plan": 115}
+{"t_ms": 68303, "dir": "pbx", "type": "read_reply", "len": 164}
+{"t_ms": 68486, "dir": "host", "type": "read_req", "len": 9, "plan": 116}
+{"t_ms": 68815, "dir": "pbx", "type": "read_reply", "len": 164}
+{"t_ms": 68998, "dir": "host", "type": "read_req", "len": 9, "plan": 117}
+{"t_ms": 69327, "dir": "pbx", "type": "read_reply", "len": 164}
+{"t_ms": 69508, "dir": "host", "type": "read_req", "len": 9, "plan": 118}
+{"t_ms": 69838, "dir": "pbx", "type": "read_reply", "len": 164}
+{"t_ms": 70018, "dir": "host", "type": "read_req", "len": 9, "plan": 119}
+{"t_ms": 70349, "dir": "pbx", "type": "read_reply", "len": 164}
+{"t_ms": 70530, "dir": "host", "type": "read_req", "len": 9, "plan": 120}
+{"t_ms": 70861, "dir": "pbx", "type": "read_reply", "len": 164}
+{"t_ms": 71046, "dir": "host", "type": "read_req", "len": 9, "plan": 121}
+{"t_ms": 71373, "dir": "pbx", "type": "read_reply", "len": 164}
+{"t_ms": 71557, "dir": "host", "type": "read_req", "len": 9, "plan": 122}
+{"t_ms": 71884, "dir": "pbx", "type": "read_reply", "len": 164}
+{"t_ms": 72070, "dir": "host", "type": "read_req", "len": 9, "plan": 123}
+{"t_ms": 72396, "dir": "pbx", "type": "read_reply", "len": 164}
+{"t_ms": 72583, "dir": "host", "type": "read_req", "len": 9, "plan": 124}
+{"t_ms": 72908, "dir": "pbx", "type": "read_reply", "len": 164}
+{"t_ms": 73094, "dir": "host", "type": "read_req", "len": 9, "plan": 125}
+{"t_ms": 73419, "dir": "pbx", "type": "read_reply", "len": 164}
+{"t_ms": 73608, "dir": "host", "type": "read_req", "len": 9, "plan": 126}
+{"t_ms": 73931, "dir": "pbx", "type": "read_reply", "len": 164}
+{"t_ms": 74117, "dir": "host", "type": "read_req", "len": 9, "plan": 127}
+{"t_ms": 74443, "dir": "pbx", "type": "read_reply", "len": 164}
+{"t_ms": 74630, "dir": "host", "type": "read_req", "len": 9, "plan": 128}
+{"t_ms": 74954, "dir": "pbx", "type": "read_reply", "len": 164}
+{"t_ms": 75142, "dir": "host", "type": "read_req", "len": 9, "plan": 129}
+{"t_ms": 75466, "dir": "pbx", "type": "read_reply", "len": 164}
+{"t_ms": 75653, "dir": "host", "type": "read_req", "len": 9, "plan": 130}
+{"t_ms": 75977, "dir": "pbx", "type": "read_reply", "len": 164}
+{"t_ms": 76168, "dir": "host", "type": "read_req", "len": 9, "plan": 131}
+{"t_ms": 76489, "dir": "pbx", "type": "read_reply", "len": 164}
+{"t_ms": 76677, "dir": "host", "type": "read_req", "len": 9, "plan": 132}
+{"t_ms": 77001, "dir": "pbx", "type": "read_reply", "len": 164}
+{"t_ms": 77191, "dir": "host", "type": "read_req", "len": 9, "plan": 133}
+{"t_ms": 77512, "dir": "pbx", "type": "read_reply", "len": 164}
+{"t_ms": 77702, "dir": "host", "type": "read_req", "len": 9, "plan": 134}
+{"t_ms": 78024, "dir": "pbx", "type": "read_reply", "len": 164}
+{"t_ms": 78213, "dir": "host", "type": "read_req", "len": 9, "plan": 135}
+{"t_ms": 78536, "dir": "pbx", "type": "read_reply", "len": 164}
+{"t_ms": 78728, "dir": "host", "type": "read_req", "len": 9, "plan": 136}
+{"t_ms": 79047, "dir": "pbx", "type": "read_reply", "len": 164}
+{"t_ms": 79238, "dir": "host", "type": "read_req", "len": 9, "plan": 137}
+{"t_ms": 79559, "dir": "pbx", "type": "read_reply", "len": 164}
+{"t_ms": 79749, "dir": "host", "type": "read_req", "len": 9, "plan": 138}
+{"t_ms": 80071, "dir": "pbx", "type": "read_reply", "len": 164}
+{"t_ms": 80263, "dir": "host", "type": "read_req", "len": 9, "plan": 139}
+{"t_ms": 80582, "dir": "pbx", "type": "read_reply", "len": 164}
+{"t_ms": 80773, "dir": "host", "type": "read_req", "len": 9, "plan": 140}
+{"t_ms": 81094, "dir": "pbx", "type": "read_reply", "len": 164}
+{"t_ms": 81286, "dir": "host", "type": "read_req", "len": 9, "plan": 141}
+{"t_ms": 81605, "dir": "pbx", "type": "read_reply", "len": 164}
+{"t_ms": 81798, "dir": "host", "type": "read_req", "len": 9, "plan": 142}
+{"t_ms": 82117, "dir": "pbx", "type": "read_reply", "len": 164}
+{"t_ms": 82309, "dir": "host", "type": "read_req", "len": 9, "plan": 143}
+{"t_ms": 82629, "dir": "pbx", "type": "read_reply", "len": 164}
+{"t_ms": 82824, "dir": "host", "type": "read_req", "len": 9, "plan": 144}
+{"t_ms": 83156, "dir": "pbx", "type": "read_reply", "len": 164}
+{"t_ms": 83333, "dir": "host", "type": "read_req", "len": 9, "plan": 145}
+{"t_ms": 83668, "dir": "pbx", "type": "read_reply", "len": 164}
+{"t_ms": 83845, "dir": "host", "type": "read_req", "len": 9, "plan": 146}
+{"t_ms": 84180, "dir": "pbx", "type": "read_reply", "len": 164}
+{"t_ms": 84358, "dir": "host", "type": "read_req", "len": 9, "plan": 147}
+{"t_ms": 84691, "dir": "pbx", "type": "read_reply", "len": 164}
+{"t_ms": 84871, "dir": "host", "type": "read_req", "len": 9, "plan": 148}
+{"t_ms": 85203, "dir": "pbx", "type": "read_reply", "len": 164}
+{"t_ms": 85380, "dir": "host", "type": "read_req", "len": 9, "plan": 149}
+{"t_ms": 85714, "dir": "pbx", "type": "read_reply", "len": 164}
+{"t_ms": 85894, "dir": "host", "type": "read_req", "len": 9, "plan": 150}
+{"t_ms": 86226, "dir": "pbx", "type": "read_reply", "len": 164}
+{"t_ms": 86406, "dir": "host", "type": "read_req", "len": 9, "plan": 151}
+{"t_ms": 86737, "dir": "pbx", "type": "read_reply", "len": 164}
+{"t_ms": 86918, "dir": "host", "type": "read_req", "len": 9, "plan": 152}
+{"t_ms": 87249, "dir": "pbx", "type": "read_reply", "len": 164}
+{"t_ms": 87429, "dir": "host", "type": "read_req", "len": 9, "plan": 153}
+{"t_ms": 87761, "dir": "pbx", "type": "read_reply", "len": 164}
+{"t_ms": 87944, "dir": "host", "type": "read_req", "len": 9, "plan": 154}
+{"t_ms": 88272, "dir": "pbx", "type": "read_reply", "len": 164}
+{"t_ms": 88457, "dir": "host", "type": "read_req", "len": 9, "plan": 155}
+{"t_ms": 88784, "dir": "pbx", "type": "read_reply", "len": 24}
+{"t_ms": 88819, "dir": "host", "type": "read_req", "len": 9, "plan": 156}
+{"t_ms": 89040, "dir": "pbx", "type": "read_reply", "len": 44}
+{"t_ms": 89097, "dir": "host", "type": "read_req", "len": 9, "plan": 157}
+{"t_ms": 89296, "dir": "pbx", "type": "read_reply", "len": 20}
+{"t_ms": 89365, "dir": "host", "type": "read_req", "len": 9, "plan": 158}
+{"t_ms": 89551, "dir": "pbx", "type": "read_reply", "len": 44}
+{"t_ms": 89609, "dir": "host", "type": "read_req", "len": 9, "plan": 159}
+{"t_ms": 89807, "dir": "pbx", "type": "read_reply", "len": 36}
+{"t_ms": 89862, "dir": "host", "type": "read_req", "len": 9, "plan": 160}
+{"t_ms": 90063, "dir": "pbx", "type": "read_reply", "len": 20}
+{"t_ms": 90094, "dir": "host", "type": "read_req", "len": 9, "plan": 161}
+{"t_ms": 90320, "dir": "pbx", "type": "read_reply", "len": 24}
+{"t_ms": 90354, "dir": "host", "type": "read_req", "len": 9, "plan": 162}
+{"t_ms": 90575, "dir": "pbx", "type": "read_reply", "len": 84}
+{"t_ms": 90672, "dir": "host", "type": "read_req", "len": 9, "plan": 163}
+{"t_ms": 90831, "dir": "pbx", "type": "read_reply", "len": 16}
+{"t_ms": 90856, "dir": "host", "type": "read_req", "len": 9, "plan": 164}
+{"t_ms": 91086, "dir": "pbx", "type": "read_reply", "len": 44}
+{"t_ms": 91145, "dir": "host", "type": "read_req", "len": 9, "plan": 165}
+{"t_ms": 91342, "dir": "pbx", "type": "read_reply", "len": 124}
+{"t_ms": 91484, "dir": "host", "type": "read_req", "len": 9, "plan": 166}
+{"t_ms": 91854, "dir": "pbx", "type": "read_reply", "len": 124}
+{"t_ms": 91996, "dir": "host", "type": "read_req", "len": 9, "plan": 167}
+{"t_ms": 92365, "dir": "pbx", "type": "read_reply", "len": 68}
+{"t_ms": 92448, "dir": "host", "type": "read_req", "len": 9, "plan": 168}
+{"t_ms": 92621, "dir": "pbx", "type": "read_reply", "len": 12}
+{"t_ms": 92661, "dir": "host", "type": "read_req", "len": 9, "plan": 169}
+{"t_ms": 92877, "dir": "pbx", "type": "read_reply", "len": 12}
+{"t_ms": 92937, "dir": "host", "type": "read_req", "len": 9, "plan": 170}
+{"t_ms": 93133, "dir": "pbx", "type": "read_reply", "len": 154}
+{"t_ms": 93307, "dir": "host", "type": "read_req", "len": 9, "plan": 171}
+{"t_ms": 93645, "dir": "pbx", "type": "read_reply", "len": 154}
+{"t_ms": 93822, "dir": "host", "type": "read_req", "len": 9, "plan": 172}
+{"t_ms": 94156, "dir": "pbx", "type": "read_reply", "len": 154}
+{"t_ms": 94334, "dir": "host", "type": "read_req", "len": 9, "plan": 173}
+{"t_ms": 94668, "dir": "pbx", "type": "read_reply", "len": 154}
+{"t_ms": 94843, "dir": "host", "type": "read_req", "len": 9, "plan": 174}
+{"t_ms": 95179, "dir": "pbx", "type": "read_reply", "len": 154}
+{"t_ms": 95355, "dir": "host", "type": "read_req", "len": 9, "plan": 175}
+{"t_ms": 95691, "dir": "pbx", "type": "read_reply", "len": 154}
+{"t_ms": 95867, "dir": "host", "type": "read_req", "len": 9, "plan": 176}
+{"t_ms": 96203, "dir": "pbx", "type": "read_reply", "len": 154}
+{"t_ms": 96380, "dir": "host", "type": "read_req", "len": 9, "plan": 177}
+{"t_ms": 96714, "dir": "pbx", "type": "read_reply", "len": 154}
+{"t_ms": 96892, "dir": "host", "type": "read_req", "len": 9, "plan": 178}
+{"t_ms": 97226, "dir": "pbx", "type": "read_reply", "len": 154}
+{"t_ms": 97404, "dir": "host", "type": "read_req", "len": 9, "plan": 179}
+{"t_ms": 97738, "dir": "pbx", "type": "read_reply", "len": 154}
+{"t_ms": 97916, "dir": "host", "type": "read_req", "len": 9, "plan": 180}
+{"t_ms": 98249, "dir": "pbx", "type": "read_reply", "len": 154}
+{"t_ms": 98428, "dir": "host", "type": "read_req", "len": 9, "plan": 181}
+{"t_ms": 98761, "dir": "pbx", "type": "read_reply", "len": 154}
+{"t_ms": 98940, "dir": "host", "type": "read_req", "len": 9, "plan": 182}
+{"t_ms": 99272, "dir": "pbx", "type": "read_reply", "len": 154}
+{"t_ms": 99453, "dir": "host", "type": "read_req", "len": 9, "plan": 183}
+{"t_ms": 99784, "dir": "pbx", "type": "read_reply", "len": 154}
+{"t_ms": 99963, "dir": "host", "type": "read_req", "len": 9, "plan": 184}
+{"t_ms": 100296, "dir": "pbx", "type": "read_reply", "len": 154}
+{"t_ms": 100475, "dir": "host", "type": "read_req", "len": 9, "plan": 185}
+{"t_ms": 100807, "dir": "pbx", "type": "read_reply", "len": 154}
+{"t_ms": 100988, "dir": "host", "type": "read_req", "len": 9, "plan": 186}
+{"t_ms": 101319, "dir": "pbx", "type": "read_reply", "len": 132}
+{"t_ms": 101479, "dir": "host", "type": "read_req", "len": 9, "plan": 187}
+{"t_ms": 101830, "dir": "pbx", "type": "read_reply", "len": 132}
+{"t_ms": 101990, "dir": "host", "type": "read_req", "len": 9, "plan": 188}
+{"t_ms": 102342, "dir": "pbx", "type": "read_reply", "len": 84}
+{"t_ms": 102454, "dir": "host", "type": "read_req", "len": 9, "plan": 189}
+{"t_ms": 102598, "dir": "pbx", "type": "read_reply", "len": 84}
+{"t_ms": 102709, "dir": "host", "type": "read_req", "len": 9, "plan": 190}
+{"t_ms": 102854, "dir": "pbx", "type": "read_reply", "len": 84}
+{"t_ms": 102964, "dir": "host", "type": "read_req", "len": 9, "plan": 191}
+{"t_ms": 103109, "dir": "pbx", "type": "read_reply", "len": 12}
+{"t_ms": 103152, "dir": "host", "type": "read_req", "len": 9, "plan": 192}
+{"t_ms": 103365, "dir": "pbx", "type": "read_reply", "len": 20}
+{"t_ms": 103426, "dir": "host", "type": "read_req", "len": 9, "plan": 193}
+{"t_ms": 103637, "dir": "pbx", "type": "read_reply", "len": 20}
+{"t_ms": 103701, "dir": "host", "type": "read_req", "len": 9, "plan": 194}
+{"t_ms": 103893, "dir": "pbx", "type": "read_reply", "len": 6}
+{"t_ms": 103919, "dir": "host", "type": "read_req", "len": 9, "plan": 195}
+{"t_ms": 104149, "dir": "pbx", "type": "refusal", "len": 5}
+{"t_ms": 104194, "dir": "host", "type": "read_req", "len": 9, "plan": 195}
+{"t_ms": 104405, "dir": "pbx", "type": "refusal", "len": 5}
+{"t_ms": 104468, "dir": "host", "type": "read_req", "len": 9, "plan": 195}
+{"t_ms": 104660, "dir": "pbx", "type": "refusal", "len": 5}
+{"t_ms": 104688, "dir": "host", "type": "read_req", "len": 9, "plan": 195}
+{"t_ms": 104916, "dir": "pbx", "type": "refusal", "len": 5}
+{"t_ms": 104961, "dir": "host", "type": "read_req", "len": 9, "plan": 195}
+{"t_ms": 105172, "dir": "pbx", "type": "refusal", "len": 5}
+{"t_ms": 105237, "dir": "host", "type": "read_req", "len": 9, "plan": 196}
+{"t_ms": 105428, "dir": "pbx", "type": "read_reply", "len": 8}
+{"t_ms": 105460, "dir": "host", "type": "read_req", "len": 9, "plan": 197}
+{"t_ms": 105684, "dir": "pbx", "type": "refusal", "len": 5}
+{"t_ms": 105731, "dir": "host", "type": "read_req", "len": 9, "plan": 197}
+{"t_ms": 105939, "dir": "pbx", "type": "refusal", "len": 5}
+{"t_ms": 105953, "dir": "host", "type": "read_req", "len": 9, "plan": 197}
+{"t_ms": 106195, "dir": "pbx", "type": "refusal", "len": 5}
+{"t_ms": 106226, "dir": "host", "type": "read_req", "len": 9, "plan": 197}
+{"t_ms": 106451, "dir": "pbx", "type": "refusal", "len": 5}
+{"t_ms": 106500, "dir": "host", "type": "read_req", "len": 9, "plan": 197}
+{"t_ms": 106707, "dir": "pbx", "type": "refusal", "len": 5}
+{"t_ms": 106721, "dir": "host", "type": "read_req", "len": 9, "plan": 198}
+{"t_ms": 106963, "dir": "pbx", "type": "read_reply", "len": 28}
+{"t_ms": 106999, "dir": "host", "type": "read_req", "len": 9, "plan": 199}
+{"t_ms": 107218, "dir": "pbx", "type": "refusal", "len": 5}
+{"t_ms": 107269, "dir": "host", "type": "read_req", "len": 9, "plan": 199}
+{"t_ms": 107474, "dir": "pbx", "type": "refusal", "len": 5}
+{"t_ms": 107490, "dir": "host", "type": "read_req", "len": 9, "plan": 199}
+{"t_ms": 107730, "dir": "pbx", "type": "refusal", "len": 5}
+{"t_ms": 107764, "dir": "host", "type": "read_req", "len": 9, "plan": 199}
+{"t_ms": 107986, "dir": "pbx", "type": "refusal", "len": 5}
+{"t_ms": 108039, "dir": "host", "type": "read_req", "len": 9, "plan": 199}
+{"t_ms": 108242, "dir": "pbx", "type": "refusal", "len": 5}
+{"t_ms": 108258, "dir": "host", "type": "read_req", "len": 9, "plan": 200}
+{"t_ms": 108498, "dir": "pbx", "type": "read_reply", "len": 28}
+{"t_ms": 108537, "dir": "host", "type": "read_req", "len": 9, "plan": 201}
+{"t_ms": 108753, "dir": "pbx", "type": "refusal", "len": 5}
+{"t_ms": 108807, "dir": "host", "type": "read_req", "len": 9, "plan": 201}
+{"t_ms": 109009, "dir": "pbx", "type": "refusal", "len": 5}
+{"t_ms": 109027, "dir": "host", "type": "read_req", "len": 9, "plan": 201}
+{"t_ms": 109265, "dir": "pbx", "type": "refusal", "len": 5}
+{"t_ms": 109302, "dir": "host", "type": "read_req", "len": 9, "plan": 201}
+{"t_ms": 109521, "dir": "pbx", "type": "refusal", "len": 5}
+{"t_ms": 109576, "dir": "host", "type": "read_req", "len": 9, "plan": 201}
+{"t_ms": 109777, "dir": "pbx", "type": "refusal", "len": 5}
+{"t_ms": 109796, "dir": "host", "type": "read_req", "len": 9, "plan": 202}
+{"t_ms": 110033, "dir": "pbx", "type": "read_reply", "len": 132}
+{"t_ms": 110182, "dir": "host", "type": "read_req", "len": 9, "plan": 203}
+{"t_ms": 110544, "dir": "pbx", "type": "refusal", "len": 5}
+{"t_ms": 110564, "dir": "host", "type": "read_req", "len": 9, "plan": 203}
+{"t_ms": 110800, "dir": "pbx", "type": "refusal", "len": 5}
+{"t_ms": 110839, "dir": "host", "type": "read_req", "len": 9, "plan": 203}
+{"t_ms": 111056, "dir": "pbx", "type": "refusal", "len": 5}
+{"t_ms": 111115, "dir": "host", "type": "read_req", "len": 9, "plan": 203}
+{"t_ms": 111311, "dir": "pbx", "type": "refusal", "len": 5}
+{"t_ms": 111335, "dir": "host", "type": "read_req", "len": 9, "plan": 203}
+{"t_ms": 111567, "dir": "pbx", "type": "refusal", "len": 5}
+{"t_ms": 111610, "dir": "host", "type": "read_req", "len": 9, "plan": 204}
+{"t_ms": 111823, "dir": "pbx", "type": "read_reply", "len": 196}
+{"t_ms": 112043, "dir": "host", "type": "read_req", "len": 9, "plan": 205}
+{"t_ms": 112335, "dir": "pbx", "type": "read_reply", "len": 196}
+{"t_ms": 112554, "dir": "host", "type": "read_req", "len": 9, "plan": 206}
+{"t_ms": 112846, "dir": "pbx", "type": "read_reply", "len": 196}
+{"t_ms": 113065, "dir": "host", "type": "read_req", "len": 9, "plan": 207}
+{"t_ms": 113358, "dir": "pbx", "type": "read_reply", "len": 196}
+{"t_ms": 113580, "dir": "host", "type": "read_req", "len": 9, "plan": 208}
+{"t_ms": 113870, "dir": "pbx", "type": "refusal", "len": 5}
+{"t_ms": 113915, "dir": "host", "type": "read_req", "len": 9, "plan": 208}
+{"t_ms": 114125, "dir": "pbx", "type": "refusal", "len": 5}
+{"t_ms": 114135, "dir": "host", "type": "read_req", "len": 9, "plan": 208}
+{"t_ms": 114381, "dir": "pbx", "type": "refusal", "len": 5}
+{"t_ms": 114410, "dir": "host", "type": "read_req", "len": 9, "plan": 208}
+{"t_ms": 114637, "dir": "pbx", "type": "refusal", "len": 5}
+{"t_ms": 114684, "dir": "host", "type": "read_req", "len": 9, "plan": 208}
+{"t_ms": 114893, "dir": "pbx", "type": "refusal", "len": 5}
+{"t_ms": 114905, "dir": "host", "type": "read_req", "len": 9, "plan": 209}
+{"t_ms": 115149, "dir": "pbx", "type": "read_reply", "len": 196}
+{"t_ms": 115371, "dir": "host", "type": "read_req", "len": 9, "plan": 210}
+{"t_ms": 115660, "dir": "pbx", "type": "read_reply", "len": 196}
+{"t_ms": 115885, "dir": "host", "type": "read_req", "len": 9, "plan": 211}
+{"t_ms": 116172, "dir": "pbx", "type": "read_reply", "len": 196}
+{"t_ms": 116389, "dir": "host", "type": "read_req", "len": 9, "plan": 212}
+{"t_ms": 116683, "dir": "pbx", "type": "read_reply", "len": 196}
+{"t_ms": 116905, "dir": "host", "type": "read_req", "len": 9, "plan": 213}
+{"t_ms": 117195, "dir": "pbx", "type": "refusal", "len": 5}
+{"t_ms": 117211, "dir": "host", "type": "read_req", "len": 9, "plan": 213}
+{"t_ms": 117451, "dir": "pbx", "type": "refusal", "len": 5}
+{"t_ms": 117485, "dir": "host", "type": "read_req", "len": 9, "plan": 213}
+{"t_ms": 117707, "dir": "pbx", "type": "refusal", "len": 5}
+{"t_ms": 117759, "dir": "host", "type": "read_req", "len": 9, "plan": 213}
+{"t_ms": 117963, "dir": "pbx", "type": "refusal", "len": 5}
+{"t_ms": 117981, "dir": "host", "type": "read_req", "len": 9, "plan": 213}
+{"t_ms": 118218, "dir": "pbx", "type": "refusal", "len": 5}
+{"t_ms": 118255, "dir": "host", "type": "read_req", "len": 9, "plan": 214}
+{"t_ms": 118474, "dir": "pbx", "type": "read_reply", "len": 20}
+{"t_ms": 118531, "dir": "host", "type": "read_req", "len": 9, "plan": 215}
+{"t_ms": 118730, "dir": "pbx", "type": "refusal", "len": 5}
+{"t_ms": 118751, "dir": "host", "type": "read_req", "len": 9, "plan": 215}
+{"t_ms": 118986, "dir": "pbx", "type": "refusal", "len": 5}
+{"t_ms": 119022, "dir": "host", "type": "read_req", "len": 9, "plan": 215}
+{"t_ms": 119242, "dir": "pbx", "type": "refusal", "len": 5}
+{"t_ms": 119299, "dir": "host", "type": "read_req", "len": 9, "plan": 215}
+{"t_ms": 119498, "dir": "pbx", "type": "refusal", "len": 5}
+{"t_ms": 119519, "dir": "host", "type": "read_req", "len": 9, "plan": 215}
+{"t_ms": 119753, "dir": "pbx", "type": "refusal", "len": 5}
+{"t_ms": 119793, "dir": "host", "type": "read_req", "len": 9, "plan": 216}
+{"t_ms": 120009, "dir": "pbx", "type": "read_reply", "len": 196}
+{"t_ms": 120235, "dir": "host", "type": "read_req", "len": 9, "plan": 217}
+{"t_ms": 120521, "dir": "pbx", "type": "read_reply", "len": 196}
+{"t_ms": 120745, "dir": "host", "type": "read_req", "len": 9, "plan": 218}
+{"t_ms": 121032, "dir": "pbx", "type": "read_reply", "len": 196}
+{"t_ms": 121258, "dir": "host", "type": "read_req", "len": 9, "plan": 219}
+{"t_ms": 121544, "dir": "pbx", "type": "read_reply", "len": 196}
+{"t_ms": 121770, "dir": "host", "type": "read_req", "len": 9, "plan": 220}
+{"t_ms": 122056, "dir": "pbx", "type": "read_reply", "len": 196}
+{"t_ms": 122283, "dir": "host", "type": "read_req", "len": 9, "plan": 221}
+{"t_ms": 122567, "dir": "pbx", "type": "read_reply", "len": 196}
+{"t_ms": 122795, "dir": "host", "type": "read_req", "len": 9, "plan": 222}
+{"t_ms": 123079, "dir": "pbx", "type": "read_reply", "len": 196}
+{"t_ms": 123307, "dir": "host", "type": "read_req", "len": 9, "plan": 223}
+{"t_ms": 123590, "dir": "pbx", "type": "read_reply", "len": 196}
+{"t_ms": 123820, "dir": "host", "type": "read_req", "len": 9, "plan": 224}
+{"t_ms": 124118, "dir": "pbx", "type": "refusal", "len": 5}
+{"t_ms": 124132, "dir": "host", "type": "read_req", "len": 9, "plan": 224}
+{"t_ms": 124374, "dir": "pbx", "type": "refusal", "len": 5}
+{"t_ms": 124406, "dir": "host", "type": "read_req", "len": 9, "plan": 224}
+{"t_ms": 124630, "dir": "pbx", "type": "refusal", "len": 5}
+{"t_ms": 124681, "dir": "host", "type": "read_req", "len": 9, "plan": 224}
+{"t_ms": 124885, "dir": "pbx", "type": "refusal", "len": 5}
+{"t_ms": 124899, "dir": "host", "type": "read_req", "len": 9, "plan": 224}
+{"t_ms": 125141, "dir": "pbx", "type": "refusal", "len": 5}
+{"t_ms": 125177, "dir": "host", "type": "read_req", "len": 9, "plan": 225}
+{"t_ms": 125397, "dir": "pbx", "type": "read_reply", "len": 196}
+{"t_ms": 125606, "dir": "host", "type": "read_req", "len": 9, "plan": 226}
+{"t_ms": 125909, "dir": "pbx", "type": "read_reply", "len": 196}
+{"t_ms": 126121, "dir": "host", "type": "read_req", "len": 9, "plan": 227}
+{"t_ms": 126420, "dir": "pbx", "type": "read_reply", "len": 196}
+{"t_ms": 126629, "dir": "host", "type": "read_req", "len": 9, "plan": 228}
+{"t_ms": 126932, "dir": "pbx", "type": "read_reply", "len": 196}
+{"t_ms": 127144, "dir": "host", "type": "read_req", "len": 9, "plan": 229}
+{"t_ms": 127444, "dir": "pbx", "type": "read_reply", "len": 196}
+{"t_ms": 127658, "dir": "host", "type": "read_req", "len": 9, "plan": 230}
+{"t_ms": 127955, "dir": "pbx", "type": "read_reply", "len": 196}
+{"t_ms": 128173, "dir": "host", "type": "read_req", "len": 9, "plan": 231}
+{"t_ms": 128467, "dir": "pbx", "type": "read_reply", "len": 196}
+{"t_ms": 128683, "dir": "host", "type": "read_req", "len": 9, "plan": 232}
+{"t_ms": 128978, "dir": "pbx", "type": "read_reply", "len": 196}
+{"t_ms": 129195, "dir": "host", "type": "read_req", "len": 9, "plan": 233}
+{"t_ms": 129490, "dir": "pbx", "type": "refusal", "len": 5}
+{"t_ms": 129513, "dir": "host", "type": "read_req", "len": 9, "plan": 233}
+{"t_ms": 129746, "dir": "pbx", "type": "refusal", "len": 5}
+{"t_ms": 129788, "dir": "host", "type": "read_req", "len": 9, "plan": 233}
+{"t_ms": 130001, "dir": "pbx", "type": "refusal", "len": 5}
+{"t_ms": 130063, "dir": "host", "type": "read_req", "len": 9, "plan": 233}
+{"t_ms": 130257, "dir": "pbx", "type": "refusal", "len": 5}
+{"t_ms": 130283, "dir": "host", "type": "read_req", "len": 9, "plan": 233}
+{"t_ms": 130513, "dir": "pbx", "type": "refusal", "len": 5}
+{"t_ms": 130557, "dir": "host", "type": "read_req", "len": 9, "plan": 234}
+{"t_ms": 130769, "dir": "pbx", "type": "read_reply", "len": 132}
+{"t_ms": 130920, "dir": "host", "type": "read_req", "len": 9, "plan": 235}
+{"t_ms": 131281, "dir": "pbx", "type": "read_reply", "len": 132}
+{"t_ms": 131431, "dir": "host", "type": "read_req", "len": 9, "plan": 236}
+{"t_ms": 131792, "dir": "pbx", "type": "refusal", "len": 5}
+{"t_ms": 131821, "dir": "host", "type": "read_req", "len": 9, "plan": 236}
+{"t_ms": 132048, "dir": "pbx", "type": "refusal", "len": 5}
+{"t_ms": 132097, "dir": "host", "type": "read_req", "len": 9, "plan": 236}
+{"t_ms": 132304, "dir": "pbx", "type": "refusal", "len": 5}
+{"t_ms": 132316, "dir": "host", "type": "read_req", "len": 9, "plan": 236}
+{"t_ms": 132560, "dir": "pbx", "type": "refusal", "len": 5}
+{"t_ms": 132590, "dir": "host", "type": "read_req", "len": 9, "plan": 236}
+{"t_ms": 132815, "dir": "pbx", "type": "refusal", "len": 5}
+{"t_ms": 132866, "dir": "host", "type": "read_req", "len": 9, "plan": 237}
+{"t_ms": 133071, "dir": "pbx", "type": "read_reply", "len": 132}
+{"t_ms": 133223, "dir": "host", "type": "read_req", "len": 9, "plan": 238}
+{"t_ms": 133583, "dir": "pbx", "type": "refusal", "len": 5}
+{"t_ms": 133633, "dir": "host", "type": "read_req", "len": 9, "plan": 238}
+{"t_ms": 133839, "dir": "pbx", "type": "refusal", "len": 5}
+{"t_ms": 133853, "dir": "host", "type": "read_req", "len": 9, "plan": 238}
+{"t_ms": 134095, "dir": "pbx", "type": "refusal", "len": 5}
+{"t_ms": 134127, "dir": "host", "type": "read_req", "len": 9, "plan": 238}
+{"t_ms": 134350, "dir": "pbx", "type": "refusal", "len": 5}
+{"t_ms": 134402, "dir": "host", "type": "read_req", "len": 9, "plan": 238}
+{"t_ms": 134606, "dir": "pbx", "type": "refusal", "len": 5}
+{"t_ms": 134622, "dir": "host", "type": "read_req", "len": 9, "plan": 239}
+{"t_ms": 134862, "dir": "pbx", "type": "read_reply", "len": 132}
+{"t_ms": 135015, "dir": "host", "type": "read_req", "len": 9, "plan": 240}
+{"t_ms": 135374, "dir": "pbx", "type": "refusal", "len": 5}
+{"t_ms": 135391, "dir": "host", "type": "read_req", "len": 9, "plan": 240}
+{"t_ms": 135629, "dir": "pbx", "type": "refusal", "len": 5}
+{"t_ms": 135666, "dir": "host", "type": "read_req", "len": 9, "plan": 240}
+{"t_ms": 135885, "dir": "pbx", "type": "refusal", "len": 5}
+{"t_ms": 135941, "dir": "host", "type": "read_req", "len": 9, "plan": 240}
+{"t_ms": 136141, "dir": "pbx", "type": "refusal", "len": 5}
+{"t_ms": 136161, "dir": "host", "type": "read_req", "len": 9, "plan": 240}
+{"t_ms": 136397, "dir": "pbx", "type": "refusal", "len": 5}
+{"t_ms": 136436, "dir": "host", "type": "read_req", "len": 9, "plan": 241}
+{"t_ms": 136653, "dir": "pbx", "type": "read_reply", "len": 132}
+{"t_ms": 136804, "dir": "host", "type": "read_req", "len": 9, "plan": 242}
+{"t_ms": 137164, "dir": "pbx", "type": "read_reply", "len": 132}
+{"t_ms": 137316, "dir": "host", "type": "read_req", "len": 9, "plan": 243}
+{"t_ms": 137676, "dir": "pbx", "type": "refusal", "len": 5}
+{"t_ms": 137699, "dir": "host", "type": "read_req", "len": 9, "plan": 243}
+{"t_ms": 137932, "dir": "pbx", "type": "refusal", "len": 5}
+{"t_ms": 137973, "dir": "host", "type": "read_req", "len": 9, "plan": 243}
+{"t_ms": 138188, "dir": "pbx", "type": "refusal", "len": 5}
+{"t_ms": 138247, "dir": "host", "type": "read_req", "len": 9, "plan": 243}
+{"t_ms": 138443, "dir": "pbx", "type": "refusal", "len": 5}
+{"t_ms": 138467, "dir": "host", "type": "read_req", "len": 9, "plan": 243}
+{"t_ms": 138699, "dir": "pbx", "type": "refusal", "len": 5}
+{"t_ms": 138741, "dir": "host", "type": "read_req", "len": 9, "plan": 244}
+{"t_ms": 138955, "dir": "pbx", "type": "read_reply", "len": 132}
+{"t_ms": 139113, "dir": "host", "type": "read_req", "len": 9, "plan": 245}
+{"t_ms": 139467, "dir": "pbx", "type": "read_reply", "len": 132}
+{"t_ms": 139622, "dir": "host", "type": "read_req", "len": 9, "plan": 246}
+{"t_ms": 139978, "dir": "pbx", "type": "refusal", "len": 5}
+{"t_ms": 140004, "dir": "host", "type": "read_req", "len": 9, "plan": 246}
+{"t_ms": 140234, "dir": "pbx", "type": "refusal", "len": 5}
+{"t_ms": 140280, "dir": "host", "type": "read_req", "len": 9, "plan": 246}
+{"t_ms": 140490, "dir": "pbx", "type": "refusal", "len": 5}
+{"t_ms": 140513, "dir": "host", "type": "read_req", "len": 9, "plan": 246}
+{"t_ms": 140746, "dir": "pbx", "type": "refusal", "len": 5}
+{"t_ms": 140774, "dir": "host", "type": "read_req", "len": 9, "plan": 246}
+{"t_ms": 141001, "dir": "pbx", "type": "refusal", "len": 5}
+{"t_ms": 141050, "dir": "host", "type": "read_req", "len": 9, "plan": 247}
+{"t_ms": 141257, "dir": "pbx", "type": "read_reply", "len": 204}
+{"t_ms": 141492, "dir": "host", "type": "read_req", "len": 9, "plan": 248}
+{"t_ms": 141770, "dir": "pbx", "type": "read_reply", "len": 204}
+{"t_ms": 142004, "dir": "host", "type": "read_req", "len": 9, "plan": 249}
+{"t_ms": 142281, "dir": "pbx", "type": "read_reply", "len": 204}
+{"t_ms": 142518, "dir": "host", "type": "read_req", "len": 9, "plan": 250}
+{"t_ms": 142792, "dir": "pbx", "type": "read_reply", "len": 204}
+{"t_ms": 143029, "dir": "host", "type": "read_req", "len": 9, "plan": 251}
+{"t_ms": 143304, "dir": "pbx", "type": "read_reply", "len": 204}
+{"t_ms": 143539, "dir": "host", "type": "read_req", "len": 9, "plan": 252}
+{"t_ms": 143815, "dir": "pbx", "type": "read_reply", "len": 204}
+{"t_ms": 144053, "dir": "host", "type": "read_req", "len": 9, "plan": 253}
+{"t_ms": 144343, "dir": "pbx", "type": "read_reply", "len": 204}
+{"t_ms": 144567, "dir": "host", "type": "read_req", "len": 9, "plan": 254}
+{"t_ms": 144855, "dir": "pbx", "type": "read_reply", "len": 204}
+{"t_ms": 145076, "dir": "host", "type": "read_req", "len": 9, "plan": 255}
+{"t_ms": 145366, "dir": "pbx", "type": "read_reply", "len": 204}
+{"t_ms": 145587, "dir": "host", "type": "read_req", "len": 9, "plan": 256}
+{"t_ms": 145878, "dir": "pbx", "type": "read_reply", "len": 204}
+{"t_ms": 146101, "dir": "host", "type": "read_req", "len": 9, "plan": 257}
+{"t_ms": 146390, "dir": "pbx", "type": "read_reply", "len": 204}
+{"t_ms": 146613, "dir": "host", "type": "read_req", "len": 9, "plan": 258}
+{"t_ms": 146901, "dir": "pbx", "type": "read_reply", "len": 204}
+{"t_ms": 147125, "dir": "host", "type": "read_req", "len": 9, "plan": 259}
+{"t_ms": 147413, "dir": "pbx", "type": "read_reply", "len": 204}
+{"t_ms": 147637, "dir": "host", "type": "read_req", "len": 9, "plan": 260}
+{"t_ms": 147924, "dir": "pbx", "type": "read_reply", "len": 204}
+{"t_ms": 148146, "dir": "host", "type": "read_req", "len": 9, "plan": 261}
+{"t_ms": 148436, "dir": "pbx", "type": "read_reply", "len": 204}
+{"t_ms": 148660, "dir": "host", "type": "read_req", "len": 9, "plan": 262}
+{"t_ms": 148948, "dir": "pbx", "type": "read_reply", "len": 204}
+{"t_ms": 149171, "dir": "host", "type": "read_req", "len": 9, "plan": 263}
+{"t_ms": 149459, "dir": "pbx", "type": "refusal", "len": 5}
+{"t_ms": 149507, "dir": "host", "type": "read_req", "len": 9, "plan": 263}
+{"t_ms": 149715, "dir": "pbx", "type": "refusal", "len": 5}
+{"t_ms": 149727, "dir": "host", "type": "read_req", "len": 9, "plan": 263}
+{"t_ms": 149971, "dir": "pbx", "type": "refusal", "len": 5}
+{"t_ms": 150001, "dir": "host", "type": "read_req", "len": 9, "plan": 263}
+{"t_ms": 150227, "dir": "pbx", "type": "refusal", "len": 5}
+{"t_ms": 150277, "dir": "host", "type": "read_req", "len": 9, "plan": 263}
+{"t_ms": 150483, "dir": "pbx", "type": "refusal", "len": 5}
+{"t_ms": 150502, "dir": "host", "type": "read_req", "len": 9, "plan": 264}
+{"t_ms": 150738, "dir": "pbx", "type": "read_reply", "len": 204}
+{"t_ms": 150963, "dir": "host", "type": "read_req", "len": 9, "plan": 265}
+{"t_ms": 151250, "dir": "pbx", "type": "read_reply", "len": 204}
+{"t_ms": 151477, "dir": "host", "type": "read_req", "len": 9, "plan": 266}
+{"t_ms": 151762, "dir": "pbx", "type": "read_reply", "len": 204}
+{"t_ms": 151989, "dir": "host", "type": "read_req", "len": 9, "plan": 267}
+{"t_ms": 152273, "dir": "pbx", "type": "read_reply", "len": 204}
+{"t_ms": 152501, "dir": "host", "type": "read_req", "len": 9, "plan": 268}
+{"t_ms": 152785, "dir": "pbx", "type": "read_reply", "len": 204}
+{"t_ms": 153013, "dir": "host", "type": "read_req", "len": 9, "plan": 269}
+{"t_ms": 153296, "dir": "pbx", "type": "read_reply", "len": 204}
+{"t_ms": 153524, "dir": "host", "type": "read_req", "len": 9, "plan": 270}
+{"t_ms": 153808, "dir": "pbx", "type": "read_reply", "len": 204}
+{"t_ms": 154032, "dir": "host", "type": "read_req", "len": 9, "plan": 271}
+{"t_ms": 154319, "dir": "pbx", "type": "read_reply", "len": 204}
+{"t_ms": 154543, "dir": "host", "type": "read_req", "len": 9, "plan": 272}
+{"t_ms": 154831, "dir": "pbx", "type": "read_reply", "len": 204}
+{"t_ms": 155058, "dir": "host", "type": "read_req", "len": 9, "plan": 273}
+{"t_ms": 155343, "dir": "pbx", "type": "read_reply", "len": 204}
+{"t_ms": 155573, "dir": "host", "type": "read_req", "len": 9, "plan": 274}
+{"t_ms": 155854, "dir": "pbx", "type": "read_reply", "len": 204}
+{"t_ms": 156083, "dir": "host", "type": "read_req", "len": 9, "plan": 275}
+{"t_ms": 156366, "dir": "pbx", "type": "read_reply", "len": 204}
+{"t_ms": 156599, "dir": "host", "type": "read_req", "len": 9, "plan": 276}
+{"t_ms": 156878, "dir": "pbx", "type": "read_reply", "len": 204}
+{"t_ms": 157108, "dir": "host", "type": "read_req", "len": 9, "plan": 277}
+{"t_ms": 157389, "dir": "pbx", "type": "read_reply", "len": 204}
+{"t_ms": 157621, "dir": "host", "type": "read_req", "len": 9, "plan": 278}
+{"t_ms": 157901, "dir": "pbx", "type": "read_reply", "len": 204}
+{"t_ms": 158133, "dir": "host", "type": "read_req", "len": 9, "plan": 279}
+{"t_ms": 158412, "dir": "pbx", "type": "read_reply", "len": 204}
+{"t_ms": 158645, "dir": "host", "type": "read_req", "len": 9, "plan": 280}
+{"t_ms": 158924, "dir": "pbx", "type": "read_reply", "len": 204}
+{"t_ms": 159157, "dir": "host", "type": "read_req", "len": 9, "plan": 281}
+{"t_ms": 159436, "dir": "pbx", "type": "read_reply", "len": 204}
+{"t_ms": 159669, "dir": "host", "type": "read_req", "len": 9, "plan": 282}
+{"t_ms": 159947, "dir": "pbx", "type": "read_reply", "len": 204}
+{"t_ms": 160183, "dir": "host", "type": "read_req", "len": 9, "plan": 283}
+{"t_ms": 160459, "dir": "pbx", "type": "read_reply", "len": 204}
+{"t_ms": 160694, "dir": "host", "type": "read_req", "len": 9, "plan": 284}
+{"t_ms": 160971, "dir": "pbx", "type": "read_reply", "len": 204}
+{"t_ms": 161205, "dir": "host", "type": "read_req", "len": 9, "plan": 285}
+{"t_ms": 161482, "dir": "pbx", "type": "read_reply", "len": 204}
+{"t_ms": 161714, "dir": "host", "type": "read_req", "len": 9, "plan": 286}
+{"t_ms": 161994, "dir": "pbx", "type": "read_reply", "len": 204}
+{"t_ms": 162228, "dir": "host", "type": "read_req", "len": 9, "plan": 287}
+{"t_ms": 162506, "dir": "pbx", "type": "read_reply", "len": 204}
+{"t_ms": 162742, "dir": "host", "type": "read_req", "len": 9, "plan": 288}
+{"t_ms": 163017, "dir": "pbx", "type": "read_reply", "len": 204}
+{"t_ms": 163253, "dir": "host", "type": "read_req", "len": 9, "plan": 289}
+{"t_ms": 163529, "dir": "pbx", "type": "read_reply", "len": 204}
+{"t_ms": 163765, "dir": "host", "type": "read_req", "len": 9, "plan": 290}
+{"t_ms": 164040, "dir": "pbx", "type": "read_reply", "len": 204}
+{"t_ms": 164277, "dir": "host", "type": "read_req", "len": 9, "plan": 291}
+{"t_ms": 164568, "dir": "pbx", "type": "read_reply", "len": 204}
+{"t_ms": 164790, "dir": "host", "type": "read_req", "len": 9, "plan": 292}
+{"t_ms": 165080, "dir": "pbx", "type": "read_reply", "len": 204}
+{"t_ms": 165301, "dir": "host", "type": "read_req", "len": 9, "plan": 293}
+{"t_ms": 165591, "dir": "pbx", "type": "read_reply", "len": 204}
+{"t_ms": 165813, "dir": "host", "type": "read_req", "len": 9, "plan": 294}
+{"t_ms": 166103, "dir": "pbx", "type": "read_reply", "len": 204}
+{"t_ms": 166324, "dir": "host", "type": "read_req", "len": 9, "plan": 295}
+{"t_ms": 166615, "dir": "pbx", "type": "read_reply", "len": 204}
+{"t_ms": 166837, "dir": "host", "type": "read_req", "len": 9, "plan": 296}
+{"t_ms": 167126, "dir": "pbx", "type": "read_reply", "len": 204}
+{"t_ms": 167350, "dir": "host", "type": "read_req", "len": 9, "plan": 297}
+{"t_ms": 167638, "dir": "pbx", "type": "read_reply", "len": 204}
+{"t_ms": 167862, "dir": "host", "type": "read_req", "len": 9, "plan": 298}
+{"t_ms": 168149, "dir": "pbx", "type": "read_reply", "len": 204}
+{"t_ms": 168374, "dir": "host", "type": "read_req", "len": 9, "plan": 299}
+{"t_ms": 168661, "dir": "pbx", "type": "read_reply", "len": 204}
+{"t_ms": 168886, "dir": "host", "type": "read_req", "len": 9, "plan": 300}
+{"t_ms": 169173, "dir": "pbx", "type": "read_reply", "len": 204}
+{"t_ms": 169397, "dir": "host", "type": "read_req", "len": 9, "plan": 301}
+{"t_ms": 169684, "dir": "pbx", "type": "read_reply", "len": 204}
+{"t_ms": 169910, "dir": "host", "type": "read_req", "len": 9, "plan": 302}
+{"t_ms": 170196, "dir": "pbx", "type": "read_reply", "len": 204}
+{"t_ms": 170421, "dir": "host", "type": "read_req", "len": 9, "plan": 303}
+{"t_ms": 170708, "dir": "pbx", "type": "read_reply", "len": 204}
+{"t_ms": 170934, "dir": "host", "type": "read_req", "len": 9, "plan": 304}
+{"t_ms": 171219, "dir": "pbx", "type": "refusal", "len": 5}
+{"t_ms": 171257, "dir": "host", "type": "read_req", "len": 9, "plan": 304}
+{"t_ms": 171475, "dir": "pbx", "type": "refusal", "len": 5}
+{"t_ms": 171533, "dir": "host", "type": "read_req", "len": 9, "plan": 304}
+{"t_ms": 171731, "dir": "pbx", "type": "refusal", "len": 5}
+{"t_ms": 171753, "dir": "host", "type": "read_req", "len": 9, "plan": 304}
+{"t_ms": 171987, "dir": "pbx", "type": "refusal", "len": 5}
+{"t_ms": 172026, "dir": "host", "type": "read_req", "len": 9, "plan": 304}
+{"t_ms": 172242, "dir": "pbx", "type": "refusal", "len": 5}
