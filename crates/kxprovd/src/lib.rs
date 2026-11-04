@@ -29,6 +29,7 @@ pub mod rate_limit;
 pub mod sim_mark;
 pub mod smdr_api;
 pub mod smdr_bus;
+pub mod smdr_health;
 pub mod smdr_reader;
 pub mod smdr_store;
 #[cfg(feature = "test-util")]

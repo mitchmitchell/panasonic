@@ -482,6 +482,8 @@ impl DaemonBackend for MockDaemon {
         Ok(SmdrStatus {
             port_mode: inner.port_mode.clone(),
             counters,
+            alerts: Vec::new(),
+            cts: kxprov_api::CtsStatus::default(),
         })
     }
 

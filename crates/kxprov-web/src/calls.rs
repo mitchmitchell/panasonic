@@ -490,6 +490,15 @@ fn sse_event(e: SmdrStreamEvent) -> Event {
         SmdrStreamEvent::Lagged { skipped } => {
             Event::default().event("lagged").data(skipped.to_string())
         }
+        SmdrStreamEvent::Alert { alert } => {
+            Event::default()
+                .event("alert")
+                .json_data(&alert)
+                .unwrap_or_else(|e| {
+                    tracing::warn!(%e, kind = ?alert.kind, "alert edge not sent; smdr_status still has it");
+                    Event::default().comment("alert not sent")
+                })
+        }
         SmdrStreamEvent::Heartbeat => Event::default().comment("heartbeat"),
         _newer_event_kind_this_page_ignores => Event::default().comment("ignored"),
     }
@@ -722,6 +731,33 @@ pub async fn calls_export_csv(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn an_alert_stream_event_becomes_an_sse_alert_event() {
+        use futures_util::StreamExt;
+        let alert = kxprov_api::SmdrAlert {
+            kind: kxprov_api::SmdrAlertKind::LineSilence,
+            state: kxprov_api::SmdrAlertState::Raised {
+                since: "2026-11-02T18:00:00.000Z".into(),
+            },
+        };
+        let events =
+            futures_util::stream::iter([Ok::<_, Infallible>(sse_event(SmdrStreamEvent::Alert {
+                alert,
+            }))]);
+        let body = Sse::new(events).into_response().into_body();
+        let mut frames = body.into_data_stream();
+        let mut text = String::new();
+        while let Some(chunk) = frames.next().await {
+            text.push_str(&String::from_utf8_lossy(
+                &chunk.unwrap_or_else(|e| panic!("{e}")),
+            ));
+        }
+        assert_eq!(
+            text,
+            "event: alert\ndata: {\"kind\":\"line_silence\",\"state\":\"raised\",\"since\":\"2026-11-02T18:00:00.000Z\"}\n\n"
+        );
+    }
 
     #[test]
     fn dates_are_central_days_and_to_is_inclusive() {

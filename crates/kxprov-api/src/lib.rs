@@ -25,13 +25,13 @@ pub use paths::{
 pub use plan_hash::{diff_hash, CanonicalPlan, CanonicalWrite};
 pub use protocol::*;
 pub use smdr::{
-    CallDirection, DownReason, GapWindow, PortModeView, QueryLimit, SmdrApiError, SmdrCallView,
-    SmdrCounters, SmdrCursor, SmdrPage, SmdrQueryParams, SmdrStatus, SmdrStreamEvent,
-    SmdrSubscribed, DEFAULT_RANGE_MS, GAP_TRACKING, MAX_RANGE_DAYS, MCP_QUERY_LIMIT_MAX,
-    QUERY_LIMIT_DEFAULT, QUERY_LIMIT_MAX, SMDR_BUS_CAPACITY, SMDR_HEARTBEAT_SECS,
-    SMDR_STREAMS_PER_SESSION,
+    CallDirection, CtsStatus, DownReason, GapWindow, PortModeView, QueryLimit, SmdrAlert,
+    SmdrAlertKind, SmdrAlertState, SmdrApiError, SmdrCallView, SmdrCounters, SmdrCursor, SmdrPage,
+    SmdrQueryParams, SmdrStatus, SmdrStreamEvent, SmdrSubscribed, DEFAULT_RANGE_MS, GAP_TRACKING,
+    MAX_RANGE_DAYS, MCP_QUERY_LIMIT_MAX, QUERY_LIMIT_DEFAULT, QUERY_LIMIT_MAX, SMDR_BUS_CAPACITY,
+    SMDR_HEARTBEAT_SECS, SMDR_STREAMS_PER_SESSION,
 };
-pub use smdr_relay::{spawn_smdr_relay, SMDR_RELAY_BUFFER};
+pub use smdr_relay::{spawn_smdr_relay, spawn_smdr_relay_with_alerts, SMDR_RELAY_BUFFER};
 pub use surface::*;
 pub use tokens::{
     hash_bearer_secret, token_id_is_reserved, validate_tokens_file, TokenEntry,

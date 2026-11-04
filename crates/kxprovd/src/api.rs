@@ -151,10 +151,11 @@ async fn smdr_subscribe<W: tokio::io::AsyncWrite + Unpin>(
         error: None,
     };
     write_response(&mut w, &ack).await?;
-    let mut events = kxprov_api::spawn_smdr_relay(
+    let mut events = kxprov_api::spawn_smdr_relay_with_alerts(
         calls,
         truncated,
         live,
+        Some(state.smdr.subscribe_alerts()),
         std::time::Duration::from_secs(kxprov_api::SMDR_HEARTBEAT_SECS),
     );
     while let Some(event) = events.recv().await {
@@ -552,15 +553,17 @@ async fn smdr_status(
     with_counters: bool,
 ) -> Result<ResponseResult, ApiErrorBody> {
     let port_mode = port_mode_view(state);
+    let live = state.smdr.snapshot();
     if !with_counters || !state.config.smdr.enabled {
         return Ok(ResponseResult::SmdrStatus(kxprov_api::SmdrStatus {
             port_mode,
             counters: None,
+            alerts: live.alerts,
+            cts: live.cts,
         }));
     }
     let db = crate::smdr_api::db_path(&state.config.data_dir);
     let since = local_midnight_utc();
-    let live = state.smdr.snapshot();
     match tokio::task::spawn_blocking(move || crate::smdr_api::store_counters(&db, &since)).await {
         Ok(Ok((lines_today, unparsed_count, last_line_at))) => {
             Ok(ResponseResult::SmdrStatus(kxprov_api::SmdrStatus {
@@ -572,6 +575,8 @@ async fn smdr_status(
                     unparsed_count,
                     header_mismatch_count: live.header_mismatch_count,
                 }),
+                alerts: live.alerts,
+                cts: live.cts,
             }))
         }
         Ok(Err(e)) => Err(api_err(e.code(), &e.to_string())),
@@ -1549,6 +1554,56 @@ mod smdr_dispatch_tests {
         assert!(
             matches!(ev, kxprov_api::SmdrStreamEvent::Call { ref call } if call.id == 9),
             "{ev:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn s7_alerts_show_in_status_and_stream_as_alert_events() {
+        use crate::smdr_health::{ByteCounter, HealthBoard, HealthConfig, Observation};
+        let tmp = tempfile::tempdir().unwrap();
+        let st = Arc::new(state(&tmp));
+        let (_ack, mut lines) = open_subscription(&st, "bots").await;
+        let mut board = HealthBoard::new(
+            HealthConfig {
+                silence_after: std::time::Duration::from_secs(60),
+                cts_low_after: std::time::Duration::from_secs(5),
+                cts_monitor: true,
+            },
+            Arc::clone(&st.smdr),
+            ByteCounter::default(),
+        );
+        board.observe(
+            Observation::HeaderMismatch,
+            std::time::Instant::now(),
+            chrono::Utc::now(),
+        );
+        let line = tokio::time::timeout(std::time::Duration::from_secs(10), lines.next_line())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let ev: kxprov_api::SmdrStreamEvent = serde_json::from_str(&line).unwrap();
+        assert!(
+            matches!(
+                ev,
+                kxprov_api::SmdrStreamEvent::Alert { ref alert }
+                    if alert.kind == kxprov_api::SmdrAlertKind::HeaderMismatch
+            ),
+            "{line}"
+        );
+        for bearer in ["bots", "planner"] {
+            let status = status_of(&st, bearer).await;
+            assert_eq!(status.alerts.len(), 1, "{bearer}");
+            assert!(status.cts.monitored);
+        }
+        board.observe(
+            Observation::HeaderMatched,
+            std::time::Instant::now(),
+            chrono::Utc::now(),
+        );
+        assert!(
+            status_of(&st, "bots").await.alerts.is_empty(),
+            "cleared alerts leave status"
         );
     }
 
