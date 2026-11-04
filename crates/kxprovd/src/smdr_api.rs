@@ -39,7 +39,7 @@ pub fn gap_windows(
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(e) => {
             tracing::warn!(%e, "lease journal unreadable");
-            return Err(SmdrApiError::StoreUnavailable);
+            return Err(SmdrApiError::StoreFailed);
         }
     };
     let mut done: Vec<GapWindow> = Vec::new();
@@ -101,14 +101,62 @@ pub fn open_read_only(db: &Path) -> Result<Connection, SmdrApiError> {
     Ok(conn)
 }
 
+const FUTURE_CODE_REASON: &str = "rusqlite marks ErrorCode non_exhaustive, so a code added after 0.37 is not busy or locked as far as this build knows and is reported as a failed read";
+
+/// Whether the call-log database file exists; a missing file is an empty call log (Architect, Nov 1).
+///
+/// Absence is its own case so it never shares a path with open errors. A failure to check
+/// is [`SmdrApiError::StoreFailed`], because it says nothing about whether calls exist.
+fn db_present(db: &Path) -> Result<bool, SmdrApiError> {
+    db.try_exists().map_err(|e| {
+        tracing::warn!(%e, "smdr store presence check failed");
+        SmdrApiError::StoreFailed
+    })
+}
+
+/// Classifies a read error: only busy or locked is [`SmdrApiError::StoreUnavailable`].
+///
+/// Every other SQLite code and every non-SQLite error is [`SmdrApiError::StoreFailed`], so a
+/// broken store is never reported as an empty call log or as a transient busy store.
 fn store_err(e: rusqlite::Error) -> SmdrApiError {
-    match e.sqlite_error_code() {
+    let reason = match e.sqlite_error_code() {
         Some(ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked) => {
-            tracing::debug!("smdr read busy");
+            tracing::debug!(reason = "ingest writer holds the lock", "smdr read busy");
+            return SmdrApiError::StoreUnavailable;
         }
-        other => tracing::warn!(?other, "smdr read failed"),
-    }
-    SmdrApiError::StoreUnavailable
+        None => "error raised by rusqlite itself, not by SQLite, such as a column type mismatch",
+        Some(ErrorCode::DatabaseCorrupt | ErrorCode::NotADatabase) => {
+            "file is not a readable SQLite database"
+        }
+        Some(ErrorCode::CannotOpen | ErrorCode::PermissionDenied | ErrorCode::NotFound) => {
+            "database file could not be opened"
+        }
+        Some(
+            ErrorCode::SystemIoFailure
+            | ErrorCode::DiskFull
+            | ErrorCode::FileLockingProtocolFailed
+            | ErrorCode::NoLargeFileSupport,
+        ) => "operating system I/O failed under SQLite",
+        Some(ErrorCode::OutOfMemory | ErrorCode::TooBig) => "SQLite ran out of memory or size",
+        Some(
+            ErrorCode::SchemaChanged
+            | ErrorCode::ConstraintViolation
+            | ErrorCode::TypeMismatch
+            | ErrorCode::ApiMisuse
+            | ErrorCode::AuthorizationForStatementDenied
+            | ErrorCode::ParameterOutOfRange
+            | ErrorCode::ReadOnly,
+        ) => "statement does not fit the stored schema",
+        Some(
+            ErrorCode::InternalMalfunction
+            | ErrorCode::OperationAborted
+            | ErrorCode::OperationInterrupted
+            | ErrorCode::Unknown,
+        ) => "SQLite aborted or failed internally",
+        Some(_) => FUTURE_CODE_REASON,
+    };
+    tracing::warn!(reason, %e, "smdr read failed");
+    SmdrApiError::StoreFailed
 }
 
 fn ts(ms: i64) -> Result<String, SmdrApiError> {
@@ -185,6 +233,9 @@ pub fn calls_after(
     after_id: i64,
     limit: u16,
 ) -> Result<Vec<SmdrCallView>, SmdrApiError> {
+    if !db_present(db)? {
+        return Ok(Vec::new());
+    }
     let conn = open_read_only(db)?;
     let mut stmt = conn
         .prepare_cached(&format!(
@@ -199,6 +250,9 @@ pub fn calls_after(
 
 /// Number of stored calls with id above `after_id`.
 pub fn count_after(db: &Path, after_id: i64) -> Result<u64, SmdrApiError> {
+    if !db_present(db)? {
+        return Ok(0);
+    }
     let conn = open_read_only(db)?;
     conn.query_row(
         "SELECT count(*) FROM smdr_call WHERE parse_ok = 1 AND id > ?1",
@@ -208,8 +262,11 @@ pub fn count_after(db: &Path, after_id: i64) -> Result<u64, SmdrApiError> {
     .map_err(store_err)
 }
 
-/// Highest stored call id, or 0 when there are none.
+/// Highest stored call id, or 0 when there are none or the database does not exist yet.
 pub fn max_call_id(db: &Path) -> Result<i64, SmdrApiError> {
+    if !db_present(db)? {
+        return Ok(0);
+    }
     let conn = open_read_only(db)?;
     conn.query_row("SELECT coalesce(max(id), 0) FROM smdr_call", [], |r| {
         r.get(0)
@@ -222,6 +279,9 @@ pub fn store_counters(
     db: &Path,
     since_utc: &str,
 ) -> Result<(u64, u64, Option<String>), SmdrApiError> {
+    if !db_present(db)? {
+        return Ok((0, 0, None));
+    }
     let conn = open_read_only(db)?;
     let today: u64 = conn
         .query_row(
@@ -249,6 +309,14 @@ pub fn query(db: &Path, journal: &Path, p: &SmdrQueryParams) -> Result<SmdrPage,
     p.validate()?;
     let since = ts(p.since_ms)?;
     let until = ts(p.until_ms)?;
+    if !db_present(db)? {
+        let gaps = gap_windows(journal, &since, &until)?;
+        return Ok(SmdrPage {
+            calls: Vec::new(),
+            next: None,
+            gaps,
+        });
+    }
     let conn = open_read_only(db)?;
     let limit = usize::from(p.limit.get());
     let (cur_ts, cur_id) = match &p.cursor {
@@ -342,12 +410,48 @@ mod tests {
     }
 
     #[test]
-    fn missing_database_is_store_unavailable() {
+    fn missing_database_is_an_empty_page() {
         let tmp = tempfile::tempdir().unwrap();
         let p = SmdrQueryParams::with_defaults(None, None, 1_800_000_000_000);
+        let page = query(&db_path(tmp.path()), &lease_journal_path(tmp.path()), &p).unwrap();
+        assert!(page.calls.is_empty());
+        assert!(page.next.is_none());
+        assert!(page.gaps.is_empty());
+    }
+
+    fn sqlite_failure(code: std::os::raw::c_int) -> rusqlite::Error {
+        rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(code), None)
+    }
+
+    #[test]
+    fn store_err_maps_only_busy_and_locked_to_store_unavailable() {
+        for code in [rusqlite::ffi::SQLITE_BUSY, rusqlite::ffi::SQLITE_LOCKED] {
+            assert_eq!(
+                store_err(sqlite_failure(code)),
+                SmdrApiError::StoreUnavailable
+            );
+        }
+        for code in [
+            rusqlite::ffi::SQLITE_CORRUPT,
+            rusqlite::ffi::SQLITE_NOTADB,
+            rusqlite::ffi::SQLITE_CANTOPEN,
+            rusqlite::ffi::SQLITE_IOERR,
+            rusqlite::ffi::SQLITE_PERM,
+            rusqlite::ffi::SQLITE_ERROR,
+        ] {
+            assert_eq!(
+                store_err(sqlite_failure(code)),
+                SmdrApiError::StoreFailed,
+                "{code}"
+            );
+        }
         assert_eq!(
-            query(&db_path(tmp.path()), &lease_journal_path(tmp.path()), &p),
-            Err(SmdrApiError::StoreUnavailable)
+            store_err(rusqlite::Error::QueryReturnedNoRows),
+            SmdrApiError::StoreFailed
+        );
+        assert_eq!(
+            store_err(rusqlite::Error::InvalidColumnIndex(99)),
+            SmdrApiError::StoreFailed
         );
     }
 

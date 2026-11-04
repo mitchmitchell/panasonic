@@ -233,6 +233,7 @@ pub fn call_log_message(e: SmdrApiError) -> &'static str {
             "That page link is no longer valid. Start again from the newest calls."
         }
         SmdrApiError::StoreUnavailable => "Call log unavailable. Try again in a moment.",
+        SmdrApiError::StoreFailed => "The call log could not be read. Check the daemon log.",
         SmdrApiError::Disabled => "Port disabled. The call log is turned off.",
         SmdrApiError::CorruptRow { .. } => {
             "A stored call in this range is unreadable. Try a different range."

@@ -136,7 +136,7 @@ async fn smdr_subscribe<W: tokio::io::AsyncWrite + Unpin>(
         }
         Err(join) => {
             tracing::warn!(%join, "smdr replay task failed");
-            let e = kxprov_api::SmdrApiError::StoreUnavailable;
+            let e = kxprov_api::SmdrApiError::StoreFailed;
             let resp = err_response(env.id.clone(), api_err(e.code(), &e.to_string()));
             write_response(&mut w, &resp).await?;
             return Ok(());
@@ -502,7 +502,7 @@ async fn smdr_query(
         Ok(Err(e)) => Err(api_err(e.code(), &e.to_string())),
         Err(join) => {
             tracing::warn!(%join, "smdr query task failed");
-            let e = kxprov_api::SmdrApiError::StoreUnavailable;
+            let e = kxprov_api::SmdrApiError::StoreFailed;
             Err(api_err(e.code(), &e.to_string()))
         }
     }
@@ -582,7 +582,7 @@ async fn smdr_status(
         Ok(Err(e)) => Err(api_err(e.code(), &e.to_string())),
         Err(join) => {
             tracing::warn!(%join, "smdr status task failed");
-            let e = kxprov_api::SmdrApiError::StoreUnavailable;
+            let e = kxprov_api::SmdrApiError::StoreFailed;
             Err(api_err(e.code(), &e.to_string()))
         }
     }
@@ -1565,6 +1565,37 @@ mod smdr_dispatch_tests {
                 job_id: "job-7".into()
             }
         );
+    }
+
+    #[tokio::test]
+    async fn missing_call_log_database_is_empty_and_status_still_reports_the_reader() {
+        let tmp = tempfile::tempdir().unwrap();
+        let st = state(&tmp);
+        let db = crate::smdr_api::db_path(&st.config.data_dir);
+        std::fs::remove_dir_all(db.parent().unwrap()).unwrap();
+        assert!(!db.exists());
+        let status = status_of(&st, "bots").await;
+        assert_eq!(
+            status.port_mode,
+            kxprov_api::PortModeView::Down {
+                reason: kxprov_api::DownReason::ReaderNotRunning
+            }
+        );
+        let counters = status.counters.unwrap();
+        assert_eq!(counters.lines_today, 0);
+        assert_eq!(counters.unparsed_count, 0);
+        assert_eq!(counters.last_line_at, None);
+        let body = RequestBody::SmdrQuery {
+            params: kxprov_api::SmdrQueryParams::with_defaults(None, None, 1_800_000_000_000),
+        };
+        let resp = dispatch(&st, GATEWAY, &env("bots", body)).await;
+        match resp.result {
+            Some(ResponseResult::SmdrPage(page)) => {
+                assert!(page.calls.is_empty());
+                assert!(page.next.is_none());
+            }
+            other => panic!("{other:?} {:?}", resp.error),
+        }
     }
 
     async fn open_subscription(

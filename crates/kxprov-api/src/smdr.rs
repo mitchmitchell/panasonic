@@ -34,8 +34,12 @@ pub enum SmdrApiError {
     BadLimit { max: u16 },
     #[error("cursor is not valid")]
     BadCursor,
+    /// The store is busy or locked by the ingest writer; retrying shortly can succeed.
     #[error("call log unavailable")]
     StoreUnavailable,
+    /// The store exists but could not be opened or read for a reason other than busy or locked.
+    #[error("call log could not be read")]
+    StoreFailed,
     #[error("call log is disabled")]
     Disabled,
     #[error("stored call {id} is unreadable")]
@@ -52,6 +56,7 @@ impl SmdrApiError {
             Self::BadLimit { .. } => "bad_limit",
             Self::BadCursor => "bad_cursor",
             Self::StoreUnavailable => "store_unavailable",
+            Self::StoreFailed => "store_failed",
             Self::Disabled => "smdr_disabled",
             Self::CorruptRow { .. } => "smdr_corrupt_row",
         }
@@ -73,6 +78,7 @@ impl SmdrApiError {
             },
             "bad_cursor" => Self::BadCursor,
             "store_unavailable" => Self::StoreUnavailable,
+            "store_failed" => Self::StoreFailed,
             "smdr_disabled" => Self::Disabled,
             "smdr_corrupt_row" => Self::CorruptRow { id: 0 },
             _ => return None,
