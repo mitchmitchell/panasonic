@@ -13,8 +13,23 @@ use kxprovd::smdr_api::{
 use kxprovd::smdr_store::SmdrStore;
 use kxtd1232::smdr::DateOrder;
 use rusqlite::Connection;
-use std::path::Path;
+use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
+
+struct RestoreJournalMode {
+    path: PathBuf,
+    mode: u32,
+}
+
+impl Drop for RestoreJournalMode {
+    fn drop(&mut self) {
+        let _ = std::fs::set_permissions(
+            &self.path,
+            std::fs::Permissions::from_mode(self.mode),
+        );
+    }
+}
 
 fn params() -> SmdrQueryParams {
     SmdrQueryParams {
@@ -31,6 +46,25 @@ fn not_a_database(dir: &Path) {
     let db = db_path(dir);
     std::fs::create_dir_all(db.parent().unwrap()).unwrap();
     std::fs::write(&db, vec![0x5a; 8192]).unwrap();
+}
+
+#[test]
+fn unreadable_lease_journal_is_store_failed_even_without_a_database() {
+    let tmp = tempfile::tempdir().unwrap();
+    let j = lease_journal_path(tmp.path());
+    std::fs::write(
+        &j,
+        "{\"ts_utc\":\"2026-11-01T12:00:00.000Z\",\"event\":\"reader_paused\",\"job_id\":\"job-a\",\"gap_tracking\":\"gap\"}\n",
+    )
+    .unwrap();
+    let mode = std::fs::metadata(&j).unwrap().permissions().mode() & 0o777;
+    let _restore = RestoreJournalMode {
+        path: j.clone(),
+        mode,
+    };
+    std::fs::set_permissions(&j, std::fs::Permissions::from_mode(0o000)).unwrap();
+    assert!(!db_path(tmp.path()).exists());
+    assert_eq!(run_query(tmp.path()), Err(SmdrApiError::StoreFailed));
 }
 
 #[test]

@@ -4,15 +4,30 @@
 )]
 
 use chrono::Utc;
-use kxprov_api::{GapWindow, QueryLimit, SmdrPage, SmdrQueryParams, GAP_TRACKING};
+use kxprov_api::{GapWindow, QueryLimit, SmdrApiError, SmdrPage, SmdrQueryParams, GAP_TRACKING};
 use kxprovd::port::journal::{LeaseEvent, LeaseJournal};
 use kxprovd::port::PortManager;
 use kxprovd::smdr_api::{db_path, gap_windows, lease_journal_path, query};
 use kxprovd::smdr_store::SmdrStore;
 use kxtd1232::smdr::{DateOrder, SmdrLine};
 use kxtd1232_sim::smdr::{BufferPolicy, LineEnding, SmdrEmitter, SyntheticCall};
-use std::path::Path;
+use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
+
+struct RestoreJournalMode {
+    path: PathBuf,
+    mode: u32,
+}
+
+impl Drop for RestoreJournalMode {
+    fn drop(&mut self) {
+        let _ = std::fs::set_permissions(
+            &self.path,
+            std::fs::Permissions::from_mode(self.mode),
+        );
+    }
+}
 
 fn manager(dir: &Path) -> PortManager<()> {
     PortManager::new((), LeaseJournal::new(lease_journal_path(dir)), 4)
@@ -76,6 +91,39 @@ fn one_gap_per_lease_not_per_attempt_and_open_lease_has_no_end() {
     assert_eq!(gaps[1].to_utc, None);
     assert!(gaps.iter().all(|g| g.tracking == GAP_TRACKING));
     held.release().unwrap();
+}
+
+#[test]
+fn unreadable_lease_journal_is_store_failed_never_empty_gaps() {
+    let tmp = tempfile::tempdir().unwrap();
+    let j = lease_journal_path(tmp.path());
+    std::fs::write(
+        &j,
+        format!(
+            "{{\"ts_utc\":\"2026-11-01T12:00:00.000Z\",\"event\":\"reader_paused\",\"job_id\":\"job-a\",\"gap_tracking\":\"{GAP_TRACKING}\"}}\n"
+        ),
+    )
+    .unwrap();
+    let mode = std::fs::metadata(&j).unwrap().permissions().mode() & 0o777;
+    let _restore = RestoreJournalMode {
+        path: j.clone(),
+        mode,
+    };
+    std::fs::set_permissions(&j, std::fs::Permissions::from_mode(0o000)).unwrap();
+    assert_eq!(
+        gap_windows(&j, "2026-11-01T11:00:00.000Z", "2026-11-01T14:00:00.000Z"),
+        Err(SmdrApiError::StoreFailed)
+    );
+    drop(SmdrStore::open(tmp.path(), &[], DateOrder::Mdy).unwrap());
+    let now = Utc::now().timestamp_millis() + 60_000;
+    let p = SmdrQueryParams {
+        limit: QueryLimit::new(500).unwrap(),
+        ..SmdrQueryParams::with_defaults(None, None, now)
+    };
+    assert_eq!(
+        query(&db_path(tmp.path()), &j, &p),
+        Err(SmdrApiError::StoreFailed)
+    );
 }
 
 #[test]

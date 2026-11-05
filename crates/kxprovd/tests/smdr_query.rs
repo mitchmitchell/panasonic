@@ -85,9 +85,17 @@ fn filters_by_window_ext_and_direction() {
     assert_eq!(page.calls[0].number, "2");
 
     let mut p = params(50);
+    p.direction = Some(CallDirection::Incoming);
+    let page = query(&db_path(tmp.path()), &lease_journal_path(tmp.path()), &p).unwrap();
+    assert_eq!(page.calls.len(), 1);
+    assert_eq!(page.calls[0].number, "2");
+    assert_eq!(page.calls[0].direction, CallDirection::Incoming);
+
+    let mut p = params(50);
     p.direction = Some(CallDirection::Outgoing);
     let page = query(&db_path(tmp.path()), &lease_journal_path(tmp.path()), &p).unwrap();
     assert_eq!(page.calls.len(), 1);
+    assert_eq!(page.calls[0].number, "3");
     assert_eq!(page.calls[0].direction, CallDirection::Outgoing);
 }
 
