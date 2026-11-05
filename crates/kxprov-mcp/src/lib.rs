@@ -375,8 +375,108 @@ mod smdr_tool_tests {
         reason = "test setup failures should abort the test"
     )]
     use super::*;
+    use async_trait::async_trait;
     use kxprov_api::{Scope, SmdrCallView, SmdrPage};
-    use kxprov_mock::{scopes_for_role, MockDaemon};
+    use kxprov_mock::{scopes_for_role, BackendError, DaemonBackend, MockDaemon};
+
+    struct CallLogScopeBypass(MockDaemon);
+
+    #[async_trait]
+    impl DaemonBackend for CallLogScopeBypass {
+        async fn status(
+            &self,
+            caller: &CallerIdentity,
+        ) -> Result<kxprov_mock::DaemonStatus, BackendError> {
+            self.0.status(caller).await
+        }
+
+        async fn list_backups(
+            &self,
+            caller: &CallerIdentity,
+        ) -> Result<kxprov_mock::BackupList, BackendError> {
+            self.0.list_backups(caller).await
+        }
+
+        async fn backup_now(
+            &self,
+            caller: &CallerIdentity,
+        ) -> Result<kxprov_mock::BackupInfo, BackendError> {
+            self.0.backup_now(caller).await
+        }
+
+        async fn read_fields(
+            &self,
+            caller: &CallerIdentity,
+            req: kxprov_mock::ReadFieldsRequest,
+        ) -> Result<kxprov_mock::ReadFieldsResponse, BackendError> {
+            self.0.read_fields(caller, req).await
+        }
+
+        async fn plan_change(
+            &self,
+            caller: &CallerIdentity,
+            req: kxprov_mock::PlanChangeRequest,
+        ) -> Result<kxprov_mock::PlanSummary, BackendError> {
+            self.0.plan_change(caller, req).await
+        }
+
+        async fn submit_approval(
+            &self,
+            caller: &CallerIdentity,
+            plan_id_or_prefix: &str,
+            diff_hash: kxprov_api::DiffHash,
+            profile: kxprov_api::Profile,
+        ) -> Result<kxprov_api::Approval, BackendError> {
+            self.0
+                .submit_approval(caller, plan_id_or_prefix, diff_hash, profile)
+                .await
+        }
+
+        async fn apply_plan(
+            &self,
+            caller: &CallerIdentity,
+            plan_id: kxprov_api::PlanId,
+            diff_hash: kxprov_api::DiffHash,
+        ) -> Result<kxprov_mock::ApplyJob, BackendError> {
+            self.0.apply_plan(caller, plan_id, diff_hash).await
+        }
+
+        async fn rollback(
+            &self,
+            caller: &CallerIdentity,
+            job_id: kxprov_mock::JobId,
+        ) -> Result<kxprov_mock::ApplyJob, BackendError> {
+            self.0.rollback(caller, job_id).await
+        }
+
+        async fn smdr_query(
+            &self,
+            _caller: &CallerIdentity,
+            params: SmdrQueryParams,
+        ) -> Result<SmdrPage, BackendError> {
+            params.validate().map_err(BackendError::CallLog)?;
+            Ok(SmdrPage {
+                calls: Vec::new(),
+                next: None,
+                gaps: Vec::new(),
+            })
+        }
+
+        async fn smdr_status(
+            &self,
+            caller: &CallerIdentity,
+        ) -> Result<kxprov_api::SmdrStatus, BackendError> {
+            self.0.smdr_status(caller).await
+        }
+
+        async fn smdr_subscribe(
+            &self,
+            caller: &CallerIdentity,
+            since_id: Option<i64>,
+        ) -> Result<kxprov_mock::SmdrSubscription, BackendError> {
+            self.0.smdr_subscribe(caller, since_id).await
+        }
+    }
 
     fn caller(scopes: ScopeSet) -> CallerIdentity {
         CallerIdentity::Mcp(McpTokenIdentity {
@@ -494,6 +594,18 @@ mod smdr_tool_tests {
     #[tokio::test]
     async fn call_without_call_log_is_refused() {
         let server = server_with_calls(3).await;
+        let r = MCP_CALLER
+            .scope(
+                caller(ScopeSet::empty().with(Scope::Read).with(Scope::Plan)),
+                server.smdr_query(Parameters(params(None, None))),
+            )
+            .await;
+        assert!(r.is_err());
+    }
+
+    #[tokio::test]
+    async fn smdr_query_tool_checks_call_log_scope_before_a_permissive_backend() {
+        let server = KxMcpServer::new(Arc::new(CallLogScopeBypass(MockDaemon::new())));
         let r = MCP_CALLER
             .scope(
                 caller(ScopeSet::empty().with(Scope::Read).with(Scope::Plan)),

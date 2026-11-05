@@ -1501,7 +1501,7 @@ mod smdr_dispatch_tests {
             let code = resp.error.unwrap().code;
             let want: &[&str] = match profile {
                 Profile::Prod => &["gate", "locked"],
-                _ => &["gate"],
+                Profile::Sim | Profile::Test => &["gate"],
             };
             assert!(want.contains(&code.as_str()), "{profile:?} got {code}");
         }

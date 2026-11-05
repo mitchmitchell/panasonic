@@ -55,6 +55,21 @@ fn not_a_database(dir: &Path) {
 }
 
 #[test]
+fn presence_check_failure_is_store_failed_not_an_empty_log() {
+    let tmp = tempfile::tempdir().unwrap();
+    let data = tmp.path().join("data");
+    drop(SmdrStore::open(&data, &[], DateOrder::Mdy).unwrap());
+    let smdr_dir = db_path(&data).parent().unwrap().to_path_buf();
+    let mode = std::fs::metadata(&smdr_dir).unwrap().permissions().mode() & 0o777;
+    let _restore = RestoreJournalMode {
+        path: smdr_dir.clone(),
+        mode,
+    };
+    std::fs::set_permissions(&smdr_dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+    assert_eq!(run_query(&data), Err(SmdrApiError::StoreFailed));
+}
+
+#[test]
 fn unreadable_lease_journal_is_store_failed_even_without_a_database() {
     let tmp = tempfile::tempdir().unwrap();
     let j = lease_journal_path(tmp.path());

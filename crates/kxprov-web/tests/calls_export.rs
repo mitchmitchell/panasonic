@@ -204,6 +204,8 @@ async fn cells_are_quoted_and_formula_guarded() {
     assert_eq!(csv_cell("a,b\"c"), "\"a,b\"\"c\"");
     assert_eq!(csv_cell("=HYPERLINK(\"x\")"), "\"'=HYPERLINK(\"\"x\"\")\"");
     assert_eq!(csv_cell("@SUM(1)"), "'@SUM(1)");
+    assert_eq!(csv_cell("\tSUM(1)"), "'\tSUM(1)");
+    assert_eq!(csv_cell("\rSUM(1)"), "\"'\rSUM(1)\"");
     assert_eq!(csv_cell("line\nbreak"), "\"line\nbreak\"");
     let app = app(vec![call(
         1,

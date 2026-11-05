@@ -53,6 +53,11 @@ pub enum SmdrApiError {
     CorruptRow { id: i64 },
 }
 
+/// Wire codes outside [`SmdrApiError`]'s set belong to other API surfaces; callers treat them as `None` here.
+fn smdr_error_from_foreign_wire_code(_code: &str) -> Option<SmdrApiError> {
+    None
+}
+
 impl SmdrApiError {
     /// Wire error code carried in [`crate::ApiErrorBody::code`].
     pub fn code(self) -> &'static str {
@@ -75,21 +80,21 @@ impl SmdrApiError {
     /// a daemon `bad_limit` is always against [`QUERY_LIMIT_MAX`], because the MCP cap is checked
     /// in kxprov-mcp before any call reaches the daemon, and a corrupt row id is reported as 0.
     pub fn from_code(code: &str) -> Option<Self> {
-        Some(match code {
-            "range_too_large" => Self::RangeTooLarge {
+        match code {
+            "range_too_large" => Some(Self::RangeTooLarge {
                 max_days: MAX_RANGE_DAYS,
-            },
-            "bad_range" => Self::BadRange,
-            "bad_limit" => Self::BadLimit {
+            }),
+            "bad_range" => Some(Self::BadRange),
+            "bad_limit" => Some(Self::BadLimit {
                 max: QUERY_LIMIT_MAX,
-            },
-            "bad_cursor" => Self::BadCursor,
-            "store_unavailable" => Self::StoreUnavailable,
-            "store_failed" => Self::StoreFailed,
-            "smdr_disabled" => Self::Disabled,
-            "smdr_corrupt_row" => Self::CorruptRow { id: 0 },
-            _ => return None,
-        })
+            }),
+            "bad_cursor" => Some(Self::BadCursor),
+            "store_unavailable" => Some(Self::StoreUnavailable),
+            "store_failed" => Some(Self::StoreFailed),
+            "smdr_disabled" => Some(Self::Disabled),
+            "smdr_corrupt_row" => Some(Self::CorruptRow { id: 0 }),
+            non_smdr_code => smdr_error_from_foreign_wire_code(non_smdr_code),
+        }
     }
 
     /// True when the caller sent a bad request (HTTP 400), as opposed to a server state.

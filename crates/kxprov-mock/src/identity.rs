@@ -43,7 +43,7 @@ impl CallerIdentity {
     pub fn token_id(&self) -> Option<&TokenId> {
         match self {
             Self::Mcp(t) => Some(&t.token_id),
-            _ => None,
+            Self::Web(_) => None,
         }
     }
 

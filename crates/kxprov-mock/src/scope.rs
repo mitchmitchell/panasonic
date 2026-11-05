@@ -80,9 +80,10 @@ pub fn scopes_for_role(role: &str) -> ScopeSet {
 /// [`Scope::CallLog`] on the simulator only (S6 design §3).
 pub fn scopes_for_role_on(role: &str, profile: Profile) -> ScopeSet {
     let set = scopes_for_role(role);
-    match (role, profile) {
-        ("tester", Profile::Sim) => set.with(Scope::CallLog),
-        _ => set,
+    if role == "tester" && profile == Profile::Sim {
+        set.with(Scope::CallLog)
+    } else {
+        set
     }
 }
 

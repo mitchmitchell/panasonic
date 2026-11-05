@@ -761,6 +761,23 @@ mod tests {
     }
 
     #[test]
+    fn store_failed_and_store_unavailable_have_distinct_user_messages() {
+        let failed = call_log_message(SmdrApiError::StoreFailed);
+        let unavailable = call_log_message(SmdrApiError::StoreUnavailable);
+        assert_ne!(failed, unavailable);
+        assert!(failed.contains("could not be read"));
+        assert!(unavailable.contains("Try again"));
+    }
+
+    #[test]
+    fn client_call_log_errors_map_to_http_400() {
+        let (status, _) = status_for(&BackendError::CallLog(SmdrApiError::BadRange));
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let (status, _) = status_for(&BackendError::CallLog(SmdrApiError::StoreFailed));
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[test]
     fn dates_are_central_days_and_to_is_inclusive() {
         let q = CallsQuery {
             from: "2026-11-01".into(),
