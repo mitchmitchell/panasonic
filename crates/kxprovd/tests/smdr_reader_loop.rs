@@ -9,7 +9,9 @@ use kxprovd::smdr_bus::{LiveSnapshot, SmdrLive};
 use kxprovd::smdr_health::HealthConfig;
 use kxprovd::smdr_loop::SmdrReaderTask;
 use kxprovd::transport::device_arbiter;
+use kxtd1232::smdr::SPEC_HEADER;
 use kxtd1232_sim::SimTransport;
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -36,6 +38,36 @@ fn silence_active(snap: &LiveSnapshot) -> bool {
     snap.alerts.iter().any(|a| {
         a.kind == SmdrAlertKind::LineSilence && matches!(a.state, SmdrAlertState::Raised { .. })
     })
+}
+
+fn header_mismatch_active(snap: &LiveSnapshot) -> bool {
+    snap.alerts.iter().any(|a| {
+        a.kind == SmdrAlertKind::HeaderMismatch && matches!(a.state, SmdrAlertState::Raised { .. })
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn smdr_reader_thread_cpu() -> Option<Duration> {
+    let task_root = Path::new("/proc/self/task");
+    for entry in task_root.read_dir().ok()? {
+        let entry = entry.ok()?;
+        let comm = std::fs::read_to_string(entry.path().join("comm")).ok()?;
+        if comm.trim() == "smdr-reader" {
+            return Some(task_cpu_time(&entry.path()));
+        }
+    }
+    None
+}
+
+#[cfg(target_os = "linux")]
+fn task_cpu_time(task: &Path) -> Duration {
+    const CLK_TCK: u64 = 100;
+    let stat = std::fs::read_to_string(task.join("stat")).expect("task stat");
+    let after = stat.rfind(')').expect("comm") + 2;
+    let fields: Vec<&str> = stat[after..].split_whitespace().collect();
+    let utime: u64 = fields[11].parse().expect("utime");
+    let stime: u64 = fields[12].parse().expect("stime");
+    Duration::from_nanos((utime + stime).saturating_mul(1_000_000_000 / CLK_TCK))
 }
 
 struct SimHarness {
@@ -108,6 +140,49 @@ fn sim_smdr_reader_loop_updates_live() {
     lease.release().expect("release");
 
     wait_for(&h.live, Duration::from_secs(5), silence_active);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn sim_idle_loop_does_not_spin_cpu() {
+    let h = sim_harness(Duration::from_secs(86_400));
+    wait_for(&h.live, Duration::from_secs(3), |s| s.running);
+    let cpu0 = smdr_reader_thread_cpu().expect("smdr-reader thread");
+    let wall0 = Instant::now();
+    std::thread::sleep(Duration::from_millis(800));
+    let cpu1 = smdr_reader_thread_cpu().expect("smdr-reader thread");
+    let wall = wall0.elapsed();
+    let cpu_delta = cpu1.saturating_sub(cpu0);
+    assert!(
+        cpu_delta < wall / 3,
+        "idle sim reader used {cpu_delta:?} CPU in {wall:?} wall without inbound data"
+    );
+}
+
+#[test]
+fn sim_reader_header_mismatch_observations_reach_live() {
+    let h = sim_harness(Duration::from_secs(86_400));
+    wait_for(&h.live, Duration::from_secs(3), |s| s.running);
+
+    let changed = SPEC_HEADER.replace("Acc code", "Cost    ");
+    assert_eq!(changed.len(), SPEC_HEADER.len());
+    let mismatch = format!("{SPEC_HEADER}\r\n{changed}\r\n");
+    h.transport
+        .lock()
+        .unwrap()
+        .inject_inbound(mismatch.into_bytes());
+
+    wait_for(&h.live, Duration::from_secs(3), |s| {
+        s.header_mismatch_count >= 1 && header_mismatch_active(s)
+    });
+
+    h.transport
+        .lock()
+        .unwrap()
+        .inject_inbound(format!("{SPEC_HEADER}\r\n").into_bytes());
+    wait_for(&h.live, Duration::from_secs(3), |s| {
+        !header_mismatch_active(s)
+    });
 }
 
 #[test]
