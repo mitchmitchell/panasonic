@@ -27,6 +27,7 @@ test-util = [
 
 [dependencies]
 kxprov-api = { path = "../kxprov-api" }
+kxprovd-sys = { path = "../kxprovd-sys" }
 kxtd1232 = { path = "../kxtd1232" }
 kxtd1232-sim = { path = "../kxtd1232-sim" }
 serde = { version = "1", features = ["derive"] }

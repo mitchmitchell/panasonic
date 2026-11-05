@@ -1,7 +1,6 @@
 //! S7 wiring between the S4 reader, the [`HealthMonitor`] and [`SmdrLive`].
 //!
-//! Re-exported publicly only with `test-util`: no production code calls these until the
-//! daemon reader loop lands (https://github.com/mitchmitchell/panasonic/issues/107).
+//! Re-exported publicly only with `test-util`; the daemon reader loop is the production caller.
 
 use super::{HealthConfig, HealthMonitor, Observation};
 use crate::smdr_bus::SmdrLive;
@@ -45,6 +44,13 @@ impl<S: SmdrSource> ByteTap<S> {
         (Self { inner, count }, counter)
     }
 
+    #[cfg_attr(
+        not(feature = "test-util"),
+        expect(
+            dead_code,
+            reason = "reserved for reader teardown; the daemon loop holds the tap for process lifetime"
+        )
+    )]
     pub fn into_inner(self) -> S {
         self.inner
     }
@@ -112,6 +118,13 @@ impl HealthBoard {
         }
     }
 
+    #[cfg_attr(
+        not(feature = "test-util"),
+        expect(
+            dead_code,
+            reason = "test-only introspection; production publishes through SmdrLive"
+        )
+    )]
     pub fn monitor(&self) -> &HealthMonitor {
         &self.monitor
     }

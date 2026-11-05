@@ -1498,6 +1498,7 @@ dependencies = [
  "hex",
  "kxprov",
  "kxprov-api",
+ "kxprovd-sys",
  "kxtd1232",
  "kxtd1232-sim",
  "nix",
@@ -1513,6 +1514,14 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "trybuild",
+]
+
+[[package]]
+name = "kxprovd-sys"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "rustix",
 ]
 
 [[package]]

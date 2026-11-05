@@ -9,37 +9,13 @@ use chrono::{DateTime, SecondsFormat, Utc};
 use kxprov_api::{CtsStatus, SmdrAlert, SmdrAlertKind, SmdrAlertState};
 use std::time::{Duration, Instant};
 
-#[cfg_attr(
-    all(not(test), not(feature = "test-util")),
-    expect(
-        dead_code,
-        reason = "no production caller until the reader loop lands, https://github.com/mitchmitchell/panasonic/issues/107"
-    )
-)]
-#[cfg_attr(
-    all(test, not(feature = "test-util")),
-    allow(
-        dead_code,
-        reason = "unit tests reach only HealthBoard; the rest is exercised by tests/smdr_health.rs under test-util"
-    )
-)]
 mod wiring;
 #[cfg(feature = "test-util")]
 pub use wiring::{observations_from_reader, ByteCounter, ByteTap, HealthBoard};
 #[cfg(not(feature = "test-util"))]
-#[cfg_attr(
-    not(test),
-    expect(
-        unused_imports,
-        reason = "no production caller until the reader loop lands, https://github.com/mitchmitchell/panasonic/issues/107"
-    )
-)]
-#[cfg_attr(
-    test,
-    allow(
-        unused_imports,
-        reason = "unit tests reach only HealthBoard; the rest is exercised by tests/smdr_health.rs under test-util"
-    )
+#[expect(
+    unused_imports,
+    reason = "ByteCounter is part of the wiring surface but only constructed inside smdr_loop via ByteTap::new"
 )]
 pub(crate) use wiring::{observations_from_reader, ByteCounter, ByteTap, HealthBoard};
 
