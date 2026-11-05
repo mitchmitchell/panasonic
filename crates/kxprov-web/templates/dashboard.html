@@ -23,6 +23,7 @@
       · {{ queue_depth }} job(s) waiting in the apply queue.
     </p>
     {% endif %}
+    <p><a href="/calls">Call log</a></p>
     <form method="post" action="/logout">
       <input type="hidden" name="_csrf" value="{{ csrf_token }}">
       <button type="submit">Sign out</button>

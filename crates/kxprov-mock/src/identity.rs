@@ -32,7 +32,10 @@ impl CallerIdentity {
 
     pub fn scopes(&self) -> ScopeSet {
         match self {
-            Self::Web(_) => ScopeSet::empty().with(Scope::Read).with(Scope::Plan),
+            Self::Web(_) => ScopeSet::empty()
+                .with(Scope::Read)
+                .with(Scope::Plan)
+                .with(Scope::CallLog),
             Self::Mcp(t) => t.scopes.clone(),
         }
     }
@@ -40,7 +43,7 @@ impl CallerIdentity {
     pub fn token_id(&self) -> Option<&TokenId> {
         match self {
             Self::Mcp(t) => Some(&t.token_id),
-            _ => None,
+            Self::Web(_) => None,
         }
     }
 

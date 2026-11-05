@@ -59,7 +59,14 @@ impl SmdrSink for SmdrStore {
 #[non_exhaustive]
 pub enum ReaderEvent {
     Ingested(IngestOutcome),
-    HeaderMismatch { rx: DateTime<Utc>, raw: String },
+    HeaderMismatch {
+        rx: DateTime<Utc>,
+        raw: String,
+    },
+    /// A header line matched the spec; S7 clears a raised header-mismatch alert on this.
+    HeaderMatched {
+        rx: DateTime<Utc>,
+    },
     Idle,
 }
 
@@ -134,8 +141,16 @@ impl<S: SmdrSource> SmdrReader<S> {
         let mut events = std::mem::take(&mut self.undelivered);
         while let Some(line) = self.pending.pop_front() {
             let rx = now();
-            let mismatch = (line.kind() == LineKind::Header && !line.header_matches_spec())
-                .then(|| line.raw().to_string());
+            let header = (line.kind() == LineKind::Header).then(|| {
+                if line.header_matches_spec() {
+                    ReaderEvent::HeaderMatched { rx }
+                } else {
+                    ReaderEvent::HeaderMismatch {
+                        rx,
+                        raw: line.raw().to_string(),
+                    }
+                }
+            });
             match sink.ingest(line.clone(), rx) {
                 Ok(outcome) => events.push(ReaderEvent::Ingested(outcome)),
                 Err(e) => {
@@ -144,9 +159,7 @@ impl<S: SmdrSource> SmdrReader<S> {
                     return Err(ReaderError::Store(e));
                 }
             }
-            if let Some(raw) = mismatch {
-                events.push(ReaderEvent::HeaderMismatch { rx, raw });
-            }
+            events.extend(header);
         }
         Ok(events)
     }

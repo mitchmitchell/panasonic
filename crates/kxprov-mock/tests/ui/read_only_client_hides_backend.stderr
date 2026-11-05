@@ -1,0 +1,5 @@
+error[E0616]: field `inner` of struct `ReadOnlyPbxClient` is private
+ --> tests/ui/read_only_client_hides_backend.rs:4:12
+  |
+4 |     client.inner
+  |            ^^^^^ private field

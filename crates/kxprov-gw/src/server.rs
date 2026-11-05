@@ -63,6 +63,7 @@ pub async fn serve(
     let token_store = Arc::new(McpTokenStore::from_file(&config.mcp_tokens_path)?);
 
     let web_state = WebState {
+        call_streams: Default::default(),
         backend: backend.clone(),
         admin: Arc::new(AdminVerifier(admin)),
         login_limiter: Arc::new(LoginRateLimiter::new(
@@ -113,11 +114,13 @@ pub async fn serve(
         any({
             let tokens = token_store.clone();
             let limiter = rate_limiter.clone();
+            let profile_source = backend.clone();
             move |req: Request| {
                 let svc = mcp_service.clone();
                 let tokens = tokens.clone();
                 let limiter = limiter.clone();
-                async move { handle_mcp(req, svc, tokens, limiter).await }
+                let profile_source = profile_source.clone();
+                async move { handle_mcp(req, svc, tokens, limiter, profile_source).await }
             }
         }),
     );
@@ -257,6 +260,7 @@ async fn handle_mcp(
     mut svc: StreamableHttpService<KxMcpServer, LocalSessionManager>,
     tokens: Arc<McpTokenStore>,
     limiter: RateLimiter,
+    profile_source: Arc<dyn DaemonBackend>,
 ) -> Response<Body> {
     let Some(bearer) = bearer_token(req.headers()) else {
         return StatusCode::UNAUTHORIZED.into_response();
@@ -264,10 +268,11 @@ async fn handle_mcp(
     let Some(record) = tokens.verify_bearer(bearer) else {
         return StatusCode::UNAUTHORIZED.into_response();
     };
+    let scopes = crate::auth::effective_scopes(&record, profile_source.as_ref()).await;
     let identity = CallerIdentity::Mcp(McpTokenIdentity {
         token_id: TokenId(record.token_id.clone()),
         agent_name: record.agent_name.clone(),
-        scopes: record.scopes.clone(),
+        scopes,
         bearer: bearer.to_string(),
     });
     if !limiter.check(&identity.rate_limit_key()).await {

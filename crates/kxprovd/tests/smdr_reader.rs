@@ -143,6 +143,28 @@ fn header_that_differs_from_spec_emits_a_typed_mismatch_event() {
 }
 
 #[test]
+fn a_spec_header_emits_header_matched_and_a_changed_one_does_not() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let mut store = store(&tmp);
+    let changed = SPEC_HEADER.replace("Acc code", "Cost    ");
+    let mut chunks = VecDeque::new();
+    chunks.push_back(format!("{SPEC_HEADER}\r\n{changed}\r\n{SPEC_HEADER}\r\n").into_bytes());
+    let mut reader = SmdrReader::new(ReceiveOnly::new(FakePort {
+        chunks: Rc::new(RefCell::new(chunks)),
+        ..FakePort::default()
+    }));
+    let headers: Vec<&str> = drain(&mut reader, &mut store)
+        .iter()
+        .filter_map(|e| match e {
+            ReaderEvent::HeaderMatched { rx: at } if *at == rx() => Some("ok"),
+            ReaderEvent::HeaderMismatch { .. } => Some("mismatch"),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(headers, vec!["ok", "mismatch", "ok"]);
+}
+
+#[test]
 fn link_down_is_an_error_not_idle() {
     struct Down;
     impl SmdrSource for Down {
@@ -199,8 +221,12 @@ fn a_failed_ingest_keeps_the_rest_of_the_batch_for_the_next_poll() {
     ));
     assert_eq!(reader.pending(), 7);
     let retried = reader.poll_once(&mut sink, 1, rx).expect("retry");
+    let ingested: Vec<_> = retried
+        .into_iter()
+        .filter(|e| matches!(e, ReaderEvent::Ingested(_)))
+        .collect();
     assert_eq!(
-        retried,
+        ingested,
         vec![ReaderEvent::Ingested(IngestOutcome::Stored); 11],
         "events for lines ingested before the failure are kept"
     );
@@ -249,6 +275,7 @@ fn a_header_mismatch_ahead_of_a_failed_ingest_is_not_lost() {
                 raw: changed
             },
             ReaderEvent::Ingested(IngestOutcome::Skipped),
+            ReaderEvent::HeaderMatched { rx: rx() },
         ]
     );
 }

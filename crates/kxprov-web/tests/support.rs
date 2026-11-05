@@ -27,6 +27,7 @@ impl PasswordVerifier for TestVerifier {
 
 pub fn test_web_state() -> WebState {
     WebState {
+        call_streams: Default::default(),
         backend: Arc::new(MockDaemon::new()),
         admin: Arc::new(TestVerifier),
         login_limiter: Arc::new(LoginRateLimiter::new(
