@@ -141,11 +141,16 @@ fn run(config: Config, port: Arc<DeviceArbiter>, live: Arc<SmdrLive>, stop: Arc<
             Ok(events) => {
                 if events != [ReaderEvent::Idle] {
                     live.set_link_down(false);
+                }
+                if board.byte_tap_has_pending() {
                     live.note_bytes(wall());
-                    live.note_events(&events);
-                    for obs in observations_from_reader(&events) {
-                        board.observe(obs, Instant::now(), wall());
-                    }
+                }
+                live.note_events(&events);
+                for obs in observations_from_reader(&events) {
+                    board.observe(obs, Instant::now(), wall());
+                }
+                if config.transport == TransportKind::Sim && events == [ReaderEvent::Idle] {
+                    std::thread::sleep(Duration::from_millis(timeout_ms));
                 }
             }
             Err(ReaderError::LinkDown(_)) => live.set_link_down(true),
@@ -172,7 +177,7 @@ fn run(config: Config, port: Arc<DeviceArbiter>, live: Arc<SmdrLive>, stop: Arc<
                 }
             }
             board.tick(Instant::now(), wall());
-            next_health += HEALTH_TICK;
+            next_health = Instant::now() + HEALTH_TICK;
         }
     }
 

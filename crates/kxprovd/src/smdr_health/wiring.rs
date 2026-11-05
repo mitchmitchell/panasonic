@@ -44,13 +44,7 @@ impl<S: SmdrSource> ByteTap<S> {
         (Self { inner, count }, counter)
     }
 
-    #[cfg_attr(
-        not(feature = "test-util"),
-        expect(
-            dead_code,
-            reason = "reserved for reader teardown; the daemon loop holds the tap for process lifetime"
-        )
-    )]
+    #[cfg(feature = "test-util")]
     pub fn into_inner(self) -> S {
         self.inner
     }
@@ -81,6 +75,10 @@ impl ByteCounter {
         self.seen = now;
         fresh
     }
+
+    pub(crate) fn has_pending(&self) -> bool {
+        self.count.load(Ordering::Relaxed) != self.seen
+    }
 }
 
 /// Drives a [`HealthMonitor`] and publishes its edges and status through [`SmdrLive`].
@@ -101,6 +99,16 @@ impl HealthBoard {
         }
     }
 
+    /// Monitor with no [`ByteTap`]; byte-driven alerts never fire.
+    #[cfg(test)]
+    pub fn without_byte_tap(cfg: HealthConfig, live: Arc<SmdrLive>) -> Self {
+        Self::new(cfg, live, ByteCounter::default())
+    }
+
+    pub(crate) fn byte_tap_has_pending(&self) -> bool {
+        self.bytes.has_pending()
+    }
+
     /// One timer tick: folds in new bytes, then re-evaluates. One timer per daemon drives this.
     pub fn tick(&mut self, now: Instant, wall: DateTime<Utc>) {
         self.observe(Observation::Tick, now, wall);
@@ -118,13 +126,7 @@ impl HealthBoard {
         }
     }
 
-    #[cfg_attr(
-        not(feature = "test-util"),
-        expect(
-            dead_code,
-            reason = "test-only introspection; production publishes through SmdrLive"
-        )
-    )]
+    #[cfg(feature = "test-util")]
     pub fn monitor(&self) -> &HealthMonitor {
         &self.monitor
     }

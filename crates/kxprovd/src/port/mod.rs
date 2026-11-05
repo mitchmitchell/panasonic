@@ -428,6 +428,7 @@ impl<T: LeaseLine> PortManager<T> {
         Some(device.read_modem_cts())
     }
 
+    #[cfg(target_os = "linux")]
     pub fn open_smdr_device(
         &self,
         path: &std::path::Path,

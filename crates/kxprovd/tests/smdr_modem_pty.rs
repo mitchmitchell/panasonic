@@ -48,11 +48,20 @@ fn pty() -> Pty {
     }
 }
 
+fn strace_available() -> bool {
+    Command::new("strace")
+        .arg("--version")
+        .status()
+        .ok()
+        .is_some_and(|s| s.success())
+}
+
+/// Issues repeated `TIOCMGET` attempts; PTY slaves often return `ENOTTY`, which is fine for strace.
 fn strace_child_probe() {
     let path = std::env::var(STRACE_CHILD_ENV).expect("child path");
     let dev = open_handle(path.as_ref());
     for _ in 0..32 {
-        let _ = dev.read_modem_cts();
+        let _ignored = dev.read_modem_cts().ok();
     }
 }
 
@@ -65,6 +74,12 @@ fn forbidden_ioctl(line: &str) -> bool {
 fn modem_status_read_never_writes_or_sets_modem_bits() {
     if std::env::var(STRACE_CHILD_ENV).is_ok() {
         strace_child_probe();
+        return;
+    }
+    if !strace_available() {
+        eprintln!(
+            "strace not installed; skipping modem_status_read_never_writes_or_sets_modem_bits"
+        );
         return;
     }
     let pty = pty();
@@ -88,7 +103,7 @@ fn modem_status_read_never_writes_or_sets_modem_bits() {
             "--quiet",
         ])
         .status()
-        .unwrap();
+        .expect("strace spawn");
     assert!(status.success(), "strace child failed: {status:?}");
     let log = std::fs::read_to_string(trace.path()).unwrap();
     for line in log.lines() {
