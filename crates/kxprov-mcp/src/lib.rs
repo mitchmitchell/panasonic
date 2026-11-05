@@ -432,6 +432,37 @@ mod smdr_tool_tests {
     }
 
     #[test]
+    fn into_query_maps_direction_params_to_call_direction() {
+        let now = 1_800_000_000_000_i64;
+        let with_direction = |direction: Option<SmdrDirectionParam>| SmdrQueryToolParams {
+            since_ms: None,
+            until_ms: None,
+            ext: None,
+            direction,
+            limit: None,
+            cursor: None,
+        };
+        assert_eq!(
+            with_direction(None).into_query(now).unwrap().direction,
+            None
+        );
+        assert_eq!(
+            with_direction(Some(SmdrDirectionParam::Incoming))
+                .into_query(now)
+                .unwrap()
+                .direction,
+            Some(CallDirection::Incoming)
+        );
+        assert_eq!(
+            with_direction(Some(SmdrDirectionParam::Outgoing))
+                .into_query(now)
+                .unwrap()
+                .direction,
+            Some(CallDirection::Outgoing)
+        );
+    }
+
+    #[test]
     fn tool_is_listed_only_with_call_log() {
         let bots = scopes_for_role("bots");
         assert!(KxMcpServer::tool_visible_for_scopes("smdr_query", &bots));
