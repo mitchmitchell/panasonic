@@ -22,12 +22,18 @@ struct RestoreJournalMode {
     mode: u32,
 }
 
+/// Best-effort restore of lease journal permissions during test teardown; failures are logged, not propagated from [`Drop`].
+fn restore_journal_mode_best_effort(path: &Path, mode: u32) {
+    if let Err(err) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)) {
+        eprintln!(
+            "best-effort Drop cleanup: failed to restore journal permissions at {path:?}: {err}"
+        );
+    }
+}
+
 impl Drop for RestoreJournalMode {
     fn drop(&mut self) {
-        let _ = std::fs::set_permissions(
-            &self.path,
-            std::fs::Permissions::from_mode(self.mode),
-        );
+        restore_journal_mode_best_effort(&self.path, self.mode);
     }
 }
 
