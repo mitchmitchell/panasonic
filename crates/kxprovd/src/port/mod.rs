@@ -428,6 +428,20 @@ impl<T: LeaseLine> PortManager<T> {
         Some(device.read_modem_cts())
     }
 
+    #[cfg(all(target_os = "linux", feature = "test-util"))]
+    pub fn test_clear_smdr_device(&self) {
+        self.clear_smdr_device();
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn clear_smdr_device(&self) {
+        *self
+            .shared
+            .device
+            .lock()
+            .unwrap_or_else(recover_from_poison) = None;
+    }
+
     #[cfg(target_os = "linux")]
     pub fn open_smdr_device(
         &self,

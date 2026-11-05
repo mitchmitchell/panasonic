@@ -44,8 +44,7 @@ impl<S: SmdrSource> ByteTap<S> {
         (Self { inner, count }, counter)
     }
 
-    #[cfg(feature = "test-util")]
-    pub fn into_inner(self) -> S {
+    pub(crate) fn into_inner(self) -> S {
         self.inner
     }
 }

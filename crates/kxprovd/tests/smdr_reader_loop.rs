@@ -128,6 +128,77 @@ fn sim_smdr_reader_loop_updates_live() {
     wait_for(&h.live, Duration::from_secs(5), silence_active);
 }
 
+#[test]
+fn sim_link_down_clears_on_idle_after_reconnect_without_new_bytes() {
+    let h = sim_harness(Duration::from_secs(86_400));
+    wait_for(&h.live, Duration::from_secs(3), |s| s.running);
+    h.transport.lock().unwrap().drop_link_now();
+    wait_for(&h.live, Duration::from_secs(3), |s| s.link_down);
+    h.transport.lock().unwrap().reconnect();
+    wait_for(&h.live, Duration::from_secs(3), |s| !s.link_down);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn sim_store_ingest_failure_does_not_spin_cpu() {
+    use kxprovd::smdr_store::{SMDR_DB_NAME, SMDR_DIR_NAME};
+    use std::os::unix::fs::PermissionsExt;
+
+    let h = sim_harness(Duration::from_secs(86_400));
+    wait_for(&h.live, Duration::from_secs(3), |s| s.running);
+    h.transport
+        .lock()
+        .unwrap()
+        .inject_inbound(kxprovd::test_util::synthetic_smdr_bytes(42, 1));
+    wait_for(&h.live, Duration::from_secs(3), |s| {
+        s.last_byte_at.is_some()
+    });
+
+    let db = h
+        ._tmp
+        .path()
+        .join("sim")
+        .join(SMDR_DIR_NAME)
+        .join(SMDR_DB_NAME);
+    let mut perms = std::fs::metadata(&db).expect("db").permissions();
+    perms.set_mode(0o444);
+    std::fs::set_permissions(&db, perms).expect("readonly db");
+    h.transport
+        .lock()
+        .unwrap()
+        .inject_inbound(kxprovd::test_util::synthetic_smdr_bytes(43, 1));
+
+    let tid = h._task.reader_linux_tid();
+    assert_ne!(tid, 0, "reader thread id not published");
+    let cpu0 = task_cpu_time(tid);
+    let wall0 = Instant::now();
+    std::thread::sleep(Duration::from_millis(800));
+    let cpu1 = task_cpu_time(tid);
+    let wall = wall0.elapsed();
+    let cpu_delta = cpu1.saturating_sub(cpu0);
+    assert!(
+        cpu_delta < wall / 3,
+        "store failure retry used {cpu_delta:?} CPU in {wall:?} wall"
+    );
+}
+
+#[test]
+fn sim_attach_listen_only_leaves_programming_client_logged_in() {
+    use kxprovd::transport::SimTransportBridge;
+    use kxtd1232::frame::Access;
+    use kxtd1232::{Client, Timing};
+    use kxtd1232_sim::{SimPbx, SimTransport, PLACEHOLDER_PASSWORD};
+
+    let pbx = Arc::new(Mutex::new(SimPbx::default()));
+    let programming = SimTransport::with_shared(Arc::clone(&pbx));
+    let mut client = Client::with(programming, Access::ReadWrite, Timing::default());
+    client.login(PLACEHOLDER_PASSWORD).expect("login");
+    let _smdr = SimTransportBridge::attach_listen_only(Arc::clone(&pbx));
+    client
+        .read(0x01, 0, 0, 1)
+        .expect("programming session survives listen-only SMDR attach");
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn sim_idle_loop_does_not_spin_cpu() {

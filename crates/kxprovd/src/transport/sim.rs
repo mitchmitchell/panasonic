@@ -14,6 +14,13 @@ impl SimTransportBridge {
         }
     }
 
+    /// SMDR ingest on a PBX that may already have an active programming session.
+    pub fn attach_listen_only(shared_pbx: Arc<Mutex<kxtd1232_sim::SimPbx>>) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(SimTransport::listen_on_shared(shared_pbx))),
+        }
+    }
+
     /// Shares an existing sim transport (integration tests only).
     #[cfg(feature = "test-util")]
     pub fn with_shared_transport(inner: Arc<Mutex<SimTransport>>) -> Self {
@@ -53,5 +60,27 @@ impl Transport for SimTransportBridge {
 
     fn modem_lines(&mut self) -> kxtd1232::ModemLines {
         self.inner.lock().expect("sim transport lock").modem_lines()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use kxtd1232::{Transport, TransportError};
+    use kxtd1232_sim::SimPbx;
+    use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn attach_listen_only_skips_reset_and_dtr_greeting() {
+        let pbx = Arc::new(Mutex::new(SimPbx::default()));
+        let mut programming = SimTransport::with_shared(Arc::clone(&pbx));
+        programming
+            .recv(100)
+            .expect("programming open raises DTR greeting");
+        let mut listen = SimTransportBridge::attach_listen_only(Arc::clone(&pbx));
+        assert!(
+            matches!(listen.recv(10), Err(TransportError::Timeout)),
+            "listen-only attach must not enqueue a DTR greeting"
+        );
     }
 }

@@ -574,6 +574,23 @@ fn smdr_recv_under_a_held_lease_waits_out_its_timeout() {
 }
 
 #[test]
+fn clearing_the_smdr_slot_allows_listen_only_reopen_on_the_same_path() {
+    let mut pty = pty();
+    let pm = manager();
+    let first = pm
+        .open_smdr_device(&pty.path, SmdrLineOptions::default())
+        .expect("first open");
+    drop(first);
+    pm.test_clear_smdr_device();
+    let mut second = pm
+        .open_smdr_device(&pty.path, SmdrLineOptions::default())
+        .expect("reopen");
+    pty.master.write_all(b"10/30/26 05:48PM 101\r\n").unwrap();
+    let got = second.recv(1000).unwrap();
+    assert!(got.starts_with(b"10/30/26"), "{got:?}");
+}
+
+#[test]
 fn smdr_recv_in_smdr_mode_returns_within_one_read_slice() {
     let pty = pty();
     let mut smdr = open_smdr_device(&pty.path, SmdrLineOptions::default()).unwrap();

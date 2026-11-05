@@ -136,6 +136,14 @@ pub(crate) fn open_exclusive(
     Ok(port)
 }
 
+impl Drop for SmdrDevice {
+    fn drop(&mut self) {
+        if let Err(e) = rustix::termios::ioctl_tiocnxcl(&*self.file) {
+            tracing::error!(error = %e, "clearing TIOCEXCL on the SMDR close failed");
+        }
+    }
+}
+
 impl SmdrDevice {
     pub(crate) fn open(path: &Path, options: SmdrLineOptions) -> Result<Self, DeviceError> {
         match open_exclusive(path, Access::ReadOnly, Exclusion::Own, options)? {
