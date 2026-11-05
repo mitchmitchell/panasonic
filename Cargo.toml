@@ -11,6 +11,7 @@ members = [
     "crates/kxprov-gw",
     "crates/kxprov-h5",
     "crates/kxprovd",
+    "crates/kxprovd-sys",
 ]
 
 [workspace.package]

@@ -30,6 +30,7 @@ pub mod sim_mark;
 pub mod smdr_api;
 pub mod smdr_bus;
 pub mod smdr_health;
+pub mod smdr_loop;
 pub mod smdr_reader;
 pub mod smdr_store;
 #[cfg(feature = "test-util")]
@@ -172,6 +173,7 @@ fn spawn_daemon_thread(
 pub struct Daemon {
     _process_lock: lock::ProcessLock,
     _thread: std::thread::JoinHandle<()>,
+    _smdr_reader: Option<smdr_loop::SmdrReaderTask>,
     smdr: Arc<smdr_bus::SmdrLive>,
 }
 
@@ -255,6 +257,8 @@ impl Daemon {
 
         let q = Arc::clone(&queue);
         let smdr = Arc::new(smdr_bus::SmdrLive::new());
+        let smdr_reader =
+            smdr_loop::SmdrReaderTask::spawn(config.clone(), Arc::clone(&port), Arc::clone(&smdr));
         let api_state = Arc::new(ApiState {
             config: config.clone(),
             port,
@@ -288,6 +292,7 @@ impl Daemon {
         Ok(Self {
             _process_lock: process_lock,
             _thread: thread,
+            _smdr_reader: Some(smdr_reader),
             smdr,
         })
     }
@@ -436,6 +441,8 @@ impl Daemon {
 
         let q = Arc::clone(&queue);
         let smdr = Arc::new(smdr_bus::SmdrLive::new());
+        let smdr_reader =
+            smdr_loop::SmdrReaderTask::spawn(config.clone(), Arc::clone(&port), Arc::clone(&smdr));
         let api_state = Arc::new(ApiState {
             config: config.clone(),
             port,
@@ -469,6 +476,7 @@ impl Daemon {
         Ok(Self {
             _process_lock: process_lock,
             _thread: thread,
+            _smdr_reader: Some(smdr_reader),
             smdr,
         })
     }

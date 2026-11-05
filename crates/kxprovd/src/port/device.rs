@@ -148,6 +148,10 @@ impl SmdrDevice {
         let fl = nix::fcntl::fcntl(self.file.as_raw_fd(), nix::fcntl::FcntlArg::F_GETFL)?;
         Ok(fl & nix::libc::O_ACCMODE == nix::libc::O_RDONLY)
     }
+
+    pub(crate) fn read_modem_cts(&self) -> Result<bool, std::io::Error> {
+        read_modem_cts(&self.file)
+    }
 }
 
 fn apply_smdr_termios(t: &mut Termios, options: SmdrLineOptions) -> Result<(), DeviceError> {
@@ -402,6 +406,17 @@ impl SmdrDeviceHandle {
     pub fn access_mode_is_read_only(&self) -> Result<bool, Errno> {
         self.lock().access_mode_is_read_only()
     }
+
+    /// CTS line level from `TIOCMGET` on this listen-only handle. Never sets modem bits.
+    #[cfg(target_os = "linux")]
+    pub fn read_modem_cts(&self) -> Result<bool, std::io::Error> {
+        self.lock().read_modem_cts()
+    }
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn read_modem_cts(file: &File) -> Result<bool, std::io::Error> {
+    kxprovd_sys::read_cts(file)
 }
 
 impl SmdrSource for SmdrDeviceHandle {

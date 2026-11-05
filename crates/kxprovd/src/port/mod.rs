@@ -414,6 +414,21 @@ impl<T: LeaseLine> PortManager<T> {
     }
 
     #[cfg(target_os = "linux")]
+    pub fn read_smdr_modem_cts(&self) -> Option<Result<bool, std::io::Error>> {
+        if self.shared.leased.load(Ordering::SeqCst) {
+            return None;
+        }
+        let slot = self
+            .shared
+            .device
+            .lock()
+            .unwrap_or_else(recover_from_poison);
+        let smdr = slot.as_ref()?;
+        let device = smdr.lock().unwrap_or_else(recover_from_poison);
+        Some(device.read_modem_cts())
+    }
+
+    #[cfg(target_os = "linux")]
     pub fn open_smdr_device(
         &self,
         path: &std::path::Path,

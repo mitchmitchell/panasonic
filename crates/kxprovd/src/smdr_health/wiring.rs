@@ -1,7 +1,6 @@
 //! S7 wiring between the S4 reader, the [`HealthMonitor`] and [`SmdrLive`].
 //!
-//! Re-exported publicly only with `test-util`: no production code calls these until the
-//! daemon reader loop lands (https://github.com/mitchmitchell/panasonic/issues/107).
+//! Re-exported publicly only with `test-util`; the daemon reader loop is the production caller.
 
 use super::{HealthConfig, HealthMonitor, Observation};
 use crate::smdr_bus::SmdrLive;
@@ -45,6 +44,7 @@ impl<S: SmdrSource> ByteTap<S> {
         (Self { inner, count }, counter)
     }
 
+    #[cfg(feature = "test-util")]
     pub fn into_inner(self) -> S {
         self.inner
     }
@@ -75,6 +75,10 @@ impl ByteCounter {
         self.seen = now;
         fresh
     }
+
+    pub(crate) fn has_pending(&self) -> bool {
+        self.count.load(Ordering::Relaxed) != self.seen
+    }
 }
 
 /// Drives a [`HealthMonitor`] and publishes its edges and status through [`SmdrLive`].
@@ -95,6 +99,16 @@ impl HealthBoard {
         }
     }
 
+    /// Monitor with no [`ByteTap`]; byte-driven alerts never fire.
+    #[cfg(test)]
+    pub fn without_byte_tap(cfg: HealthConfig, live: Arc<SmdrLive>) -> Self {
+        Self::new(cfg, live, ByteCounter::default())
+    }
+
+    pub(crate) fn byte_tap_has_pending(&self) -> bool {
+        self.bytes.has_pending()
+    }
+
     /// One timer tick: folds in new bytes, then re-evaluates. One timer per daemon drives this.
     pub fn tick(&mut self, now: Instant, wall: DateTime<Utc>) {
         self.observe(Observation::Tick, now, wall);
@@ -112,6 +126,7 @@ impl HealthBoard {
         }
     }
 
+    #[cfg(feature = "test-util")]
     pub fn monitor(&self) -> &HealthMonitor {
         &self.monitor
     }
