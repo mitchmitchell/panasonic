@@ -890,7 +890,11 @@ async fn unlock(
     if !state.peer_policy.is_admin(cred) {
         return Err(api_err("forbidden", "root admin required"));
     }
-    crate::discard::unlock_metadata_not_stored(&params.reason, &params.job_id);
+    tracing::info!(
+        reason = %params.reason,
+        job_id = %params.job_id,
+        "root unlock clearing LOCKED state (reason/job_id not persisted)"
+    );
     state
         .locked
         .clear()

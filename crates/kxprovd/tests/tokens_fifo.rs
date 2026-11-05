@@ -294,7 +294,7 @@ fn six_fifo_hangs_cap_live_threads_and_fast_fail_closed() {
         store.set_reload_probe_hang_for_test(false);
         std::fs::remove_file(&path).ok();
         write_tokens(&path);
-        kxprovd::discard::join_thread_best_effort(starter_handle);
+        kxprovd::test_util::join_probe_helper_thread(starter_handle);
         assert!(
             store.wait_probe_threads_exited_for_test(Duration::from_secs(10)),
             "iteration {i} probe threads did not drain"

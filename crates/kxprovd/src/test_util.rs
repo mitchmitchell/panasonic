@@ -93,6 +93,18 @@ pub fn verify_bearer_driving_fifo_contention(store: &crate::tokens::TokenStore) 
     let _ = store.verify_bearer(WRITER_SECRET, 0, Scope::Plan);
 }
 
+/// Integration fixtures seed placeholder dbh bytes; a failed write leaves meta-only rows.
+pub fn write_bytes_best_effort(path: &Path, data: impl AsRef<[u8]>) {
+    let _ = std::fs::write(path, data.as_ref());
+}
+
+/// Waits for a fifo probe helper thread; panics from the thread propagate via `join`.
+pub fn join_probe_helper_thread(handle: std::thread::JoinHandle<()>) {
+    handle
+        .join()
+        .expect("fifo probe helper thread panicked or failed to join");
+}
+
 struct ChunkSource(std::collections::VecDeque<Vec<u8>>);
 
 impl crate::smdr_reader::SmdrSource for ChunkSource {

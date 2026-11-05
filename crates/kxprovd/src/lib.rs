@@ -160,7 +160,9 @@ fn spawn_daemon_thread(
                 worker::run_worker(job_rx, worker_ctx, q, tokens_worker),
                 api::serve(listener, api_state),
             );
-            crate::discard::drop_api_serve_join_result(serve_res);
+            if let Err(e) = serve_res {
+                tracing::error!(error = %e, "api serve loop exited with error");
+            }
         });
     });
     match ready_rx.recv_timeout(DAEMON_STARTUP_TIMEOUT) {

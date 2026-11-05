@@ -102,7 +102,7 @@ pub fn write_testing_mode_backup_meta(backups_dir: &Path, digest: &str) {
         serde_json::to_vec_pretty(&meta).unwrap(),
     )
     .unwrap();
-    kxprovd::discard::write_bytes_best_effort(&meta.path, vec![0u8; 100]);
+    kxprovd::test_util::write_bytes_best_effort(&meta.path, vec![0u8; 100]);
 }
 
 pub fn write_prod_mode_backup_meta(backups_dir: &Path, digest: &str) {
@@ -122,7 +122,7 @@ pub fn write_prod_mode_backup_meta(backups_dir: &Path, digest: &str) {
         serde_json::to_vec_pretty(&meta).unwrap(),
     )
     .unwrap();
-    kxprovd::discard::write_bytes_best_effort(&meta.path, vec![0u8; 100]);
+    kxprovd::test_util::write_bytes_best_effort(&meta.path, vec![0u8; 100]);
 }
 
 use kxprov_api::{ApiClient, DiffHash, RequestBody};
