@@ -12,7 +12,7 @@ use crate::smdr_store::{backup_sets, SmdrStore};
 use crate::transport::SimTransportBridge;
 use chrono::Utc;
 use kxtd1232::smdr::DateOrder;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -22,21 +22,50 @@ const POLL_MS: u64 = 50;
 pub struct SmdrReaderTask {
     stop: Arc<AtomicBool>,
     thread: Option<std::thread::JoinHandle<()>>,
+    #[cfg(feature = "test-util")]
+    reader_linux_tid: Arc<AtomicU64>,
 }
 
 impl SmdrReaderTask {
     pub fn spawn(config: Config, port: Arc<DeviceArbiter>, live: Arc<SmdrLive>) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let stop_flag = Arc::clone(&stop);
+        #[cfg(feature = "test-util")]
+        let reader_linux_tid = Arc::new(AtomicU64::new(0));
+        #[cfg(feature = "test-util")]
+        let tid_slot = Arc::clone(&reader_linux_tid);
         let thread = std::thread::Builder::new()
             .name("smdr-reader".into())
-            .spawn(move || run(config, port, live, stop_flag))
+            .spawn(move || {
+                #[cfg(all(feature = "test-util", target_os = "linux"))]
+                tid_slot.store(linux_thread_id(), Ordering::Relaxed);
+                run(config, port, live, stop_flag)
+            })
             .expect("smdr reader thread");
         Self {
             stop,
             thread: Some(thread),
+            #[cfg(feature = "test-util")]
+            reader_linux_tid,
         }
     }
+
+    #[cfg(all(feature = "test-util", target_os = "linux"))]
+    pub fn reader_linux_tid(&self) -> u64 {
+        self.reader_linux_tid.load(Ordering::Relaxed)
+    }
+}
+
+#[cfg(all(feature = "test-util", target_os = "linux"))]
+fn linux_thread_id() -> u64 {
+    std::fs::read_link("/proc/self")
+        .ok()
+        .and_then(|p| {
+            p.file_name()
+                .and_then(|s| s.to_str())
+                .and_then(|s| s.parse().ok())
+        })
+        .unwrap_or(0)
 }
 
 impl Drop for SmdrReaderTask {

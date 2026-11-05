@@ -11,7 +11,6 @@ use kxprovd::smdr_loop::SmdrReaderTask;
 use kxprovd::transport::device_arbiter;
 use kxtd1232::smdr::SPEC_HEADER;
 use kxtd1232_sim::SimTransport;
-use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -47,27 +46,14 @@ fn header_mismatch_active(snap: &LiveSnapshot) -> bool {
 }
 
 #[cfg(target_os = "linux")]
-fn smdr_reader_thread_cpu() -> Option<Duration> {
-    let task_root = Path::new("/proc/self/task");
-    for entry in task_root.read_dir().ok()? {
-        let entry = entry.ok()?;
-        let comm = std::fs::read_to_string(entry.path().join("comm")).ok()?;
-        if comm.trim() == "smdr-reader" {
-            return Some(task_cpu_time(&entry.path()));
-        }
-    }
-    None
-}
-
-#[cfg(target_os = "linux")]
-fn task_cpu_time(task: &Path) -> Duration {
-    const CLK_TCK: u64 = 100;
-    let stat = std::fs::read_to_string(task.join("stat")).expect("task stat");
+fn task_cpu_time(tid: u64) -> Duration {
+    let clk_tck = rustix::param::clock_ticks_per_second();
+    let stat = std::fs::read_to_string(format!("/proc/self/task/{tid}/stat")).expect("task stat");
     let after = stat.rfind(')').expect("comm") + 2;
     let fields: Vec<&str> = stat[after..].split_whitespace().collect();
     let utime: u64 = fields[11].parse().expect("utime");
     let stime: u64 = fields[12].parse().expect("stime");
-    Duration::from_nanos((utime + stime).saturating_mul(1_000_000_000 / CLK_TCK))
+    Duration::from_nanos((utime + stime).saturating_mul(1_000_000_000 / clk_tck))
 }
 
 struct SimHarness {
@@ -147,10 +133,12 @@ fn sim_smdr_reader_loop_updates_live() {
 fn sim_idle_loop_does_not_spin_cpu() {
     let h = sim_harness(Duration::from_secs(86_400));
     wait_for(&h.live, Duration::from_secs(3), |s| s.running);
-    let cpu0 = smdr_reader_thread_cpu().expect("smdr-reader thread");
+    let tid = h._task.reader_linux_tid();
+    assert_ne!(tid, 0, "reader thread id not published");
+    let cpu0 = task_cpu_time(tid);
     let wall0 = Instant::now();
     std::thread::sleep(Duration::from_millis(800));
-    let cpu1 = smdr_reader_thread_cpu().expect("smdr-reader thread");
+    let cpu1 = task_cpu_time(tid);
     let wall = wall0.elapsed();
     let cpu_delta = cpu1.saturating_sub(cpu0);
     assert!(
