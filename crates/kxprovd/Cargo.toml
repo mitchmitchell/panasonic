@@ -62,6 +62,10 @@ name = "smdr_health"
 required-features = ["test-util"]
 
 [[test]]
+name = "smdr_reader_loop"
+required-features = ["test-util"]
+
+[[test]]
 name = "daemon"
 required-features = ["test-util"]
 

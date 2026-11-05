@@ -100,11 +100,24 @@ fn run(config: Config, port: Arc<DeviceArbiter>, live: Arc<SmdrLive>, stop: Arc<
             }
         }
         TransportKind::Sim => {
-            let Some(pbx) = config.sim_pbx.clone() else {
-                tracing::error!("sim transport missing sim_pbx; smdr reader not started");
-                return;
+            #[cfg(feature = "test-util")]
+            let bridge = if let Some(shared) = &config.sim_smdr_transport {
+                SimTransportBridge::with_shared_transport(Arc::clone(shared))
+            } else {
+                let Some(pbx) = config.sim_pbx.clone() else {
+                    tracing::error!("sim transport missing sim_pbx; smdr reader not started");
+                    return;
+                };
+                SimTransportBridge::new(pbx)
             };
-            let bridge = SimTransportBridge::new(pbx);
+            #[cfg(not(feature = "test-util"))]
+            let bridge = {
+                let Some(pbx) = config.sim_pbx.clone() else {
+                    tracing::error!("sim transport missing sim_pbx; smdr reader not started");
+                    return;
+                };
+                SimTransportBridge::new(pbx)
+            };
             let (tap, bytes) = ByteTap::new(ReceiveOnly::new(bridge));
             let board = HealthBoard::new(health_cfg, Arc::clone(&live), bytes);
             (Source::Sim(SmdrReader::new(tap)), board)
@@ -169,11 +182,7 @@ fn run(config: Config, port: Arc<DeviceArbiter>, live: Arc<SmdrLive>, stop: Arc<
             if config.transport == TransportKind::Serial {
                 #[cfg(target_os = "linux")]
                 if let Some(reading) = port.read_smdr_modem_cts() {
-                    let obs = match reading {
-                        Ok(high) => Observation::ModemStatus(Ok(high)),
-                        Err(e) => Observation::ModemStatus(Err(ModemStatusError::from(&e))),
-                    };
-                    board.observe(obs, Instant::now(), wall());
+                    board.observe(modem_status_observation(reading), Instant::now(), wall());
                 }
             }
             board.tick(Instant::now(), wall());
@@ -188,5 +197,39 @@ fn arbiter_port_state(port: &DeviceArbiter) -> PortState {
     match port.mode() {
         PortMode::Smdr => PortState::Smdr,
         PortMode::Programming => PortState::Programming,
+    }
+}
+
+fn modem_status_observation(reading: Result<bool, std::io::Error>) -> Observation {
+    match reading {
+        Ok(high) => Observation::ModemStatus(Ok(high)),
+        Err(e) => Observation::ModemStatus(Err(ModemStatusError::from(&e))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::smdr_health::Observation;
+
+    #[test]
+    fn modem_status_observation_passes_cts_polarity_through() {
+        assert_eq!(
+            modem_status_observation(Ok(true)),
+            Observation::ModemStatus(Ok(true))
+        );
+        assert_eq!(
+            modem_status_observation(Ok(false)),
+            Observation::ModemStatus(Ok(false))
+        );
+    }
+
+    #[test]
+    fn modem_status_observation_maps_io_error() {
+        let err = std::io::Error::other("probe");
+        match modem_status_observation(Err(err)) {
+            Observation::ModemStatus(Err(e)) => assert_eq!(e.kind, std::io::ErrorKind::Other),
+            other => panic!("expected modem error observation, got {other:?}"),
+        }
     }
 }

@@ -7,6 +7,8 @@ use kxprov_api::{
 };
 use kxtd1232::{SignOn, Timing, TimingConfigError};
 use kxtd1232_sim::SimPbx;
+#[cfg(feature = "test-util")]
+use kxtd1232_sim::SimTransport;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -56,6 +58,9 @@ pub struct Config {
     pub timing: Timing,
     pub signon: SignOn,
     pub sim_pbx: Option<Arc<Mutex<SimPbx>>>,
+    /// When set, the SMDR reader uses this transport instead of opening a new one (tests only).
+    #[cfg(feature = "test-util")]
+    pub sim_smdr_transport: Option<Arc<Mutex<SimTransport>>>,
     pub tokens_path: PathBuf,
     pub smdr: SmdrConfig,
     /// S7 thresholds, parsed once from `smdr` at load so the daemon never holds an unusable value.
@@ -382,6 +387,8 @@ impl Config {
             timing,
             signon,
             sim_pbx,
+            #[cfg(feature = "test-util")]
+            sim_smdr_transport: None,
             tokens_path: file.tokens_path,
             smdr_health: file.smdr.health()?,
             smdr: file.smdr,
@@ -413,6 +420,8 @@ impl Config {
             timing: Timing::default(),
             signon: SignOn::default(),
             sim_pbx: Some(Arc::new(Mutex::new(SimPbx::default()))),
+            #[cfg(feature = "test-util")]
+            sim_smdr_transport: None,
             tokens_path: data_dir.join("tokens.json"),
             smdr: SmdrConfig::default(),
             smdr_health: crate::smdr_health::HealthConfig::default(),
@@ -447,6 +456,8 @@ impl Config {
             timing: Timing::default(),
             signon: SignOn::default(),
             sim_pbx: Some(Arc::new(Mutex::new(SimPbx::default()))),
+            #[cfg(feature = "test-util")]
+            sim_smdr_transport: None,
             tokens_path: data_dir.join("tokens.json"),
             smdr: SmdrConfig::default(),
             smdr_health: crate::smdr_health::HealthConfig::default(),
