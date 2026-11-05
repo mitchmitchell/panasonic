@@ -12,7 +12,9 @@ use crate::smdr_store::{backup_sets, SmdrStore};
 use crate::transport::SimTransportBridge;
 use chrono::Utc;
 use kxtd1232::smdr::DateOrder;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+#[cfg(feature = "test-util")]
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -58,7 +60,7 @@ impl SmdrReaderTask {
 
 #[cfg(all(feature = "test-util", target_os = "linux"))]
 fn linux_thread_id() -> u64 {
-    std::fs::read_link("/proc/self")
+    std::fs::read_link("/proc/thread-self")
         .ok()
         .and_then(|p| {
             p.file_name()
