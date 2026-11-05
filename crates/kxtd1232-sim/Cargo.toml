@@ -23,6 +23,10 @@ getrandom = "0.3"
 serde_json = "1"
 
 [[test]]
+name = "read_attempts"
+required-features = ["faults"]
+
+[[test]]
 name = "busy_unacked"
 required-features = ["faults"]
 
