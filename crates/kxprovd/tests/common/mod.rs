@@ -102,7 +102,7 @@ pub fn write_testing_mode_backup_meta(backups_dir: &Path, digest: &str) {
         serde_json::to_vec_pretty(&meta).unwrap(),
     )
     .unwrap();
-    let _ = std::fs::write(&meta.path, vec![0u8; 100]);
+    kxprovd::discard::write_bytes_best_effort(&meta.path, vec![0u8; 100]);
 }
 
 pub fn write_prod_mode_backup_meta(backups_dir: &Path, digest: &str) {
@@ -122,5 +122,29 @@ pub fn write_prod_mode_backup_meta(backups_dir: &Path, digest: &str) {
         serde_json::to_vec_pretty(&meta).unwrap(),
     )
     .unwrap();
-    let _ = std::fs::write(&meta.path, vec![0u8; 100]);
+    kxprovd::discard::write_bytes_best_effort(&meta.path, vec![0u8; 100]);
+}
+
+use kxprov_api::{ApiClient, DiffHash, RequestBody};
+
+/// Satisfies prod apply gates; the approval RPC body is not part of fixture assertions.
+pub async fn submit_test_approval(
+    approver: &mut ApiClient,
+    plan_id: &str,
+    diff_hash: DiffHash,
+    profile: Profile,
+) {
+    approver
+        .call_auth(
+            RequestBody::SubmitApproval {
+                params: kxprov_api::SubmitApprovalParams {
+                    plan_id: plan_id.to_string(),
+                    diff_hash,
+                    profile,
+                },
+            },
+            Some(bearer_auth(APPROVER_SECRET)),
+        )
+        .await
+        .expect("submit approval");
 }

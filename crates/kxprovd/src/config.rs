@@ -261,6 +261,12 @@ fn default_daemon_socket_group() -> String {
     "kxprovision".into()
 }
 
+/// Gateway peer UID lookup is Unix-only; non-Unix builds ignore the configured name.
+#[cfg(not(unix))]
+fn gateway_uid_non_unix(_user_name: &str) -> Result<u32, ConfigError> {
+    Err(ConfigError::Missing)
+}
+
 fn resolve_gateway_uid(explicit: Option<u32>, user_name: &str) -> Result<u32, ConfigError> {
     if let Some(uid) = explicit {
         return Ok(uid);
@@ -274,8 +280,7 @@ fn resolve_gateway_uid(explicit: Option<u32>, user_name: &str) -> Result<u32, Co
     }
     #[cfg(not(unix))]
     {
-        let _ = user_name;
-        Err(ConfigError::Missing)
+        gateway_uid_non_unix(user_name)
     }
 }
 

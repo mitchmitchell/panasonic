@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 fn atomic_temp_path(dir: &Path, base: &str) -> PathBuf {
     let mut rnd = [0u8; 8];
-    let _ = getrandom::fill(&mut rnd);
+    crate::discard::fill_atomic_temp_nonce(&mut rnd);
     dir.join(format!(
         ".{}.tmp.{}.{}",
         base,
@@ -34,7 +34,7 @@ pub fn write(path: &Path, data: &[u8]) -> std::io::Result<()> {
     }
     std::fs::rename(&tmp, path)?;
     if let Ok(dirf) = File::open(dir) {
-        let _ = dirf.sync_all();
+        crate::discard::sync_opened_parent_dir_best_effort(&dirf);
     }
     Ok(())
 }

@@ -46,29 +46,38 @@ pub async fn run_worker(
                     Ok(revoked) if stale || revoked => {
                         queue_jobs.set_state(&job.id, JobState::Failed).await;
                         queue_jobs.release_token(job.principal.as_ref()).await;
-                        let _ = job.reply.send(JobOutcome::Err {
-                            code: "token_revoked".into(),
-                            message: "bearer token was revoked".into(),
-                        });
+                        crate::discard::send_job_outcome_best_effort(
+                            job.reply,
+                            JobOutcome::Err {
+                                code: "token_revoked".into(),
+                                message: "bearer token was revoked".into(),
+                            },
+                        );
                         continue;
                     }
                     Err(crate::tokens::TokenError::StoreUnavailable) => {
                         queue_jobs.set_state(&job.id, JobState::Failed).await;
                         queue_jobs.release_token(job.principal.as_ref()).await;
-                        let _ = job.reply.send(JobOutcome::Err {
-                            code: "token".into(),
-                            message: "token store unavailable".into(),
-                        });
+                        crate::discard::send_job_outcome_best_effort(
+                            job.reply,
+                            JobOutcome::Err {
+                                code: "token".into(),
+                                message: "token store unavailable".into(),
+                            },
+                        );
                         continue;
                     }
                     Ok(_) => {}
                     Err(_) => {
                         queue_jobs.set_state(&job.id, JobState::Failed).await;
                         queue_jobs.release_token(job.principal.as_ref()).await;
-                        let _ = job.reply.send(JobOutcome::Err {
-                            code: "token".into(),
-                            message: "token store unavailable".into(),
-                        });
+                        crate::discard::send_job_outcome_best_effort(
+                            job.reply,
+                            JobOutcome::Err {
+                                code: "token".into(),
+                                message: "token store unavailable".into(),
+                            },
+                        );
                         continue;
                     }
                 }
@@ -88,7 +97,7 @@ pub async fn run_worker(
             )
             .await;
         queue_jobs.release_token(job.principal.as_ref()).await;
-        let _ = job.reply.send(outcome);
+        crate::discard::send_job_outcome_best_effort(job.reply, outcome);
     }
 }
 
@@ -173,7 +182,7 @@ async fn run_read(
     let rows = match with_client(ctx, job_id, |c| {
         crate::transport::login(c, &pwd)?;
         let raw = c.read_records(kind.table(), first, count)?;
-        let _ = c.end_binary();
+        crate::discard::end_kxtd_session_binary(c);
         Ok(raw)
     }) {
         Ok(r) => r,
@@ -228,7 +237,7 @@ async fn run_plan(
         crate::transport::login(c, &pwd)?;
         let base = c.read_table(kind.table())?;
         let plan = build_plan(kind.table(), &base, &[patch], Granularity::Chunk)?;
-        let _ = c.end_binary();
+        crate::discard::end_kxtd_session_binary(c);
         Ok(plan)
     }) {
         Ok(p) => p,
@@ -269,10 +278,13 @@ async fn run_backup(
         .config
         .profile_data_dir()
         .join(format!("{job_id}.partial.dbh"));
-    let _ = ctx.journal.append(&JournalEntry::BackupStart {
-        job_id: job_id.to_string(),
-        temp_path: temp.display().to_string(),
-    });
+    crate::discard::journal_append_best_effort(
+        &ctx.journal,
+        JournalEntry::BackupStart {
+            job_id: job_id.to_string(),
+            temp_path: temp.display().to_string(),
+        },
+    );
     let pwd = ctx.config.password.clone();
     let transport = match open(&ctx.config, &ctx.port, job_id) {
         Ok(t) => t,
@@ -330,12 +342,15 @@ async fn run_backup(
             };
         }
     };
-    let _ = ctx.journal.append(&JournalEntry::BackupCommit {
-        job_id: job_id.to_string(),
-        backup_id: meta.id.clone(),
-    });
-    let _ = std::fs::remove_file(&temp);
-    let _ = ctx.journal.truncate();
+    crate::discard::journal_append_best_effort(
+        &ctx.journal,
+        JournalEntry::BackupCommit {
+            job_id: job_id.to_string(),
+            backup_id: meta.id.clone(),
+        },
+    );
+    crate::discard::remove_file_best_effort(&temp);
+    crate::discard::journal_truncate_best_effort(&ctx.journal);
     JobOutcome::BackupNow(kxprov_api::BackupNowResult {
         backup: backup_info(&meta, &ctx.goliath),
     })
@@ -440,7 +455,7 @@ async fn run_apply_job(
         Ok(_blocks) => {
             if let Err(e) = ctx.plans.mark_applied(&plan_id, now_ms()) {
                 let msg = format!("mark_applied failed: {e}");
-                let _ = lock_on_apply_failure(&ctx.locked, &msg, job_id);
+                crate::discard::lock_on_apply_failure_best_effort(&ctx.locked, &msg, job_id);
                 return JobOutcome::Err {
                     code: "apply".into(),
                     message: msg,
@@ -448,7 +463,7 @@ async fn run_apply_job(
             }
             if let Err(e) = ctx.journal.truncate() {
                 let msg = format!("journal truncate failed: {e}");
-                let _ = lock_on_apply_failure(&ctx.locked, &msg, job_id);
+                crate::discard::lock_on_apply_failure_best_effort(&ctx.locked, &msg, job_id);
                 return JobOutcome::Err {
                     code: "apply".into(),
                     message: msg,

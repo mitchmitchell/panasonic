@@ -45,6 +45,11 @@ impl TokenRateState {
     /// Undo [`Self::try_reserve`] when the job never entered the queue.
     pub fn rollback_reserve(&mut self) {
         self.active = self.active.saturating_sub(1);
+        self.undo_last_reserve_timestamp();
+    }
+
+    /// Pairs with [`Self::try_reserve`]; ignore pop when the deque was already empty.
+    fn undo_last_reserve_timestamp(&mut self) {
         let _ = self.start_times_ms.pop_back();
     }
 }

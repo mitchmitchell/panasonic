@@ -88,6 +88,11 @@ pub fn write_integration_tokens(path: &Path) {
         .expect("write integration tokens");
 }
 
+/// Drives fifo reload probes; auth success or failure is irrelevant to contention tests.
+pub fn verify_bearer_driving_fifo_contention(store: &crate::tokens::TokenStore) {
+    let _ = store.verify_bearer(WRITER_SECRET, 0, Scope::Plan);
+}
+
 struct ChunkSource(std::collections::VecDeque<Vec<u8>>);
 
 impl crate::smdr_reader::SmdrSource for ChunkSource {

@@ -10,6 +10,7 @@ pub mod backup;
 pub mod config;
 pub mod dbh;
 pub mod deadline;
+pub mod discard;
 pub mod epoch_store;
 pub mod gates;
 pub mod goliath;
@@ -109,7 +110,7 @@ fn prepare_daemon_unix_socket(
         .set_nonblocking(true)
         .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
     if let Err(e) = set_daemon_socket_permissions(socket_path, group_name) {
-        let _ = std::fs::remove_file(socket_path);
+        crate::discard::remove_file_best_effort(socket_path);
         return Err(e);
     }
     Ok(std_listener)
@@ -144,7 +145,10 @@ fn spawn_daemon_thread(
             let listener = match tokio_listener_from_prepared(prepared_socket) {
                 Ok(l) => l,
                 Err(e) => {
-                    let _ = ready_tx.send(Err(format!("tokio listener: {e}")));
+                    crate::discard::daemon_ready_send_failure(
+                        &ready_tx,
+                        format!("tokio listener: {e}"),
+                    );
                     return;
                 }
             };
@@ -156,7 +160,7 @@ fn spawn_daemon_thread(
                 worker::run_worker(job_rx, worker_ctx, q, tokens_worker),
                 api::serve(listener, api_state),
             );
-            let _ = serve_res;
+            crate::discard::drop_api_serve_join_result(serve_res);
         });
     });
     match ready_rx.recv_timeout(DAEMON_STARTUP_TIMEOUT) {
@@ -221,7 +225,9 @@ impl Daemon {
             &config.provision_root,
             config.profile,
         );
-        let _ = sim_mark::SimMarkStore::new(&config.provision_root).clear_if_stale();
+        crate::discard::sim_mark_clear_stale_on_boot(&sim_mark::SimMarkStore::new(
+            &config.provision_root,
+        ));
         let profile = Arc::new(RwLock::new(mode.load_profile()));
 
         let (job_tx, job_rx) = mpsc::channel(32);
@@ -280,7 +286,7 @@ impl Daemon {
         let thread = match spawn_daemon_thread(prepared_socket, job_rx, worker_ctx, q, api_state) {
             Ok(t) => t,
             Err(e) => {
-                let _ = std::fs::remove_file(&socket_path);
+                crate::discard::remove_file_best_effort(&socket_path);
                 return Err(e);
             }
         };
@@ -402,7 +408,9 @@ impl Daemon {
             &config.provision_root,
             config.profile,
         );
-        let _ = sim_mark::SimMarkStore::new(&config.provision_root).clear_if_stale();
+        crate::discard::sim_mark_clear_stale_on_boot(&sim_mark::SimMarkStore::new(
+            &config.provision_root,
+        ));
         let profile = Arc::new(RwLock::new(mode.load_profile()));
 
         let (job_tx, job_rx) = mpsc::channel(32);
@@ -461,7 +469,7 @@ impl Daemon {
         let thread = match spawn_daemon_thread(prepared_socket, job_rx, worker_ctx, q, api_state) {
             Ok(t) => t,
             Err(e) => {
-                let _ = std::fs::remove_file(&socket_path);
+                crate::discard::remove_file_best_effort(&socket_path);
                 return Err(e);
             }
         };

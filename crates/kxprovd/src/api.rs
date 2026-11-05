@@ -625,7 +625,7 @@ async fn status_snapshot(state: &ApiState, locked: bool) -> kxprov_api::StatusRe
         let now = chrono::Utc::now();
         let may_fire = crate::alert::locked_alert_may_fire_utc(now);
         if may_fire && !st.alert_sent {
-            let _ = state.locked.mark_alert_sent();
+            crate::discard::mark_locked_alert_sent_best_effort(&state.locked);
             tracing::warn!(
                 reason = %st.reason,
                 job_id = ?st.job_id,
@@ -774,7 +774,7 @@ async fn set_mode(
             };
             return Err(api_err(code, &e.to_string()));
         }
-        let _ = state.transition.clear();
+        crate::discard::transition_clear_after_verified_production(&state.transition);
     }
     let (effective, profile, counter) = state
         .mode
@@ -890,8 +890,7 @@ async fn unlock(
     if !state.peer_policy.is_admin(cred) {
         return Err(api_err("forbidden", "root admin required"));
     }
-    let _ = params.reason;
-    let _ = params.job_id;
+    crate::discard::unlock_metadata_not_stored(&params.reason, &params.job_id);
     state
         .locked
         .clear()
@@ -1054,7 +1053,7 @@ mod apply_plan_tests {
             let base = client.read_table(kind.table()).unwrap();
             let patch = field_patch(kind, 4, "AP").unwrap();
             let plan = build_plan(kind.table(), &base, &[patch], Granularity::Chunk).unwrap();
-            let _ = client.end_binary();
+            crate::discard::end_kxtd_session_binary(&mut client);
             let snap = PlanSnapshot::from(&plan);
             let now = now_ms();
             state
@@ -1107,7 +1106,7 @@ mod apply_plan_tests {
             let base = client.read_table(kind.table()).unwrap();
             let patch = field_patch(kind, 5, "C").unwrap();
             let plan = build_plan(kind.table(), &base, &[patch], Granularity::Chunk).unwrap();
-            let _ = client.end_binary();
+            crate::discard::end_kxtd_session_binary(&mut client);
             let snap = PlanSnapshot::from(&plan);
             let now = now_ms();
             state
