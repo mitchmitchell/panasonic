@@ -108,6 +108,10 @@ impl HealthBoard {
         self.bytes.has_pending()
     }
 
+    pub(crate) fn replace_byte_tap(&mut self, bytes: ByteCounter) {
+        self.bytes = bytes;
+    }
+
     /// One timer tick: folds in new bytes, then re-evaluates. One timer per daemon drives this.
     pub fn tick(&mut self, now: Instant, wall: DateTime<Utc>) {
         self.observe(Observation::Tick, now, wall);

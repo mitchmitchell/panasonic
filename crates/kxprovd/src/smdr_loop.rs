@@ -13,6 +13,7 @@ use crate::smdr_store::{backup_sets, SmdrStore};
 use crate::transport::SimTransportBridge;
 use chrono::Utc;
 use kxtd1232::smdr::DateOrder;
+use kxtd1232::{LinkDownError, TransportError};
 #[cfg(feature = "test-util")]
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -178,8 +179,6 @@ fn run(config: Config, port: Arc<DeviceArbiter>, live: Arc<SmdrLive>, stop: Arc<
                 None => try_attach_serial_reader(
                     &port,
                     &config.serial_device,
-                    health_cfg,
-                    Arc::clone(&live),
                     slot,
                     &mut board,
                     timeout_ms,
@@ -270,19 +269,25 @@ fn detach_serial_reader(
 fn try_attach_serial_reader(
     port: &DeviceArbiter,
     path: &std::path::Path,
-    health_cfg: crate::smdr_health::HealthConfig,
-    live: Arc<SmdrLive>,
     slot: &mut Option<SmdrReader<ByteTap<device::SmdrDeviceHandle>>>,
     board: &mut HealthBoard,
     wait_ms: u64,
 ) -> Result<Vec<ReaderEvent>, ReaderError> {
     if let Some((reader, bytes)) = open_serial_reader(port, path) {
-        *board = HealthBoard::new(health_cfg, live, bytes);
+        board.replace_byte_tap(bytes);
         *slot = Some(reader);
         Ok(vec![ReaderEvent::Idle])
     } else {
         std::thread::sleep(Duration::from_millis(wait_ms));
-        Ok(vec![ReaderEvent::Idle])
+        Err(ReaderError::LinkDown(TransportError::LinkDown(
+            LinkDownError {
+                detail: format!(
+                    "serial smdr device {} not available for reattach",
+                    path.display()
+                ),
+                bytes_sent: None,
+            },
+        )))
     }
 }
 

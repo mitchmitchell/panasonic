@@ -4,7 +4,7 @@
 )]
 
 use kxprov_api::{SmdrAlertKind, SmdrAlertState};
-use kxprovd::config::Config;
+use kxprovd::config::{Config, TransportKind};
 use kxprovd::smdr_bus::{LiveSnapshot, SmdrLive};
 use kxprovd::smdr_health::HealthConfig;
 use kxprovd::smdr_loop::SmdrReaderTask;
@@ -43,6 +43,61 @@ fn header_mismatch_active(snap: &LiveSnapshot) -> bool {
     snap.alerts.iter().any(|a| {
         a.kind == SmdrAlertKind::HeaderMismatch && matches!(a.state, SmdrAlertState::Raised { .. })
     })
+}
+
+#[cfg(any(test, feature = "test-util"))]
+fn block_smdr_raw_journals(smdr_dir: &std::path::Path) {
+    use kxprovd::smdr_store::{RAW_JOURNAL_PREFIX, RAW_JOURNAL_SUFFIX};
+
+    for entry in std::fs::read_dir(smdr_dir).expect("smdr dir") {
+        let path = entry.expect("entry").path();
+        let name = path.file_name().expect("name").to_string_lossy();
+        if !name.starts_with(RAW_JOURNAL_PREFIX) || !name.ends_with(RAW_JOURNAL_SUFFIX) {
+            continue;
+        }
+        if path.is_file() {
+            std::fs::remove_file(&path).expect("remove journal file");
+        }
+        if !path.exists() {
+            std::fs::create_dir(&path).expect("journal path is a directory so append fails");
+        }
+    }
+    let today = smdr_dir.join(format!(
+        "{RAW_JOURNAL_PREFIX}{}{RAW_JOURNAL_SUFFIX}",
+        chrono::Utc::now().date_naive()
+    ));
+    if today.is_file() {
+        std::fs::remove_file(&today).expect("remove today's journal file");
+    }
+    if !today.exists() {
+        std::fs::create_dir(&today).expect("block today's journal path");
+    }
+}
+
+fn wait_for_stable_call_count(db: &std::path::Path, timeout: Duration) -> i64 {
+    let deadline = Instant::now() + timeout;
+    let mut last = -1i64;
+    let mut stable_reads = 0u32;
+    loop {
+        let count: i64 = rusqlite::Connection::open(db)
+            .expect("db")
+            .query_row("SELECT COUNT(*) FROM smdr_call", [], |row| row.get(0))
+            .expect("count");
+        if count == last {
+            stable_reads += 1;
+            if stable_reads >= 4 && count >= 1 {
+                return count;
+            }
+        } else {
+            last = count;
+            stable_reads = 0;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "call count never stabilized; last={last}"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -142,31 +197,37 @@ fn sim_link_down_clears_on_idle_after_reconnect_without_new_bytes() {
 #[test]
 fn sim_store_ingest_failure_does_not_spin_cpu() {
     use kxprovd::smdr_store::{SMDR_DB_NAME, SMDR_DIR_NAME};
-    use std::os::unix::fs::PermissionsExt;
 
     let h = sim_harness(Duration::from_secs(86_400));
     wait_for(&h.live, Duration::from_secs(3), |s| s.running);
     h.transport
         .lock()
         .unwrap()
-        .inject_inbound(kxprovd::test_util::synthetic_smdr_bytes(42, 1));
+        .inject_inbound(kxprovd::test_util::smdr_fixture("outgoing.txt"));
     wait_for(&h.live, Duration::from_secs(3), |s| {
         s.last_byte_at.is_some()
     });
 
-    let db = h
-        ._tmp
-        .path()
-        .join("sim")
-        .join(SMDR_DIR_NAME)
-        .join(SMDR_DB_NAME);
-    let mut perms = std::fs::metadata(&db).expect("db").permissions();
-    perms.set_mode(0o444);
-    std::fs::set_permissions(&db, perms).expect("readonly db");
+    let smdr_dir = h._tmp.path().join("sim").join(SMDR_DIR_NAME);
+    let db = smdr_dir.join(SMDR_DB_NAME);
+    let count_before = wait_for_stable_call_count(&db, Duration::from_secs(3));
+    assert_eq!(count_before, 1, "outgoing fixture should store one call");
+
+    block_smdr_raw_journals(&smdr_dir);
+
     h.transport
         .lock()
         .unwrap()
         .inject_inbound(kxprovd::test_util::synthetic_smdr_bytes(43, 1));
+    std::thread::sleep(Duration::from_millis(400));
+    let count_after: i64 = rusqlite::Connection::open(&db)
+        .expect("db")
+        .query_row("SELECT COUNT(*) FROM smdr_call", [], |row| row.get(0))
+        .expect("count");
+    assert_eq!(
+        count_after, count_before,
+        "store ingest should fail while the journal path is blocked"
+    );
 
     let tid = h._task.reader_linux_tid();
     assert_ne!(tid, 0, "reader thread id not published");
@@ -197,6 +258,30 @@ fn sim_attach_listen_only_leaves_programming_client_logged_in() {
     client
         .read(0x01, 0, 0, 1)
         .expect("programming session survives listen-only SMDR attach");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn serial_missing_device_keeps_link_down_while_reattach_fails() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let socket = tmp.path().join("smdr-serial-down.sock");
+    let mut cfg = Config::sim_test(tmp.path().to_path_buf(), socket, 1003);
+    std::fs::create_dir_all(cfg.data_dir.join("backups")).expect("backups");
+    cfg.transport = TransportKind::Serial;
+    cfg.sim_pbx = None;
+    cfg.serial_device = tmp.path().join("missing-smdr-device");
+    let live = Arc::new(SmdrLive::new());
+    let port = device_arbiter(&cfg);
+    let _task = SmdrReaderTask::spawn(cfg, Arc::clone(&port), Arc::clone(&live));
+    wait_for(&live, Duration::from_secs(3), |s| s.running);
+    wait_for(&live, Duration::from_secs(3), |s| s.link_down);
+    for _ in 0..24 {
+        assert!(
+            live.snapshot().link_down,
+            "link_down must stay true while the serial device is missing"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }
 
 #[cfg(target_os = "linux")]
