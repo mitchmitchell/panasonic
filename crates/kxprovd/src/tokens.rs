@@ -960,7 +960,7 @@ impl TokenStore {
 
         impl Drop for FifoReadFd {
             fn drop(&mut self) {
-                let _ = nix::unistd::close(self.0);
+                crate::discard::close_fifo_read_fd_best_effort(self.0);
             }
         }
 
@@ -3442,7 +3442,7 @@ mod tests {
                 std::thread::spawn(move || {
                     barrier.wait();
                     let waits_before = TokenStore::reload_waits_on_this_thread_for_test();
-                    let _ = store.verify_bearer(crate::test_util::WRITER_SECRET, 0, Scope::Plan);
+                    crate::test_util::verify_bearer_driving_fifo_contention(&store);
                     TokenStore::reload_waits_on_this_thread_for_test() - waits_before
                 })
             })

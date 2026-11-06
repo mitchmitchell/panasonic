@@ -267,11 +267,14 @@ impl ModeStore {
     fn fail_closed(&self, kind: AuditKind, detail: impl Into<String>) -> EffectiveMode {
         let detail = detail.into();
         alert_mode_failure(&kind, &detail);
-        let _ = self.audit.append(&AuditEntry {
-            at_ms: now_ms(),
-            kind,
-            detail,
-        });
+        crate::discard::audit_append_nonblocking(
+            &self.audit,
+            AuditEntry {
+                at_ms: now_ms(),
+                kind,
+                detail,
+            },
+        );
         EffectiveMode {
             operational: OperationalMode::Production,
         }
@@ -372,11 +375,14 @@ impl ModeStore {
             &serde_json::to_vec_pretty(&ProfileFileBody { profile, counter })?,
         )?;
         self.save_counter(profile, counter)?;
-        let _ = self.audit.append(&AuditEntry {
-            at_ms: now_ms(),
-            kind: AuditKind::ModeSet,
-            detail: format!("mode={mode:?} profile={profile:?} counter={counter}"),
-        });
+        crate::discard::audit_append_nonblocking(
+            &self.audit,
+            AuditEntry {
+                at_ms: now_ms(),
+                kind: AuditKind::ModeSet,
+                detail: format!("mode={mode:?} profile={profile:?} counter={counter}"),
+            },
+        );
         Ok((EffectiveMode { operational: mode }, profile, counter))
     }
 

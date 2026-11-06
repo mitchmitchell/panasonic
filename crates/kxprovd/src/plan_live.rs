@@ -24,7 +24,7 @@ pub fn verify_live_diff_hash(
     let table = client
         .read_table(rec.table)
         .map_err(|_| PlanError::NotFound)?;
-    let _ = client.end_binary();
+    crate::discard::end_kxtd_session_binary(&mut client);
     let live = diff_hash_with_live_table(profile, &rec, &table)?;
     if live != rec.diff_hash {
         return Err(PlanError::DiffMismatch);

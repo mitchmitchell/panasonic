@@ -68,11 +68,14 @@ impl TransitionBlockStore {
 
     pub fn set_blocked(&self, detail: impl Into<String>) -> Result<(), std::io::Error> {
         let detail = detail.into();
-        let _ = self.audit.append(&AuditEntry {
-            at_ms: now_ms(),
-            kind: AuditKind::ModeTransitionMismatch,
-            detail: detail.clone(),
-        });
+        crate::discard::audit_append_nonblocking(
+            &self.audit,
+            AuditEntry {
+                at_ms: now_ms(),
+                kind: AuditKind::ModeTransitionMismatch,
+                detail: detail.clone(),
+            },
+        );
         crate::audit::alert_transition_mismatch(&detail);
         let st = TransitionBlockState {
             active: true,
@@ -109,7 +112,7 @@ impl TransitionBlockStore {
             tracing::warn!(detail = %st.detail, "testing→production table mismatch (Mitch)");
             st.alert_sent = true;
             if let Ok(bytes) = serde_json::to_vec_pretty(&st) {
-                let _ = std::fs::write(&self.path, bytes);
+                crate::discard::transition_alert_sent_persist_best_effort(&self.path, &bytes);
             }
         }
     }
@@ -135,10 +138,10 @@ pub fn live_caller_id_digest(
     crate::transport::login(&mut client, &config.password)?;
     let mut wire = std::collections::HashMap::new();
     for t in CALLER_ID_TABLES {
-        let _ = spec(t).ok_or(TransitionError::Mismatch)?;
+        spec(t).ok_or(TransitionError::Mismatch)?;
         wire.insert(t, client.read_table(t)?);
     }
-    let _ = client.end_binary();
+    crate::discard::end_kxtd_session_binary(&mut client);
     Ok(caller_id_wire_digest(&wire))
 }
 

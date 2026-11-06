@@ -312,19 +312,13 @@ async fn token_b_cannot_apply_token_a_plan() {
     };
 
     let mut approver = ApiClient::connect(&sock).await.unwrap();
-    let _ = approver
-        .call_auth(
-            RequestBody::SubmitApproval {
-                params: kxprov_api::SubmitApprovalParams {
-                    plan_id: plan.plan_id.as_str().to_string(),
-                    diff_hash: plan.diff_hash.clone(),
-                    profile: Profile::Sim,
-                },
-            },
-            Some(bearer_auth(APPROVER_SECRET)),
-        )
-        .await
-        .unwrap();
+    common::submit_test_approval(
+        &mut approver,
+        plan.plan_id.as_str(),
+        plan.diff_hash.clone(),
+        Profile::Sim,
+    )
+    .await;
 
     let err = ApiClient::connect(&sock)
         .await

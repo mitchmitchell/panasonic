@@ -56,7 +56,6 @@ pub fn run_apply(
     if !sim_transport {
         return Err(ApplyError::NotSim);
     }
-    let _ = profile;
     let now = now_ms();
     let rec = plans.verify_for_apply(plan_id, diff_hash, profile, token, now)?;
     backups.require_backup_for_write(profile)?;
@@ -79,7 +78,7 @@ pub fn run_apply(
     for w in &writes {
         apply_one_write(&mut client, w)?;
     }
-    let _ = client.end_binary();
+    crate::discard::end_kxtd_session_binary(&mut client);
     Ok(writes.len())
 }
 

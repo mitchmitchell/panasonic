@@ -263,7 +263,7 @@ async fn synthetic_root_read_during_token_store_outage() {
     let path = tmp.path().join("tokens.json");
 
     let mut admin = ApiClient::connect(&sock).await.unwrap();
-    let _ = admin
+    admin
         .call_auth(
             RequestBody::PlanChange {
                 params: PlanChangeParams {

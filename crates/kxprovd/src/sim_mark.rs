@@ -77,7 +77,7 @@ impl SimMarkStore {
         }
         let mark: SimMarkFile = serde_json::from_slice(&std::fs::read(&self.path)?)?;
         if mark.build_hash != BUILD_HASH {
-            let _ = std::fs::remove_file(&self.path);
+            crate::discard::remove_stale_sim_mark_best_effort(&self.path);
             return Ok(None);
         }
         Ok(Some(mark))
@@ -102,12 +102,12 @@ impl SimMarkStore {
             return Ok(());
         }
         if self.validate_marker_metadata(&self.path).is_err() {
-            let _ = std::fs::remove_file(&self.path);
+            crate::discard::remove_stale_sim_mark_best_effort(&self.path);
             return Ok(());
         }
         let mark: SimMarkFile = serde_json::from_slice(&std::fs::read(&self.path)?)?;
         if mark.build_hash != BUILD_HASH {
-            let _ = std::fs::remove_file(&self.path);
+            crate::discard::remove_stale_sim_mark_best_effort(&self.path);
         }
         Ok(())
     }

@@ -260,7 +260,7 @@ fn six_fifo_hangs_cap_live_threads_and_fast_fail_closed() {
         store.set_reload_probe_hang_for_test(true);
         let starter = Arc::clone(&store);
         let starter_handle = std::thread::spawn(move || {
-            let _ = starter.verify_bearer(kxprovd::test_util::WRITER_SECRET, 0, Scope::Plan);
+            kxprovd::test_util::verify_bearer_driving_fifo_contention(&starter);
         });
         assert!(
             store.wait_probe_thread_started_for_test(FAST_FAIL_HANG_LIMIT),
@@ -294,7 +294,7 @@ fn six_fifo_hangs_cap_live_threads_and_fast_fail_closed() {
         store.set_reload_probe_hang_for_test(false);
         std::fs::remove_file(&path).ok();
         write_tokens(&path);
-        let _ = starter_handle.join();
+        kxprovd::test_util::join_probe_helper_thread(starter_handle);
         assert!(
             store.wait_probe_threads_exited_for_test(Duration::from_secs(10)),
             "iteration {i} probe threads did not drain"
@@ -333,7 +333,7 @@ fn five_fifo_replace_cycles_os_thread_count_bounded() {
         std::fs::remove_file(&path).ok();
         use nix::sys::stat::Mode;
         nix::unistd::mkfifo(&path, Mode::S_IRUSR | Mode::S_IWUSR).expect("mkfifo");
-        let _ = store.verify_bearer(kxprovd::test_util::WRITER_SECRET, 0, Scope::Plan);
+        kxprovd::test_util::verify_bearer_driving_fifo_contention(&store);
         let delta = probe_os_thread_count().saturating_sub(baseline);
         peak_delta = peak_delta.max(delta);
         assert!(
@@ -373,7 +373,7 @@ fn fifo_replaced_by_regular_file_via_rename_recovers_auth() {
     nix::unistd::mkfifo(&path, Mode::S_IRUSR | Mode::S_IWUSR).expect("mkfifo");
     let stress_until = Instant::now() + Duration::from_secs(3);
     while Instant::now() < stress_until {
-        let _ = store.verify_bearer(kxprovd::test_util::WRITER_SECRET, 0, Scope::Plan);
+        kxprovd::test_util::verify_bearer_driving_fifo_contention(&store);
         std::thread::sleep(Duration::from_millis(20));
     }
 
@@ -401,7 +401,7 @@ fn fifo_replaced_by_regular_file_via_unlink_create_recovers_auth() {
     nix::unistd::mkfifo(&path, Mode::S_IRUSR | Mode::S_IWUSR).expect("mkfifo");
     let stress_until = Instant::now() + Duration::from_secs(3);
     while Instant::now() < stress_until {
-        let _ = store.verify_bearer(kxprovd::test_util::WRITER_SECRET, 0, Scope::Plan);
+        kxprovd::test_util::verify_bearer_driving_fifo_contention(&store);
         std::thread::sleep(Duration::from_millis(20));
     }
 

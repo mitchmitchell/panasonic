@@ -92,7 +92,6 @@ impl Journal {
 
     /// Replay incomplete operations before serving jobs.
     pub fn replay(&self, data_dir: &Path) -> Result<(), JournalError> {
-        let backups_dir = data_dir.join("backups");
         let entries = self.load()?;
         let mut pending_backup: Option<(String, String)> = None;
         let mut pending_apply: Option<(String, String, String)> = None;
@@ -124,16 +123,15 @@ impl Journal {
         }
         if let Some((job_id, _, _)) = pending_apply {
             let locked = crate::locked::LockedStore::new(data_dir);
-            let _ = locked.set_locked(
-                "recovered incomplete apply after restart",
-                Some(&job_id),
+            crate::discard::lock_after_journal_recovered_apply(
+                &locked,
+                &job_id,
                 crate::time::now_ms(),
             );
             self.append(&JournalEntry::ApplyAbort {
                 job_id: "recovery".into(),
             })?;
         }
-        let _ = backups_dir;
         self.truncate()?;
         Ok(())
     }

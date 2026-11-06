@@ -122,7 +122,7 @@ impl BackupStore {
         for spec in TABLES.iter() {
             wire.insert(spec.id, client.read_table(spec.id)?);
         }
-        let _ = client.end_binary();
+        crate::discard::end_kxtd_session_binary(client);
         Ok(wire)
     }
 
@@ -166,9 +166,8 @@ impl BackupStore {
             let Some(old) = list.pop() else {
                 break;
             };
-            let _ = std::fs::remove_file(&old.path);
             let meta_path = self.dir.join(format!("{}.meta", old.id));
-            let _ = std::fs::remove_file(meta_path);
+            crate::discard::remove_pruned_backup_pair_best_effort(&old.path, &meta_path);
         }
         Ok(())
     }

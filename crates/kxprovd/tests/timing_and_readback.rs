@@ -48,7 +48,7 @@ fn apply_style_readback_after_each_write_all_profiles() {
                 .unwrap();
             assert_eq!(got, w.new, "readback mismatch for profile {profile:?}");
         }
-        let _ = client.end_binary();
+        kxprovd::discard::end_kxtd_session_binary(&mut client);
     }
 }
 
@@ -139,19 +139,13 @@ async fn daemon_apply_on_prod_profile_readback_via_read_fields() {
         panic!("plan");
     };
     let mut approver = ApiClient::connect(&sock).await.unwrap();
-    let _ = approver
-        .call_auth(
-            RequestBody::SubmitApproval {
-                params: kxprov_api::SubmitApprovalParams {
-                    plan_id: plan.plan_id.as_str().to_string(),
-                    diff_hash: plan.diff_hash.clone(),
-                    profile: Profile::Prod,
-                },
-            },
-            Some(common::bearer_auth(common::APPROVER_SECRET)),
-        )
-        .await
-        .unwrap();
+    common::submit_test_approval(
+        &mut approver,
+        plan.plan_id.as_str(),
+        plan.diff_hash.clone(),
+        Profile::Prod,
+    )
+    .await;
     let ResponseResult::BackupNow(_) = gw
         .call_auth(
             RequestBody::BackupNow,
