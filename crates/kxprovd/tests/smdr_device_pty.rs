@@ -573,6 +573,7 @@ fn smdr_recv_under_a_held_lease_waits_out_its_timeout() {
     lease.release().unwrap();
 }
 
+#[cfg(feature = "test-util")]
 #[test]
 fn clearing_the_smdr_slot_allows_listen_only_reopen_on_the_same_path() {
     let mut pty = pty();
