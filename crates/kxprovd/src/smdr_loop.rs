@@ -338,19 +338,19 @@ mod tests {
         use nix::unistd::ttyname;
         use std::io::Write;
 
-        fn pty() -> (std::fs::File, std::path::PathBuf) {
-            let p = openpty(None, None).unwrap();
-            let path = ttyname(&p.slave).unwrap();
-            let mut t = termios::tcgetattr(&p.slave).unwrap();
+        fn pty() -> Result<(std::fs::File, std::path::PathBuf), nix::errno::Errno> {
+            let p = openpty(None, None)?;
+            let path = ttyname(&p.slave)?;
+            let mut t = termios::tcgetattr(&p.slave)?;
             t.input_flags |= InputFlags::IXON | InputFlags::IXOFF | InputFlags::IXANY;
             t.local_flags |= LocalFlags::ECHO | LocalFlags::ICANON | LocalFlags::ECHOE;
-            termios::tcsetattr(&p.slave, SetArg::TCSANOW, &t).unwrap();
-            (std::fs::File::from(p.master), path)
+            termios::tcsetattr(&p.slave, SetArg::TCSANOW, &t)?;
+            Ok((std::fs::File::from(p.master), path))
         }
 
         #[test]
         fn detach_clears_the_arbiter_slot_for_listen_only_reopen() {
-            let (mut master, path) = pty();
+            let (mut master, path) = pty().expect("serial reopen regression PTY fixture");
             let journal = LeaseJournal::new(
                 std::env::temp_dir()
                     .join(format!("kxprovd-smdr-reopen-{}.jsonl", std::process::id())),
