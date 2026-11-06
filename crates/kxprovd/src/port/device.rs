@@ -448,6 +448,13 @@ impl SmdrDeviceHandle {
         now: std::time::Instant,
         timeout_ms: u64,
     ) -> Result<Vec<u8>, TransportError> {
+        #[cfg(all(feature = "test-util", target_os = "linux"))]
+        if crate::test_util::take_serial_force_link_down() {
+            return Err(TransportError::LinkDown(kxtd1232::LinkDownError {
+                detail: "armed serial link-down for regression tests".into(),
+                bytes_sent: None,
+            }));
+        }
         let deadline = crate::deadline::recv_deadline(now, timeout_ms);
         loop {
             let remaining = crate::deadline::remaining(deadline, std::time::Instant::now());

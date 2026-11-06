@@ -440,6 +440,8 @@ impl<T: LeaseLine> PortManager<T> {
             .device
             .lock()
             .unwrap_or_else(recover_from_poison) = None;
+        #[cfg(feature = "test-util")]
+        crate::test_util::record_smdr_device_clear();
     }
 
     #[cfg(target_os = "linux")]

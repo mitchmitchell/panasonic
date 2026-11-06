@@ -1,6 +1,6 @@
 use kxprov_api::{hash_bearer_secret, Scope, TokenEntry, TokenId, TokensFile};
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Mutex, OnceLock, PoisonError};
 use tokio::sync::Notify;
 
@@ -11,6 +11,12 @@ pub const COMM_SECRET: &str = "test-comm-secret";
 pub const GATEWAY_SECRET: &str = "test-gateway-secret";
 
 static PLAN_CHANGE_HOLD: AtomicBool = AtomicBool::new(false);
+static SMDR_INGEST_FAIL_REMAINING: AtomicU32 = AtomicU32::new(0);
+static SMDR_INGEST_FAIL_CONSUMED: AtomicU32 = AtomicU32::new(0);
+#[cfg(all(target_os = "linux", feature = "test-util"))]
+static SMDR_DEVICE_CLEAR_COUNT: AtomicU32 = AtomicU32::new(0);
+#[cfg(all(target_os = "linux", feature = "test-util"))]
+static SERIAL_FORCE_LINK_DOWN: AtomicBool = AtomicBool::new(false);
 static PLAN_CHANGE_HOLD_NOTIFY: OnceLock<Notify> = OnceLock::new();
 
 fn plan_change_hold_notify() -> &'static Notify {
@@ -182,4 +188,58 @@ pub fn sim_open_holders() -> Vec<String> {
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
         .clone()
+}
+
+/// Forces the next `n` SMDR store ingests in the daemon reader to fail (#119 STOREBACKOFF).
+pub fn arm_smdr_ingest_failures(n: u32) {
+    SMDR_INGEST_FAIL_CONSUMED.store(0, Ordering::SeqCst);
+    SMDR_INGEST_FAIL_REMAINING.store(n, Ordering::SeqCst);
+}
+
+pub fn smdr_ingest_failures_consumed() -> u32 {
+    SMDR_INGEST_FAIL_CONSUMED.load(Ordering::SeqCst)
+}
+
+#[cfg(feature = "test-util")]
+pub(crate) fn take_armed_smdr_ingest_failure() -> bool {
+    loop {
+        let cur = SMDR_INGEST_FAIL_REMAINING.load(Ordering::SeqCst);
+        if cur == 0 {
+            return false;
+        }
+        if SMDR_INGEST_FAIL_REMAINING
+            .compare_exchange(cur, cur - 1, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+        {
+            SMDR_INGEST_FAIL_CONSUMED.fetch_add(1, Ordering::SeqCst);
+            return true;
+        }
+    }
+}
+
+#[cfg(all(target_os = "linux", feature = "test-util"))]
+pub fn reset_smdr_device_clear_count() {
+    SMDR_DEVICE_CLEAR_COUNT.store(0, Ordering::SeqCst);
+}
+
+#[cfg(all(target_os = "linux", feature = "test-util"))]
+pub fn smdr_device_clear_count() -> u32 {
+    SMDR_DEVICE_CLEAR_COUNT.load(Ordering::SeqCst)
+}
+
+#[cfg(all(target_os = "linux", feature = "test-util"))]
+pub(crate) fn record_smdr_device_clear() {
+    SMDR_DEVICE_CLEAR_COUNT.fetch_add(1, Ordering::SeqCst);
+}
+
+#[cfg(all(target_os = "linux", feature = "test-util"))]
+pub fn arm_serial_force_link_down() {
+    SERIAL_FORCE_LINK_DOWN.store(true, Ordering::SeqCst);
+}
+
+#[cfg(all(target_os = "linux", feature = "test-util"))]
+pub(crate) fn take_serial_force_link_down() -> bool {
+    SERIAL_FORCE_LINK_DOWN
+        .compare_exchange(true, false, Ordering::SeqCst, Ordering::SeqCst)
+        .is_ok()
 }

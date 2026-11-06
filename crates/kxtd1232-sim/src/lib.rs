@@ -676,6 +676,19 @@ impl SimTransport {
         self.sim.lock().expect("sim pbx lock")
     }
 
+    /// Clears a dropped link without enqueueing DTR or greeting bytes (listen-only SMDR).
+    pub fn restore_link_quietly(&mut self) {
+        self.link_down = false;
+        self.drop_link_after_write = false;
+        self.fail_write_send_after = None;
+        self.fail_send_after = None;
+        self.send_timeout_next = false;
+        #[cfg(feature = "faults")]
+        {
+            self.link_drop_pending = false;
+        }
+    }
+
     /// Bring a dropped link back: DTR cycles and the PBX greets again, ready for login.
     pub fn reconnect(&mut self) {
         self.link_down = false;

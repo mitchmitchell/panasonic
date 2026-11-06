@@ -45,35 +45,6 @@ fn header_mismatch_active(snap: &LiveSnapshot) -> bool {
     })
 }
 
-#[cfg(any(test, feature = "test-util"))]
-fn block_smdr_raw_journals(smdr_dir: &std::path::Path) {
-    use kxprovd::smdr_store::{RAW_JOURNAL_PREFIX, RAW_JOURNAL_SUFFIX};
-
-    for entry in std::fs::read_dir(smdr_dir).expect("smdr dir") {
-        let path = entry.expect("entry").path();
-        let name = path.file_name().expect("name").to_string_lossy();
-        if !name.starts_with(RAW_JOURNAL_PREFIX) || !name.ends_with(RAW_JOURNAL_SUFFIX) {
-            continue;
-        }
-        if path.is_file() {
-            std::fs::remove_file(&path).expect("remove journal file");
-        }
-        if !path.exists() {
-            std::fs::create_dir(&path).expect("journal path is a directory so append fails");
-        }
-    }
-    let today = smdr_dir.join(format!(
-        "{RAW_JOURNAL_PREFIX}{}{RAW_JOURNAL_SUFFIX}",
-        chrono::Utc::now().date_naive()
-    ));
-    if today.is_file() {
-        std::fs::remove_file(&today).expect("remove today's journal file");
-    }
-    if !today.exists() {
-        std::fs::create_dir(&today).expect("block today's journal path");
-    }
-}
-
 fn wait_for_stable_call_count(db: &std::path::Path, timeout: Duration) -> i64 {
     let deadline = Instant::now() + timeout;
     let mut last = -1i64;
@@ -117,6 +88,30 @@ struct SimHarness {
     live: Arc<SmdrLive>,
     port: Arc<kxprovd::port::DeviceArbiter>,
     transport: Arc<Mutex<SimTransport>>,
+}
+
+fn sim_listen_only_harness(silence_after: Duration) -> SimHarness {
+    let tmp = tempfile::tempdir().unwrap();
+    let socket = tmp.path().join("smdr-loop.sock");
+    let mut cfg = Config::sim_test(tmp.path().to_path_buf(), socket, 1000);
+    std::fs::create_dir_all(cfg.data_dir.join("backups")).unwrap();
+    cfg.smdr_health = HealthConfig {
+        silence_after,
+        ..HealthConfig::default()
+    };
+    let pbx = cfg.sim_pbx.clone().expect("sim pbx");
+    let transport = Arc::new(Mutex::new(SimTransport::listen_on_shared(Arc::clone(&pbx))));
+    cfg.sim_smdr_transport = Some(Arc::clone(&transport));
+    let live = Arc::new(SmdrLive::new());
+    let port = device_arbiter(&cfg);
+    let task = SmdrReaderTask::spawn(cfg, Arc::clone(&port), Arc::clone(&live));
+    SimHarness {
+        _tmp: tmp,
+        _task: task,
+        live,
+        port,
+        transport,
+    }
 }
 
 fn sim_harness(silence_after: Duration) -> SimHarness {
@@ -184,13 +179,22 @@ fn sim_smdr_reader_loop_updates_live() {
 }
 
 #[test]
-fn sim_link_down_clears_on_idle_after_reconnect_without_new_bytes() {
-    let h = sim_harness(Duration::from_secs(86_400));
+fn sim_link_down_clears_on_idle_after_quiet_restore_without_new_bytes() {
+    let h = sim_listen_only_harness(Duration::from_secs(86_400));
     wait_for(&h.live, Duration::from_secs(3), |s| s.running);
+    assert!(
+        h.live.snapshot().last_byte_at.is_none(),
+        "test starts with no bytes on the wire"
+    );
+
     h.transport.lock().unwrap().drop_link_now();
     wait_for(&h.live, Duration::from_secs(3), |s| s.link_down);
-    h.transport.lock().unwrap().reconnect();
+    h.transport.lock().unwrap().restore_link_quietly();
     wait_for(&h.live, Duration::from_secs(3), |s| !s.link_down);
+    assert!(
+        h.live.snapshot().last_byte_at.is_none(),
+        "idle clear must not follow new inbound bytes"
+    );
 }
 
 #[cfg(target_os = "linux")]
@@ -213,20 +217,26 @@ fn sim_store_ingest_failure_does_not_spin_cpu() {
     let count_before = wait_for_stable_call_count(&db, Duration::from_secs(3));
     assert_eq!(count_before, 1, "outgoing fixture should store one call");
 
-    block_smdr_raw_journals(&smdr_dir);
-
+    kxprovd::test_util::arm_smdr_ingest_failures(64);
     h.transport
         .lock()
         .unwrap()
         .inject_inbound(kxprovd::test_util::synthetic_smdr_bytes(43, 1));
-    std::thread::sleep(Duration::from_millis(400));
+    let fail_deadline = Instant::now() + Duration::from_secs(3);
+    while kxprovd::test_util::smdr_ingest_failures_consumed() < 1 {
+        assert!(
+            Instant::now() < fail_deadline,
+            "reader never hit an armed store ingest failure"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
     let count_after: i64 = rusqlite::Connection::open(&db)
         .expect("db")
         .query_row("SELECT COUNT(*) FROM smdr_call", [], |row| row.get(0))
         .expect("count");
     assert_eq!(
         count_after, count_before,
-        "store ingest should fail while the journal path is blocked"
+        "armed ingest failures should not add calls"
     );
 
     let tid = h._task.reader_linux_tid();
@@ -282,6 +292,35 @@ fn serial_missing_device_keeps_link_down_while_reattach_fails() {
         );
         std::thread::sleep(Duration::from_millis(50));
     }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn serial_missing_device_reattach_backoff_does_not_spin_cpu() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let socket = tmp.path().join("smdr-serial-backoff.sock");
+    let mut cfg = Config::sim_test(tmp.path().to_path_buf(), socket, 1004);
+    std::fs::create_dir_all(cfg.data_dir.join("backups")).expect("backups");
+    cfg.transport = TransportKind::Serial;
+    cfg.sim_pbx = None;
+    cfg.serial_device = tmp.path().join("missing-smdr-device-backoff");
+    let live = Arc::new(SmdrLive::new());
+    let port = device_arbiter(&cfg);
+    let task = SmdrReaderTask::spawn(cfg, Arc::clone(&port), Arc::clone(&live));
+    wait_for(&live, Duration::from_secs(3), |s| s.running);
+    wait_for(&live, Duration::from_secs(3), |s| s.link_down);
+    let tid = task.reader_linux_tid();
+    assert_ne!(tid, 0, "reader thread id not published");
+    let cpu0 = task_cpu_time(tid);
+    let wall0 = Instant::now();
+    std::thread::sleep(Duration::from_millis(800));
+    let cpu1 = task_cpu_time(tid);
+    let wall = wall0.elapsed();
+    let cpu_delta = cpu1.saturating_sub(cpu0);
+    assert!(
+        cpu_delta < wall / 3,
+        "failed serial reattach used {cpu_delta:?} CPU in {wall:?} wall"
+    );
 }
 
 #[cfg(target_os = "linux")]
@@ -366,6 +405,53 @@ mod linux {
         t.local_flags |= LocalFlags::ECHO | LocalFlags::ICANON | LocalFlags::ECHOE;
         termios::tcsetattr(&p.slave, SetArg::TCSANOW, &t).unwrap();
         (std::fs::File::from(p.master), p.slave, path)
+    }
+
+    fn serial_pty_reader(
+        peer_uid: u32,
+    ) -> (
+        tempfile::TempDir,
+        SmdrReaderTask,
+        Arc<SmdrLive>,
+        Arc<kxprovd::port::DeviceArbiter>,
+        std::path::PathBuf,
+        Option<std::fs::File>,
+    ) {
+        use std::io::Write;
+
+        let tmp = tempfile::tempdir().expect("tmp");
+        let socket = tmp.path().join("smdr-serial-pty.sock");
+        let mut cfg = Config::sim_test(tmp.path().to_path_buf(), socket, peer_uid);
+        std::fs::create_dir_all(cfg.data_dir.join("backups")).expect("backups");
+        let pty = pty();
+        cfg.transport = TransportKind::Serial;
+        cfg.sim_pbx = None;
+        cfg.serial_device = pty.2.clone();
+        let live = Arc::new(SmdrLive::new());
+        let port = device_arbiter(&cfg);
+        let task = SmdrReaderTask::spawn(cfg, Arc::clone(&port), Arc::clone(&live));
+        let mut master = pty.0;
+        wait_for(&live, Duration::from_secs(3), |s| s.running);
+        master
+            .write_all(b"10/30/26 05:48PM 101\r\n")
+            .expect("seed line");
+        wait_for(&live, Duration::from_secs(3), |s| s.last_byte_at.is_some());
+        (tmp, task, live, port, pty.2, Some(master))
+    }
+
+    #[test]
+    fn serial_link_down_detaches_device_slot() {
+        kxprovd::test_util::reset_smdr_device_clear_count();
+        let (_tmp, _task, _live, _port, _path, _master) = serial_pty_reader(1005);
+        kxprovd::test_util::arm_serial_force_link_down();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while kxprovd::test_util::smdr_device_clear_count() < 1 {
+            assert!(
+                Instant::now() < deadline,
+                "LinkDown should detach and clear the arbiter SMDR slot"
+            );
+            std::thread::sleep(Duration::from_millis(25));
+        }
     }
 
     #[test]
