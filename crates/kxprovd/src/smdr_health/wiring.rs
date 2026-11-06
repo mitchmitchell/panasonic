@@ -44,8 +44,7 @@ impl<S: SmdrSource> ByteTap<S> {
         (Self { inner, count }, counter)
     }
 
-    #[cfg(feature = "test-util")]
-    pub fn into_inner(self) -> S {
+    pub(crate) fn into_inner(self) -> S {
         self.inner
     }
 }
@@ -107,6 +106,10 @@ impl HealthBoard {
 
     pub(crate) fn byte_tap_has_pending(&self) -> bool {
         self.bytes.has_pending()
+    }
+
+    pub(crate) fn replace_byte_tap(&mut self, bytes: ByteCounter) {
+        self.bytes = bytes;
     }
 
     /// One timer tick: folds in new bytes, then re-evaluates. One timer per daemon drives this.

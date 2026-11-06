@@ -13,7 +13,7 @@ mod wiring;
 #[cfg(feature = "test-util")]
 pub use wiring::{observations_from_reader, ByteCounter, ByteTap, HealthBoard};
 #[cfg(not(feature = "test-util"))]
-pub(crate) use wiring::{observations_from_reader, ByteTap, HealthBoard};
+pub(crate) use wiring::{observations_from_reader, ByteCounter, ByteTap, HealthBoard};
 
 /// Parsed thresholds, built by [`crate::config::SmdrConfig::health`]. Both durations are non-zero.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -136,6 +136,14 @@ pub(crate) fn open_exclusive(
     Ok(port)
 }
 
+impl Drop for SmdrDevice {
+    fn drop(&mut self) {
+        if let Err(e) = rustix::termios::ioctl_tiocnxcl(&*self.file) {
+            tracing::error!(error = %e, "clearing TIOCEXCL on the SMDR close failed");
+        }
+    }
+}
+
 impl SmdrDevice {
     pub(crate) fn open(path: &Path, options: SmdrLineOptions) -> Result<Self, DeviceError> {
         match open_exclusive(path, Access::ReadOnly, Exclusion::Own, options)? {
@@ -440,6 +448,13 @@ impl SmdrDeviceHandle {
         now: std::time::Instant,
         timeout_ms: u64,
     ) -> Result<Vec<u8>, TransportError> {
+        #[cfg(all(feature = "test-util", target_os = "linux"))]
+        if crate::test_util::take_serial_force_link_down() {
+            return Err(TransportError::LinkDown(kxtd1232::LinkDownError {
+                detail: "armed serial link-down for regression tests".into(),
+                bytes_sent: None,
+            }));
+        }
         let deadline = crate::deadline::recv_deadline(now, timeout_ms);
         loop {
             let remaining = crate::deadline::remaining(deadline, std::time::Instant::now());

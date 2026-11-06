@@ -647,6 +647,23 @@ impl SimTransport {
         }
     }
 
+    /// Listen-only attach for a shared PBX: no session reset and no DTR greeting.
+    pub fn listen_on_shared(sim: Arc<Mutex<SimPbx>>) -> Self {
+        Self {
+            sim,
+            now: 0,
+            queue: VecDeque::new(),
+            sent: Vec::new(),
+            drop_link_after_write: false,
+            fail_write_send_after: None,
+            fail_send_after: None,
+            send_timeout_next: false,
+            link_down: false,
+            #[cfg(feature = "faults")]
+            link_drop_pending: false,
+        }
+    }
+
     pub fn shared_pbx(&self) -> Arc<Mutex<SimPbx>> {
         Arc::clone(&self.sim)
     }
@@ -657,6 +674,19 @@ impl SimTransport {
 
     pub fn sim_mut(&mut self) -> MutexGuard<'_, SimPbx> {
         self.sim.lock().expect("sim pbx lock")
+    }
+
+    /// Clears a dropped link without enqueueing DTR or greeting bytes (listen-only SMDR).
+    pub fn restore_link_quietly(&mut self) {
+        self.link_down = false;
+        self.drop_link_after_write = false;
+        self.fail_write_send_after = None;
+        self.fail_send_after = None;
+        self.send_timeout_next = false;
+        #[cfg(feature = "faults")]
+        {
+            self.link_drop_pending = false;
+        }
     }
 
     /// Bring a dropped link back: DTR cycles and the PBX greets again, ready for login.

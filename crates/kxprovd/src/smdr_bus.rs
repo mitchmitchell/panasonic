@@ -161,6 +161,14 @@ impl SmdrSink for PublishingSink {
         line: SmdrLine,
         rx: DateTime<Utc>,
     ) -> Result<IngestOutcome, SmdrStoreError> {
+        #[cfg(feature = "test-util")]
+        if crate::test_util::take_armed_smdr_ingest_failure() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "armed smdr ingest failure for regression tests",
+            )
+            .into());
+        }
         let outcome = self.store.ingest(line, rx)?;
         if outcome == IngestOutcome::Stored {
             match calls_after(&self.db, self.last_id, QUERY_LIMIT_MAX) {

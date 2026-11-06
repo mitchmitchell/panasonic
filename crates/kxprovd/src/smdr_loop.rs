@@ -5,13 +5,15 @@ use crate::port::device::{self, SmdrLineOptions};
 use crate::port::{DeviceArbiter, PortMode};
 use crate::smdr_bus::{PublishingSink, SmdrLive};
 use crate::smdr_health::{
-    observations_from_reader, ByteTap, HealthBoard, ModemStatusError, Observation, PortState,
+    observations_from_reader, ByteCounter, ByteTap, HealthBoard, ModemStatusError, Observation,
+    PortState,
 };
 use crate::smdr_reader::{ReaderError, ReaderEvent, ReceiveOnly, SmdrReader};
 use crate::smdr_store::{backup_sets, SmdrStore};
 use crate::transport::SimTransportBridge;
 use chrono::Utc;
 use kxtd1232::smdr::DateOrder;
+use kxtd1232::{LinkDownError, TransportError};
 #[cfg(feature = "test-util")]
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -99,7 +101,7 @@ fn run(config: Config, port: Arc<DeviceArbiter>, live: Arc<SmdrLive>, stop: Arc<
 
     enum Source {
         #[cfg(target_os = "linux")]
-        Device(SmdrReader<ByteTap<device::SmdrDeviceHandle>>),
+        Device(Option<SmdrReader<ByteTap<device::SmdrDeviceHandle>>>),
         Sim(SmdrReader<ByteTap<ReceiveOnly<SimTransportBridge>>>),
     }
 
@@ -112,22 +114,17 @@ fn run(config: Config, port: Arc<DeviceArbiter>, live: Arc<SmdrLive>, stop: Arc<
             }
             #[cfg(target_os = "linux")]
             {
-                let handle = match port
-                    .open_smdr_device(&config.serial_device, SmdrLineOptions::default())
-                {
-                    Ok(h) => h,
-                    Err(e) => {
-                        tracing::error!(
-                            device = %config.serial_device.display(),
-                            error = %e,
-                            "smdr device open failed; reader not started"
-                        );
-                        return;
-                    }
+                let (device, board) = match open_serial_reader(&port, &config.serial_device) {
+                    Some((reader, bytes)) => (
+                        Some(reader),
+                        HealthBoard::new(health_cfg, Arc::clone(&live), bytes),
+                    ),
+                    None => (
+                        None,
+                        HealthBoard::new(health_cfg, Arc::clone(&live), ByteCounter::default()),
+                    ),
                 };
-                let (tap, bytes) = ByteTap::new(handle);
-                let board = HealthBoard::new(health_cfg, Arc::clone(&live), bytes);
-                (Source::Device(SmdrReader::new(tap)), board)
+                (Source::Device(device), board)
             }
         }
         TransportKind::Sim => {
@@ -139,7 +136,7 @@ fn run(config: Config, port: Arc<DeviceArbiter>, live: Arc<SmdrLive>, stop: Arc<
                     tracing::error!("sim transport missing sim_pbx; smdr reader not started");
                     return;
                 };
-                SimTransportBridge::new(pbx)
+                SimTransportBridge::attach_listen_only(pbx)
             };
             #[cfg(not(feature = "test-util"))]
             let bridge = {
@@ -147,7 +144,7 @@ fn run(config: Config, port: Arc<DeviceArbiter>, live: Arc<SmdrLive>, stop: Arc<
                     tracing::error!("sim transport missing sim_pbx; smdr reader not started");
                     return;
                 };
-                SimTransportBridge::new(pbx)
+                SimTransportBridge::attach_listen_only(pbx)
             };
             let (tap, bytes) = ByteTap::new(ReceiveOnly::new(bridge));
             let board = HealthBoard::new(health_cfg, Arc::clone(&live), bytes);
@@ -177,15 +174,22 @@ fn run(config: Config, port: Arc<DeviceArbiter>, live: Arc<SmdrLive>, stop: Arc<
 
         let poll_result = match &mut reader {
             #[cfg(target_os = "linux")]
-            Source::Device(r) => r.poll_once(&mut sink, timeout_ms, wall),
+            Source::Device(slot) => match slot {
+                Some(r) => r.poll_once(&mut sink, timeout_ms, wall),
+                None => try_attach_serial_reader(
+                    &port,
+                    &config.serial_device,
+                    slot,
+                    &mut board,
+                    timeout_ms,
+                ),
+            },
             Source::Sim(r) => r.poll_once(&mut sink, timeout_ms, wall),
         };
 
         match poll_result {
             Ok(events) => {
-                if events != [ReaderEvent::Idle] {
-                    live.set_link_down(false);
-                }
+                live.set_link_down(false);
                 if board.byte_tap_has_pending() {
                     live.note_bytes(wall());
                 }
@@ -197,9 +201,18 @@ fn run(config: Config, port: Arc<DeviceArbiter>, live: Arc<SmdrLive>, stop: Arc<
                     std::thread::sleep(Duration::from_millis(timeout_ms));
                 }
             }
-            Err(ReaderError::LinkDown(_)) => live.set_link_down(true),
+            Err(ReaderError::LinkDown(_)) => {
+                live.set_link_down(true);
+                #[cfg(target_os = "linux")]
+                if let Source::Device(slot) = &mut reader {
+                    if let Some(r) = slot.take() {
+                        detach_serial_reader(&port, r);
+                    }
+                }
+            }
             Err(ReaderError::Store(e)) => {
                 tracing::warn!(error = %e, "smdr store ingest failed; retrying");
+                std::thread::sleep(Duration::from_millis(timeout_ms));
             }
         }
 
@@ -222,6 +235,60 @@ fn run(config: Config, port: Arc<DeviceArbiter>, live: Arc<SmdrLive>, stop: Arc<
     }
 
     live.set_running(false);
+}
+
+#[cfg(target_os = "linux")]
+fn open_serial_reader(
+    port: &DeviceArbiter,
+    path: &std::path::Path,
+) -> Option<(SmdrReader<ByteTap<device::SmdrDeviceHandle>>, ByteCounter)> {
+    let handle = port
+        .open_smdr_device(path, SmdrLineOptions::default())
+        .map_err(|e| {
+            tracing::warn!(
+                device = %path.display(),
+                error = %e,
+                "smdr device open failed; will retry"
+            );
+        })
+        .ok()?;
+    let (tap, bytes) = ByteTap::new(handle);
+    Some((SmdrReader::new(tap), bytes))
+}
+
+#[cfg(target_os = "linux")]
+fn detach_serial_reader(
+    port: &DeviceArbiter,
+    reader: SmdrReader<ByteTap<device::SmdrDeviceHandle>>,
+) {
+    drop(reader.into_source().into_inner());
+    port.clear_smdr_device();
+}
+
+#[cfg(target_os = "linux")]
+fn try_attach_serial_reader(
+    port: &DeviceArbiter,
+    path: &std::path::Path,
+    slot: &mut Option<SmdrReader<ByteTap<device::SmdrDeviceHandle>>>,
+    board: &mut HealthBoard,
+    wait_ms: u64,
+) -> Result<Vec<ReaderEvent>, ReaderError> {
+    if let Some((reader, bytes)) = open_serial_reader(port, path) {
+        board.replace_byte_tap(bytes);
+        *slot = Some(reader);
+        Ok(vec![ReaderEvent::Idle])
+    } else {
+        std::thread::sleep(Duration::from_millis(wait_ms));
+        Err(ReaderError::LinkDown(TransportError::LinkDown(
+            LinkDownError {
+                detail: format!(
+                    "serial smdr device {} not available for reattach",
+                    path.display()
+                ),
+                bytes_sent: None,
+            },
+        )))
+    }
 }
 
 fn arbiter_port_state(port: &DeviceArbiter) -> PortState {
@@ -261,6 +328,53 @@ mod tests {
         match modem_status_observation(Err(err)) {
             Observation::ModemStatus(Err(e)) => assert_eq!(e.kind, std::io::ErrorKind::Other),
             other => panic!("expected modem error observation, got {other:?}"),
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    mod serial_reopen {
+        use super::*;
+        use crate::port::device::SmdrLineOptions;
+        use crate::port::journal::LeaseJournal;
+        use crate::port::DeviceArbiter;
+        use crate::smdr_reader::{SmdrReader, SmdrSource};
+        use nix::pty::openpty;
+        use nix::sys::termios::{self, InputFlags, LocalFlags, SetArg};
+        use nix::unistd::ttyname;
+        use std::io::Write;
+
+        fn pty() -> Result<(std::fs::File, std::path::PathBuf), nix::errno::Errno> {
+            let p = openpty(None, None)?;
+            let path = ttyname(&p.slave)?;
+            let mut t = termios::tcgetattr(&p.slave)?;
+            t.input_flags |= InputFlags::IXON | InputFlags::IXOFF | InputFlags::IXANY;
+            t.local_flags |= LocalFlags::ECHO | LocalFlags::ICANON | LocalFlags::ECHOE;
+            termios::tcsetattr(&p.slave, SetArg::TCSANOW, &t)?;
+            Ok((std::fs::File::from(p.master), path))
+        }
+
+        #[test]
+        fn detach_clears_the_arbiter_slot_for_listen_only_reopen() {
+            let (mut master, path) = pty().expect("serial reopen regression PTY fixture");
+            let journal = LeaseJournal::new(
+                std::env::temp_dir()
+                    .join(format!("kxprovd-smdr-reopen-{}.jsonl", std::process::id())),
+            );
+            let port = DeviceArbiter::new((), journal, 1);
+            let (tap, _bytes) = ByteTap::new(
+                port.open_smdr_device(&path, SmdrLineOptions::default())
+                    .expect("first open"),
+            );
+            let reader = SmdrReader::new(tap);
+            detach_serial_reader(&port, reader);
+            let mut reopened = port
+                .open_smdr_device(&path, SmdrLineOptions::default())
+                .expect("reopen after detach");
+            master
+                .write_all(b"10/30/26 05:48PM 101\r\n")
+                .expect("write");
+            let got = reopened.recv(1000).expect("read after reopen");
+            assert!(got.starts_with(b"10/30/26"), "{got:?}");
         }
     }
 }
